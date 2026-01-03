@@ -1,14 +1,5 @@
 # Sonorus - AI Conversations
 
----
-
-## Brief Description (Tagline)
-Talk to any named character in Hogwarts Legacy with their original voice. NPCs are context-aware, can see what you see, and converse with each other. Completely free with recommended providers.
-
----
-
-## Detailed Description
-
 ### About Sonorus
 
 Sonorus lets you have real conversations with any named character in Hogwarts Legacy. Using AI, NPCs respond dynamically to what you say, where you are, and what's happening around you - all with their original voices and synchronized lip movements.
