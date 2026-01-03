@@ -1,0 +1,17 @@
+requests
+python-dotenv
+numpy
+pillow
+keyboard
+pywin32
+sounddevice
+flask>=3.1.2,<4.0.0
+mss==10.1.0
+pyperclip==1.11.0
+pynput==1.8.1
+PyOpenAL==0.7.11a1
+gruut==2.4.0
+openai>=2.14.0,<3.0.0
+deepgram-sdk>=5.3.0,<6.0.0
+elevenlabs>=2.27.0,<3.0.0
+google-genai

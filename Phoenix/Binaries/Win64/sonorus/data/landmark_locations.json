@@ -1,0 +1,604 @@
+{
+  "landmarks": [
+    {
+      "id": "FT_Hogsmeade_North",
+      "name": "Hogsmeade North",
+      "x": 395774.19,
+      "y": -519976.31,
+      "z": -82071.5,
+      "world": "Hogsmeade"
+    },
+    {
+      "id": "FT_Hogsmeade_South",
+      "name": "Hogsmeade South",
+      "x": 390359.62,
+      "y": -512356.34,
+      "z": -83364.73,
+      "world": "Hogsmeade"
+    },
+    {
+      "id": "FT_Hogsmeade_West",
+      "name": "Hogsmeade West",
+      "x": 383437.06,
+      "y": -516064.59,
+      "z": -83015.44,
+      "world": "Hogsmeade"
+    },
+    {
+      "id": "M_FT_OLI_3Broomsticks",
+      "name": "Three Broomsticks",
+      "x": 388944.625,
+      "y": -514514.625,
+      "z": -83260.55,
+      "world": "Hogsmeade"
+    },
+    {
+      "id": "FT_FGM_01_GRYFF_FT_Graveyard",
+      "name": "Graveyard",
+      "x": 385280.88,
+      "y": -522178.5,
+      "z": -82073.32,
+      "world": "Hogsmeade"
+    },
+    {
+      "id": "FT_HW_AstronomyTower",
+      "name": "Astronomy Tower",
+      "x": 348542.12,
+      "y": -458871.62,
+      "z": -78695.0,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_BellTowerCourtyard",
+      "name": "Bell Tower Courtyard",
+      "x": 348077.69,
+      "y": -469075.09,
+      "z": -86294.48,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_Boathouse",
+      "name": "Boathouse",
+      "x": 374707.72,
+      "y": -469698.0,
+      "z": -89700.0,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_CentralTower",
+      "name": "Central Tower",
+      "x": 356421.28,
+      "y": -464949.25,
+      "z": -84617.0,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_CharmsClass",
+      "name": "Charms Classroom",
+      "x": 348906.25,
+      "y": -458963.19,
+      "z": -81899.0,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_ClockTowerCourtyard",
+      "name": "Clock Tower Courtyard",
+      "x": 355041.97,
+      "y": -446768.66,
+      "z": -82896.81,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_DADATower",
+      "name": "DADA Tower",
+      "x": 352126.94,
+      "y": -459764.56,
+      "z": -83596.13,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_DadaClass",
+      "name": "DADA Classroom",
+      "x": 350761.28,
+      "y": -455944.53,
+      "z": -84299.0,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_DivinationClass",
+      "name": "Divination Classroom",
+      "x": 358911.88,
+      "y": -466492.09,
+      "z": -82184.0,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_FacultyTower",
+      "name": "Faculty Tower",
+      "x": 362098.38,
+      "y": -451809.66,
+      "z": -81499.0,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_FigClass",
+      "name": "Professor Fig's Classroom",
+      "x": 350662.62,
+      "y": -458256.53,
+      "z": -82901.0,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_FlyingClass",
+      "name": "Flying Class Lawn",
+      "x": 342915.5,
+      "y": -464011.62,
+      "z": -86353.0,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_GrandStaircaseTower",
+      "name": "Grand Staircase Tower",
+      "x": 362867.41,
+      "y": -456246.34,
+      "z": -77997.9,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_Grandstaircase",
+      "name": "Grand Staircase",
+      "x": 364618.09,
+      "y": -454344.78,
+      "z": -82190.32,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_GreatHall",
+      "name": "Great Hall",
+      "x": 367954.72,
+      "y": -452212.09,
+      "z": -81992.0,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_Greenhouses",
+      "name": "Greenhouses",
+      "x": 355836.28,
+      "y": -472170.88,
+      "z": -86491.0,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_GryffindorCommonRoom",
+      "name": "Gryffindor Common Room",
+      "x": 355039.03,
+      "y": -451244.44,
+      "z": -80699.0,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_Haven",
+      "name": "The Map Chamber",
+      "x": 349324.06,
+      "y": -457808.78,
+      "z": -90291.0,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "M_FT_FGB_HavenRoom",
+      "name": "Haven Room",
+      "x": 343840.41,
+      "y": -442793.5,
+      "z": -91968.7,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_HospitalWing",
+      "name": "Hospital Wing",
+      "x": 357217.12,
+      "y": -449001.59,
+      "z": -77697.0,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_HufflepuffCommonRoom",
+      "name": "Hufflepuff Common Room",
+      "x": 363762.0,
+      "y": -448168.78,
+      "z": -83749.0,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_Library",
+      "name": "Library",
+      "x": 348824.94,
+      "y": -468315.59,
+      "z": -85695.0,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_LowerGrandstaircase",
+      "name": "Lower Grand Staircase",
+      "x": 360460.94,
+      "y": -454055.19,
+      "z": -84297.0,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_MagicalCreatures",
+      "name": "Beasts Classroom",
+      "x": 340865.5,
+      "y": -457313.06,
+      "z": -85571.16,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_NorthExitHogwarts",
+      "name": "North Exit",
+      "x": 337747.25,
+      "y": -474499.78,
+      "z": -86199.67,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_NorthTower",
+      "name": "North Tower",
+      "x": 344618.84,
+      "y": -461697.31,
+      "z": -84696.0,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_PotionsClass",
+      "name": "Potions Classroom",
+      "x": 354553.62,
+      "y": -463575.56,
+      "z": -85646.0,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_QuadCourtyard",
+      "name": "Quad Courtyard",
+      "x": 359935.53,
+      "y": -456194.91,
+      "z": -83298.0,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_RavenclawCommonRoom",
+      "name": "Ravenclaw Common Room",
+      "x": 357246.38,
+      "y": -456780.91,
+      "z": -78100.0,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_RavenclawTower",
+      "name": "Ravenclaw Tower",
+      "x": 358690.75,
+      "y": -456947.16,
+      "z": -80796.0,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_SlytherinCommonRoom",
+      "name": "Slytherin Common Room",
+      "x": 360317.34,
+      "y": -456897.34,
+      "z": -84688.85,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_SouthExitHogwarts",
+      "name": "South Exit",
+      "x": 349422.72,
+      "y": -434388.84,
+      "z": -82978.41,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_TransfigurationClass",
+      "name": "Transfiguration Classroom",
+      "x": 347543.34,
+      "y": -462967.19,
+      "z": -85800.0,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_TransfigurationCourtyard",
+      "name": "Transfiguration Courtyard",
+      "x": 351036.91,
+      "y": -461650.16,
+      "z": -85785.5,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_TrophyRoom",
+      "name": "Trophy Room",
+      "x": 361462.44,
+      "y": -453212.81,
+      "z": -75895.0,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_HW_ViaductCourtyard",
+      "name": "Viaduct Courtyard",
+      "x": 363896.41,
+      "y": -458155.47,
+      "z": -83301.34,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_BlackOffice",
+      "name": "Headmaster's Office",
+      "x": 365288.5,
+      "y": -452390.41,
+      "z": -72097.51,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "M_FT_EVC_Undercroft",
+      "name": "The Undercroft",
+      "x": 352043.0,
+      "y": -458242.0,
+      "z": -88652.6,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "M_FT_OLI_HogwartsGrounds",
+      "name": "Hogwarts Grounds",
+      "x": 346480.19,
+      "y": -469933.0,
+      "z": -86356.61,
+      "world": "Hogwarts"
+    },
+    {
+      "id": "FT_OL_Forbidden_Forest_Entrance_HN_AV",
+      "name": "Forbidden Forest Entrance",
+      "x": 349712.22,
+      "y": -497308.19,
+      "z": -87643.11,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_DarkForestEast_HN_AU",
+      "name": "Dark Forest East",
+      "x": 345675.53,
+      "y": -528592.38,
+      "z": -87502.18,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_TheCollectorsCave_HN_AU",
+      "name": "The Collector's Cave",
+      "x": 356541.69,
+      "y": -521508.84,
+      "z": -82806.27,
+      "world": "Overland"
+    },
+    {
+      "id": "Old Wizards Tomb",
+      "name": "Old Wizard's Tomb",
+      "x": 356691.0,
+      "y": -525942.0,
+      "z": -80903.1,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_HamletLowerHogsfield_HN_BG",
+      "name": "Lower Hogsfield",
+      "x": 361012.5,
+      "y": -413470.44,
+      "z": -89682.12,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_HamletHearth_HN_BD",
+      "name": "Brocburrow",
+      "x": 406881.5,
+      "y": -450502.62,
+      "z": -82751.32,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_HamletMotherwell_HN_BJ",
+      "name": "Upper Hogsfield",
+      "x": 432770.97,
+      "y": -380109.62,
+      "z": -82290.05,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_HamletStirling_HN_AS",
+      "name": "Aranshire",
+      "x": 400065.06,
+      "y": -560780.75,
+      "z": -80058.84,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_NorthBogEntrance_HN_AO",
+      "name": "North Bog Entrance",
+      "x": 380727.56,
+      "y": -591203.31,
+      "z": -85011.0,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_PercivalsTower_HN_AK",
+      "name": "Percival's Tower",
+      "x": 373263.0,
+      "y": -612723.0,
+      "z": -82054.53,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_Pitt-UponFord_HN_AK",
+      "name": "Pitt-Upon-Ford",
+      "x": 350173.69,
+      "y": -621665.94,
+      "z": -85898.33,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_FalbartonCastle_FO_AU",
+      "name": "Falbarton Castle",
+      "x": 445620.22,
+      "y": -542196.06,
+      "z": -82024.12,
+      "world": "Overland"
+    },
+    {
+      "id": "M_FT_NTR01_DragonChasm",
+      "name": "Dragon Chasm",
+      "x": 515961.0,
+      "y": -557944.81,
+      "z": -79454.67,
+      "world": "Overland"
+    },
+    {
+      "id": "M_FT_NTR_Moonhenge",
+      "name": "Moonhenge",
+      "x": 582817.63,
+      "y": -632224.75,
+      "z": -74730.27,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_NorthFeldcroft_HS_AG",
+      "name": "Feldcroft",
+      "x": 298184.62,
+      "y": -337758.78,
+      "z": -82882.74,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_HamletKeenbridge_HS_AR",
+      "name": "Keenbridge",
+      "x": 380244.09,
+      "y": -323579.62,
+      "z": -90315.19,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_HamletIrondale_HS_AY",
+      "name": "Irondale",
+      "x": 340642.91,
+      "y": -248349.25,
+      "z": -88429.12,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_HamletKinloch_HS_AW",
+      "name": "Marunweem Lake",
+      "x": 260071.98,
+      "y": -277212.44,
+      "z": -92666.61,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_ArchiesFort_HS_AH",
+      "name": "Archie's Fort",
+      "x": 331743.78,
+      "y": -363597.31,
+      "z": -85409.52,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_CastleChepstow_HS_AW",
+      "name": "West Manor",
+      "x": 246680.7,
+      "y": -280938.62,
+      "z": -91007.55,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_CaveOfDarkness_CO_AH",
+      "name": "Cave of Darkness",
+      "x": 460283.66,
+      "y": -239043.06,
+      "z": -88997.36,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_OldIsidoraCastle_CO_AS",
+      "name": "Isidora's Castle",
+      "x": 452401.5,
+      "y": -152694.41,
+      "z": -95571.24,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_HamletMaruweem_CO_AT",
+      "name": "Marunweem",
+      "x": 478119.31,
+      "y": -153702.33,
+      "z": -95048.41,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_GoblinBridge_CO_AM",
+      "name": "Goblin Bridge",
+      "x": 465897.47,
+      "y": -185054.06,
+      "z": -94798.25,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_CastleJerpoint_CO_AG",
+      "name": "Rookwood Castle",
+      "x": 426539.62,
+      "y": -224677.11,
+      "z": -89082.38,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_HamletHalkirk_CO_BB",
+      "name": "Cragcroftshire",
+      "x": 490728.41,
+      "y": -126901.52,
+      "z": -93539.41,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_HamletHelmsdale_CO_BD",
+      "name": "Clagmar Coast",
+      "x": 591239.94,
+      "y": -93383.59,
+      "z": -91639.66,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_CastleArbroath_CO_BQ",
+      "name": "Manor Cape",
+      "x": 557241.06,
+      "y": -34778.86,
+      "z": -90727.43,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_CoastalEntrance_CO_AA",
+      "name": "Coastal Cavern",
+      "x": 405745.56,
+      "y": -247798.05,
+      "z": -84685.16,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_OL_CoastRegionVault_HS_BA",
+      "name": "Poidsear Coast",
+      "x": 398452.44,
+      "y": -259109.77,
+      "z": -86938.95,
+      "world": "Overland"
+    },
+    {
+      "id": "FT_HW_RoomOfRequirement",
+      "name": "Room of Requirement",
+      "x": -10.0,
+      "y": 970.0,
+      "z": 0.0,
+      "world": "Sanctuary"
+    }
+  ]
+}

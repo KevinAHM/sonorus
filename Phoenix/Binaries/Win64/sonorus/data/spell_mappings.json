@@ -1,0 +1,1314 @@
+{
+  "BP_AccioSpell": {
+    "name": "Accio",
+    "displayName": "Accio",
+    "category": "Forceful",
+    "curriculum": "Charms",
+    "uiVisible": true,
+    "cooldown": 8.0
+  },
+  "BP_Accio_ChargedSpell": {
+    "name": "Accio_Charged",
+    "displayName": "Accio (Charged)",
+    "category": "Forceful",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_AccioMaximaSpell": {
+    "name": "AccioMaxima",
+    "displayName": "Accio Maxima",
+    "category": "Forceful",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_AguamentiSpell": {
+    "name": "Aguamenti",
+    "displayName": "Aguamenti",
+    "category": "Unknown",
+    "curriculum": "Transfiguration",
+    "uiVisible": false,
+    "cooldown": 0.5
+  },
+  "BP_AguamentiMaximaSpell": {
+    "name": "AguamentiMaxima",
+    "displayName": "Aguamenti Maxima",
+    "category": "Unknown",
+    "curriculum": "Transfiguration",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_AlohomoraSpell": {
+    "name": "Alohomora",
+    "displayName": "Alohomora",
+    "category": "Tool",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 0.5
+  },
+  "BP_AMPushAOESpell": {
+    "name": "AMPushAOE",
+    "displayName": "A M Push A O E",
+    "category": "Unknown",
+    "curriculum": "Unknown",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_AnimagusFormSpell": {
+    "name": "AnimagusForm",
+    "displayName": "Animagus Form",
+    "category": "Unknown",
+    "curriculum": "Transfiguration",
+    "uiVisible": false,
+    "cooldown": 0.5
+  },
+  "BP_ApparitionSpell": {
+    "name": "Apparition",
+    "displayName": "Apparition",
+    "category": "Tool",
+    "curriculum": "Infiltrator",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_ApparitionMaximaSpell": {
+    "name": "ApparitionMaxima",
+    "displayName": "Apparition Maxima",
+    "category": "Unknown",
+    "curriculum": "Infiltrator",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_ArrestoMomentumSpell": {
+    "name": "ArrestoMomentum",
+    "displayName": "Arresto Momentum",
+    "category": "CC",
+    "curriculum": "Charms",
+    "uiVisible": true,
+    "cooldown": 15.0
+  },
+  "BP_ArrestoMomentumMaximaSpell": {
+    "name": "ArrestoMomentumMaxima",
+    "displayName": "Arresto Momentum Maxima",
+    "category": "CC",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_ArrestoMomentumMaximaMTSpell": {
+    "name": "ArrestoMomentumMaximaMT",
+    "displayName": "Arresto Momentum Maxima M T",
+    "category": "CC",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_ArrestoMomentumMTSpell": {
+    "name": "ArrestoMomentumMT",
+    "displayName": "Arresto Momentum M T",
+    "category": "CC",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_AvadaKedavraSpell": {
+    "name": "AvadaKedavra",
+    "displayName": "Avada Kedavra",
+    "category": "DarkArts",
+    "curriculum": "DarkArts",
+    "uiVisible": true,
+    "cooldown": 90.0
+  },
+  "BP_BatBogeySpell": {
+    "name": "BatBogey",
+    "displayName": "Bat Bogey",
+    "category": "Unknown",
+    "curriculum": "Transfiguration",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_ComboAtk_DW_ExtortionistSpell": {
+    "name": "ComboAtk_DW_Extortionist",
+    "displayName": "Combo Atk (D W  Extortionist)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_ComboAtk_DW_PoacherSpell": {
+    "name": "ComboAtk_DW_Poacher",
+    "displayName": "Combo Atk (D W  Poacher)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_ComboAtk_DW_ThiefSpell": {
+    "name": "ComboAtk_DW_Thief",
+    "displayName": "Combo Atk (D W  Thief)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_ConfringoSpell": {
+    "name": "Confringo",
+    "displayName": "Confringo",
+    "category": "Heavy",
+    "curriculum": "DarkArts",
+    "uiVisible": true,
+    "cooldown": 10.0
+  },
+  "BP_ConfringoMaximaSpell": {
+    "name": "ConfringoMaxima",
+    "displayName": "Confringo Maxima",
+    "category": "Heavy",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_ConfringoMaximaMTSpell": {
+    "name": "ConfringoMaximaMT",
+    "displayName": "Confringo Maxima M T",
+    "category": "Heavy",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_ConfringoMTSpell": {
+    "name": "ConfringoMT",
+    "displayName": "Confringo M T",
+    "category": "Heavy",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_ConfundoSpell": {
+    "name": "Confundo",
+    "displayName": "Confundo",
+    "category": "CC",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 30.0
+  },
+  "BP_ConfundoMTSpell": {
+    "name": "ConfundoMT",
+    "displayName": "Confundo M T",
+    "category": "CC",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_ConjurationSpell": {
+    "name": "Conjuration",
+    "displayName": "Conjuration",
+    "category": "Sanctuary",
+    "curriculum": "Transfiguration",
+    "uiVisible": true,
+    "cooldown": 0
+  },
+  "BP_CrucioSpell": {
+    "name": "Crucio",
+    "displayName": "Crucio",
+    "category": "DarkArts",
+    "curriculum": "DarkArts",
+    "uiVisible": true,
+    "cooldown": 20.0
+  },
+  "BP_DepulsoSpell": {
+    "name": "Depulso",
+    "displayName": "Depulso",
+    "category": "Forceful",
+    "curriculum": "Charms",
+    "uiVisible": true,
+    "cooldown": 10.0
+  },
+  "BP_DepulsoDHSpell": {
+    "name": "DepulsoDH",
+    "displayName": "Depulso D H",
+    "category": "Forceful",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 2.0
+  },
+  "BP_DepulsoMaximaSpell": {
+    "name": "DepulsoMaxima",
+    "displayName": "Depulso Maxima",
+    "category": "Forceful",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_DepulsoMaximaMTSpell": {
+    "name": "DepulsoMaximaMT",
+    "displayName": "Depulso Maxima M T",
+    "category": "Forceful",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_DepulsoMTSpell": {
+    "name": "DepulsoMT",
+    "displayName": "Depulso M T",
+    "category": "Forceful",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_DescendoSpell": {
+    "name": "Descendo",
+    "displayName": "Descendo",
+    "category": "Forceful",
+    "curriculum": "Charms",
+    "uiVisible": true,
+    "cooldown": 10.0
+  },
+  "BP_DescendoDHSpell": {
+    "name": "DescendoDH",
+    "displayName": "Descendo D H",
+    "category": "Forceful",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 2.0
+  },
+  "BP_DiffindoSpell": {
+    "name": "Diffindo",
+    "displayName": "Diffindo",
+    "category": "Heavy",
+    "curriculum": "Charms",
+    "uiVisible": true,
+    "cooldown": 15.0
+  },
+  "BP_DiffindoDHSpell": {
+    "name": "DiffindoDH",
+    "displayName": "Diffindo D H",
+    "category": "Heavy",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 4.0
+  },
+  "BP_DisillusionmentSpell": {
+    "name": "Disillusionment",
+    "displayName": "Disillusionment",
+    "category": "Tool",
+    "curriculum": "Charms",
+    "uiVisible": true,
+    "cooldown": 0.5
+  },
+  "BP_Dragon_Attack_Spell_DragonBoltSpell": {
+    "name": "Dragon_Attack_Spell_DragonBolt",
+    "displayName": "Dragon (Attack  Spell  Dragon Bolt)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_Dragon_Attack_Spell_DragonFireSpell": {
+    "name": "Dragon_Attack_Spell_DragonFire",
+    "displayName": "Dragon (Attack  Spell  Dragon Fire)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_Dragon_Attack_Spell_DragonSpitSpell": {
+    "name": "Dragon_Attack_Spell_DragonSpit",
+    "displayName": "Dragon (Attack  Spell  Dragon Spit)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_EngorgioSpell": {
+    "name": "Engorgio",
+    "displayName": "Engorgio",
+    "category": "Unknown",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 30.0
+  },
+  "BP_EpiskeySpell": {
+    "name": "Episkey",
+    "displayName": "Episkey",
+    "category": "Unknown",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 30.0
+  },
+  "BP_ExpectoPatronumSpell": {
+    "name": "ExpectoPatronum",
+    "displayName": "Expecto Patronum",
+    "category": "Unknown",
+    "curriculum": "DADA",
+    "uiVisible": false,
+    "cooldown": 30.0
+  },
+  "BP_ExpectoPatronumMaximaSpell": {
+    "name": "ExpectoPatronumMaxima",
+    "displayName": "Expecto Patronum Maxima",
+    "category": "Unknown",
+    "curriculum": "DADA",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_ExpelliarmusSpell": {
+    "name": "Expelliarmus",
+    "displayName": "Expelliarmus",
+    "category": "Heavy",
+    "curriculum": "DADA",
+    "uiVisible": true,
+    "cooldown": 10.0
+  },
+  "BP_ExpelliarmusMTSpell": {
+    "name": "ExpelliarmusMT",
+    "displayName": "Expelliarmus M T",
+    "category": "Heavy",
+    "curriculum": "DADA",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_ExpulsoSpell": {
+    "name": "Expulso",
+    "displayName": "Expulso",
+    "category": "Heavy",
+    "curriculum": "Charms",
+    "uiVisible": true,
+    "cooldown": 15.0
+  },
+  "BP_ExpulsoDHSpell": {
+    "name": "ExpulsoDH",
+    "displayName": "Expulso D H",
+    "category": "Heavy",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 4.0
+  },
+  "BP_ExpulsoMaximaSpell": {
+    "name": "ExpulsoMaxima",
+    "displayName": "Expulso Maxima",
+    "category": "Heavy",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_FiendFyreSpell": {
+    "name": "FiendFyre",
+    "displayName": "Fiend Fyre",
+    "category": "Heavy",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 20.0
+  },
+  "BP_FinisherAMBossKillerSpell": {
+    "name": "FinisherAMBossKiller",
+    "displayName": "Finisher A M Boss Killer",
+    "category": "Unknown",
+    "curriculum": "Unknown",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_FinisherBlackParticleExplodeSpell": {
+    "name": "FinisherBlackParticleExplode",
+    "displayName": "Finisher Black Particle Explode",
+    "category": "Unknown",
+    "curriculum": "Unknown",
+    "uiVisible": true,
+    "cooldown": 0
+  },
+  "BP_FinisherCrystalShatterSpell": {
+    "name": "FinisherCrystalShatter",
+    "displayName": "Finisher Crystal Shatter",
+    "category": "Unknown",
+    "curriculum": "Unknown",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_FinisherDeepFreezeSpell": {
+    "name": "FinisherDeepFreeze",
+    "displayName": "Finisher Deep Freeze",
+    "category": "Unknown",
+    "curriculum": "Unknown",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_FinisherFierySendSpell": {
+    "name": "FinisherFierySend",
+    "displayName": "Finisher Fiery Send",
+    "category": "Unknown",
+    "curriculum": "Unknown",
+    "uiVisible": true,
+    "cooldown": 0
+  },
+  "BP_FinisherFireStormSpell": {
+    "name": "FinisherFireStorm",
+    "displayName": "Finisher Fire Storm",
+    "category": "Unknown",
+    "curriculum": "Unknown",
+    "uiVisible": true,
+    "cooldown": 0
+  },
+  "BP_FinisherFlashSendSpell": {
+    "name": "FinisherFlashSend",
+    "displayName": "Finisher Flash Send",
+    "category": "Unknown",
+    "curriculum": "Unknown",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_FinisherLightningStormSpell": {
+    "name": "FinisherLightningStorm",
+    "displayName": "Finisher Lightning Storm",
+    "category": "Unknown",
+    "curriculum": "Unknown",
+    "uiVisible": true,
+    "cooldown": 0
+  },
+  "BP_FinisherPetrificusTotalusSpell": {
+    "name": "FinisherPetrificusTotalus",
+    "displayName": "Finisher Petrificus Totalus",
+    "category": "Unknown",
+    "curriculum": "Unknown",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_FinisherScarabBurstSpell": {
+    "name": "FinisherScarabBurst",
+    "displayName": "Finisher Scarab Burst",
+    "category": "Unknown",
+    "curriculum": "Unknown",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_FinisherSpiderBurstSpell": {
+    "name": "FinisherSpiderBurst",
+    "displayName": "Finisher Spider Burst",
+    "category": "Unknown",
+    "curriculum": "Unknown",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_FinisherSuperSlamsSpell": {
+    "name": "FinisherSuperSlams",
+    "displayName": "Finisher Super Slams",
+    "category": "Unknown",
+    "curriculum": "Unknown",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_FiniteSpell": {
+    "name": "Finite",
+    "displayName": "Finite",
+    "category": "Unknown",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 0.5
+  },
+  "BP_FlipendoSpell": {
+    "name": "Flipendo",
+    "displayName": "Flipendo",
+    "category": "Forceful",
+    "curriculum": "DADA",
+    "uiVisible": true,
+    "cooldown": 5.0
+  },
+  "BP_FollowAtk_DW_ExtortionistSpell": {
+    "name": "FollowAtk_DW_Extortionist",
+    "displayName": "Follow Atk (D W  Extortionist)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_FollowAtk_DW_PoacherSpell": {
+    "name": "FollowAtk_DW_Poacher",
+    "displayName": "Follow Atk (D W  Poacher)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_FumosSpell": {
+    "name": "Fumos",
+    "displayName": "Fumos",
+    "category": "Unknown",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 30.0
+  },
+  "BP_FXBeamTestSpell": {
+    "name": "FXBeamTest",
+    "displayName": "F X Beam Test",
+    "category": "Unknown",
+    "curriculum": "Scholar",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_FXTestSpell": {
+    "name": "FXTest",
+    "displayName": "F X Test",
+    "category": "Unknown",
+    "curriculum": "Scholar",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_GlaciusSpell": {
+    "name": "Glacius",
+    "displayName": "Glacius",
+    "category": "CC",
+    "curriculum": "Charms",
+    "uiVisible": true,
+    "cooldown": 10.0
+  },
+  "BP_GlaciusMaximaSpell": {
+    "name": "GlaciusMaxima",
+    "displayName": "Glacius Maxima",
+    "category": "CC",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_GlaciusMaximaMTSpell": {
+    "name": "GlaciusMaximaMT",
+    "displayName": "Glacius Maxima M T",
+    "category": "CC",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_GlaciusMTSpell": {
+    "name": "GlaciusMT",
+    "displayName": "Glacius M T",
+    "category": "CC",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_Goblin_Attack_Spell_ApparateSpell": {
+    "name": "Goblin_Attack_Spell_Apparate",
+    "displayName": "Goblin (Attack  Spell  Apparate)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_Goblin_Attack_Spell_CloseSpell": {
+    "name": "Goblin_Attack_Spell_Close",
+    "displayName": "Goblin (Attack  Spell  Close)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_Goblin_Attack_Spell_ComboSpell": {
+    "name": "Goblin_Attack_Spell_Combo",
+    "displayName": "Goblin (Attack  Spell  Combo)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_Goblin_Attack_Spell_FlameSpell": {
+    "name": "Goblin_Attack_Spell_Flame",
+    "displayName": "Goblin (Attack  Spell  Flame)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_Goblin_Attack_Spell_RangedSpell": {
+    "name": "Goblin_Attack_Spell_Ranged",
+    "displayName": "Goblin (Attack  Spell  Ranged)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_ImperiusSpell": {
+    "name": "Imperius",
+    "displayName": "Imperius",
+    "category": "DarkArts",
+    "curriculum": "DarkArts",
+    "uiVisible": true,
+    "cooldown": 30.0
+  },
+  "BP_IncarcerousSpell": {
+    "name": "Incarcerous",
+    "displayName": "Incarcerous",
+    "category": "CC",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 15.0
+  },
+  "BP_IncendioSpell": {
+    "name": "Incendio",
+    "displayName": "Incendio",
+    "category": "Heavy",
+    "curriculum": "Charms",
+    "uiVisible": true,
+    "cooldown": 8.0
+  },
+  "BP_IncendioMaximaSpell": {
+    "name": "IncendioMaxima",
+    "displayName": "Incendio Maxima",
+    "category": "Heavy",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_IncendioMaximaMTSpell": {
+    "name": "IncendioMaximaMT",
+    "displayName": "Incendio Maxima M T",
+    "category": "Heavy",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_IncendioMTSpell": {
+    "name": "IncendioMT",
+    "displayName": "Incendio M T",
+    "category": "Heavy",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_InstantScalpingSpell": {
+    "name": "InstantScalping",
+    "displayName": "Instant Scalping",
+    "category": "Unknown",
+    "curriculum": "Tricksters",
+    "uiVisible": false,
+    "cooldown": 17.0
+  },
+  "BP_InteractionGeneralSpell": {
+    "name": "InteractionGeneral",
+    "displayName": "Interaction General",
+    "category": "Unknown",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_InvisibilityDHSpell": {
+    "name": "InvisibilityDH",
+    "displayName": "Invisibility D H",
+    "category": "Unknown",
+    "curriculum": "Unknown",
+    "uiVisible": false,
+    "cooldown": 0.5
+  },
+  "BP_LeviosoSpell": {
+    "name": "Levioso",
+    "displayName": "Levioso",
+    "category": "CC",
+    "curriculum": "DADA",
+    "uiVisible": true,
+    "cooldown": 8.0
+  },
+  "BP_LeviosoMaximaSpell": {
+    "name": "LeviosoMaxima",
+    "displayName": "Levioso Maxima",
+    "category": "CC",
+    "curriculum": "DADA",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_LeviosoMaximaMTSpell": {
+    "name": "LeviosoMaximaMT",
+    "displayName": "Levioso Maxima M T",
+    "category": "CC",
+    "curriculum": "DADA",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_LeviosoMTSpell": {
+    "name": "LeviosoMT",
+    "displayName": "Levioso M T",
+    "category": "CC",
+    "curriculum": "DADA",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_LgAtk_DW_ExtortionistSpell": {
+    "name": "LgAtk_DW_Extortionist",
+    "displayName": "Lg Atk (D W  Extortionist)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_LgAtk_DW_PoacherSpell": {
+    "name": "LgAtk_DW_Poacher",
+    "displayName": "Lg Atk (D W  Poacher)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_LgAtk_DW_ThiefSpell": {
+    "name": "LgAtk_DW_Thief",
+    "displayName": "Lg Atk (D W  Thief)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_LumosSpell": {
+    "name": "Lumos",
+    "displayName": "Lumos",
+    "category": "Tool",
+    "curriculum": "Charms",
+    "uiVisible": true,
+    "cooldown": 0.5
+  },
+  "BP_LumosMaximaSpell": {
+    "name": "LumosMaxima",
+    "displayName": "Lumos Maxima",
+    "category": "Tool",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_MedAtk_DW_ExtortionistSpell": {
+    "name": "MedAtk_DW_Extortionist",
+    "displayName": "Med Atk (D W  Extortionist)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_MedAtk_DW_PoacherSpell": {
+    "name": "MedAtk_DW_Poacher",
+    "displayName": "Med Atk (D W  Poacher)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_MedAtk_DW_ThiefSpell": {
+    "name": "MedAtk_DW_Thief",
+    "displayName": "Med Atk (D W  Thief)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_MeleeAtk_DW_ExtortionistSpell": {
+    "name": "MeleeAtk_DW_Extortionist",
+    "displayName": "Melee Atk (D W  Extortionist)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_MeleeAtk_DW_PoacherSpell": {
+    "name": "MeleeAtk_DW_Poacher",
+    "displayName": "Melee Atk (D W  Poacher)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_MeleeAtk_DW_ThiefSpell": {
+    "name": "MeleeAtk_DW_Thief",
+    "displayName": "Melee Atk (D W  Thief)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_ObliviateSpell": {
+    "name": "Obliviate",
+    "displayName": "Obliviate",
+    "category": "Unknown",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 30.0
+  },
+  "BP_OppugnoSpell": {
+    "name": "Oppugno",
+    "displayName": "Oppugno",
+    "category": "Unknown",
+    "curriculum": "DADA",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_OppugnoMTSpell": {
+    "name": "OppugnoMT",
+    "displayName": "Oppugno M T",
+    "category": "Unknown",
+    "curriculum": "DADA",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_PetrificusSpell": {
+    "name": "Petrificus",
+    "displayName": "Petrificus",
+    "category": "CC",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 10.0
+  },
+  "BP_PiertotumLocomotorSpell": {
+    "name": "PiertotumLocomotor",
+    "displayName": "Piertotum Locomotor",
+    "category": "Unknown",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_ProtegoSpell": {
+    "name": "Protego",
+    "displayName": "Protego",
+    "category": "Unknown",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_PygmyFireball_L1Spell": {
+    "name": "PygmyFireball_L1",
+    "displayName": "Pygmy Fireball (L1)",
+    "category": "Unknown",
+    "curriculum": "Beasts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_PygmyFireball_L2Spell": {
+    "name": "PygmyFireball_L2",
+    "displayName": "Pygmy Fireball (L2)",
+    "category": "Unknown",
+    "curriculum": "Beasts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_PygmyFireball_L3Spell": {
+    "name": "PygmyFireball_L3",
+    "displayName": "Pygmy Fireball (L3)",
+    "category": "Unknown",
+    "curriculum": "Beasts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_RangedAtk_DW_ExtortionistSpell": {
+    "name": "RangedAtk_DW_Extortionist",
+    "displayName": "Ranged Atk (D W  Extortionist)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_RangedAtk_DW_PoacherSpell": {
+    "name": "RangedAtk_DW_Poacher",
+    "displayName": "Ranged Atk (D W  Poacher)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_RangedAtk_DW_ThiefSpell": {
+    "name": "RangedAtk_DW_Thief",
+    "displayName": "Ranged Atk (D W  Thief)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_RanrakBoss_Breath_ShowoffSpell": {
+    "name": "RanrakBoss_Breath_Showoff",
+    "displayName": "Ranrak Boss (Breath  Showoff)",
+    "category": "Unknown",
+    "curriculum": "Unknown",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_RanrakBoss_Breath_StraightSpell": {
+    "name": "RanrakBoss_Breath_Straight",
+    "displayName": "Ranrak Boss (Breath  Straight)",
+    "category": "Unknown",
+    "curriculum": "Unknown",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_RanrakBoss_Breath_SweepSpell": {
+    "name": "RanrakBoss_Breath_Sweep",
+    "displayName": "Ranrak Boss (Breath  Sweep)",
+    "category": "Unknown",
+    "curriculum": "Unknown",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_RanrakBoss_Projectile_BlockableSpell": {
+    "name": "RanrakBoss_Projectile_Blockable",
+    "displayName": "Ranrak Boss (Projectile  Blockable)",
+    "category": "Unknown",
+    "curriculum": "Unknown",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_RanrakBoss_Projectile_UnblockableSpell": {
+    "name": "RanrakBoss_Projectile_Unblockable",
+    "displayName": "Ranrak Boss (Projectile  Unblockable)",
+    "category": "Unknown",
+    "curriculum": "Unknown",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_RanrakBoss_PulseSpell": {
+    "name": "RanrakBoss_Pulse",
+    "displayName": "Ranrak Boss (Pulse)",
+    "category": "Unknown",
+    "curriculum": "Unknown",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_ReducioSpell": {
+    "name": "Reducio",
+    "displayName": "Reducio",
+    "category": "Unknown",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 30.0
+  },
+  "BP_ReductoSpell": {
+    "name": "Reducto",
+    "displayName": "Reducto",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_ReparoSpell": {
+    "name": "Reparo",
+    "displayName": "Reparo",
+    "category": "Tool",
+    "curriculum": "Charms",
+    "uiVisible": true,
+    "cooldown": 0.5
+  },
+  "BP_ReparoMaximaSpell": {
+    "name": "ReparoMaxima",
+    "displayName": "Reparo Maxima",
+    "category": "Tool",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_RevelioSpell": {
+    "name": "Revelio",
+    "displayName": "Revelio",
+    "category": "Tool",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 1.0
+  },
+  "BP_RevelioNPCSpell": {
+    "name": "RevelioNPC",
+    "displayName": "Revelio N P C",
+    "category": "Tool",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_SidekickBasicCommandSpell": {
+    "name": "SidekickBasicCommand",
+    "displayName": "Sidekick Basic Command",
+    "category": "Unknown",
+    "curriculum": "Beasts",
+    "uiVisible": false,
+    "cooldown": 0.5
+  },
+  "BP_SidekickReturnCommandSpell": {
+    "name": "SidekickReturnCommand",
+    "displayName": "Sidekick Return Command",
+    "category": "Unknown",
+    "curriculum": "Beasts",
+    "uiVisible": false,
+    "cooldown": 0.5
+  },
+  "BP_SidekickSpecialCommandSpell": {
+    "name": "SidekickSpecialCommand",
+    "displayName": "Sidekick Special Command",
+    "category": "Unknown",
+    "curriculum": "Beasts",
+    "uiVisible": false,
+    "cooldown": 0.5
+  },
+  "BP_SilencioSpell": {
+    "name": "Silencio",
+    "displayName": "Silencio",
+    "category": "Unknown",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_SmAtk_DW_ExtortionistSpell": {
+    "name": "SmAtk_DW_Extortionist",
+    "displayName": "Sm Atk (D W  Extortionist)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_SmAtk_DW_PoacherSpell": {
+    "name": "SmAtk_DW_Poacher",
+    "displayName": "Sm Atk (D W  Poacher)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_SmAtk_DW_ThiefSpell": {
+    "name": "SmAtk_DW_Thief",
+    "displayName": "Sm Atk (D W  Thief)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_SpecialAtk_Dragon_FireballSpell": {
+    "name": "SpecialAtk_Dragon_Fireball",
+    "displayName": "Special Atk (Dragon  Fireball)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_SpecialAtk_DW_ExtortionistSpell": {
+    "name": "SpecialAtk_DW_Extortionist",
+    "displayName": "Special Atk (D W  Extortionist)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_SpecialAtk_DW_PoacherSpell": {
+    "name": "SpecialAtk_DW_Poacher",
+    "displayName": "Special Atk (D W  Poacher)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_SpecialAtk_DW_ThiefSpell": {
+    "name": "SpecialAtk_DW_Thief",
+    "displayName": "Special Atk (D W  Thief)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_Spider_Attack_Burrow_StrikeSpell": {
+    "name": "Spider_Attack_Burrow_Strike",
+    "displayName": "Spider (Attack  Burrow  Strike)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_StealthTakedownSpell": {
+    "name": "StealthTakedown",
+    "displayName": "Stealth Takedown",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 1.25
+  },
+  "BP_StingingSpell": {
+    "name": "Stinging",
+    "displayName": "Stinging",
+    "category": "Unknown",
+    "curriculum": "DADA",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_StupefySpell": {
+    "name": "Stupefy",
+    "displayName": "Stupefy",
+    "category": "Unknown",
+    "curriculum": "DADA",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_StupefyDHSpell": {
+    "name": "StupefyDH",
+    "displayName": "Stupefy D H",
+    "category": "Unknown",
+    "curriculum": "DADA",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_StupefyHeavySpell": {
+    "name": "StupefyHeavy",
+    "displayName": "Stupefy Heavy",
+    "category": "Unknown",
+    "curriculum": "DADA",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_StupefyLightSpell": {
+    "name": "StupefyLight",
+    "displayName": "Stupefy Light",
+    "category": "Unknown",
+    "curriculum": "DADA",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_StupefyLightHeavySpell": {
+    "name": "StupefyLightHeavy",
+    "displayName": "Stupefy Light Heavy",
+    "category": "Unknown",
+    "curriculum": "DADA",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_StupefyMTSpell": {
+    "name": "StupefyMT",
+    "displayName": "Stupefy M T",
+    "category": "Unknown",
+    "curriculum": "DADA",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_StupefySpecial_PopupSpell": {
+    "name": "StupefySpecial_Popup",
+    "displayName": "Stupefy Special (Popup)",
+    "category": "Unknown",
+    "curriculum": "DADA",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_StupefySpecial_PullSpell": {
+    "name": "StupefySpecial_Pull",
+    "displayName": "Stupefy Special (Pull)",
+    "category": "Unknown",
+    "curriculum": "DADA",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_StupefySpecial_RicochetSpell": {
+    "name": "StupefySpecial_Ricochet",
+    "displayName": "Stupefy Special (Ricochet)",
+    "category": "Unknown",
+    "curriculum": "DADA",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_StupefySpecial_SendSpell": {
+    "name": "StupefySpecial_Send",
+    "displayName": "Stupefy Special (Send)",
+    "category": "Unknown",
+    "curriculum": "DADA",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_StupefySpecial_SlamSpell": {
+    "name": "StupefySpecial_Slam",
+    "displayName": "Stupefy Special (Slam)",
+    "category": "Unknown",
+    "curriculum": "DADA",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_TarantallegraSpell": {
+    "name": "Tarantallegra",
+    "displayName": "Tarantallegra",
+    "category": "Unknown",
+    "curriculum": "Tricksters",
+    "uiVisible": false,
+    "cooldown": 30.0
+  },
+  "BP_TauntDragonSpell": {
+    "name": "TauntDragon",
+    "displayName": "Taunt Dragon",
+    "category": "Unknown",
+    "curriculum": "Unknown",
+    "uiVisible": false,
+    "cooldown": 8.0
+  },
+  "BP_ThrowCabbageSpell": {
+    "name": "ThrowCabbage",
+    "displayName": "Throw Cabbage",
+    "category": "Unknown",
+    "curriculum": "Herbology",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_TombProtector_Stomp_MissileSpell": {
+    "name": "TombProtector_Stomp_Missile",
+    "displayName": "Tomb Protector (Stomp  Missile)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_TransformationSpell": {
+    "name": "Transformation",
+    "displayName": "Transformation",
+    "category": "Sanctuary",
+    "curriculum": "Transfiguration",
+    "uiVisible": true,
+    "cooldown": 0
+  },
+  "BP_TransformationOverlandSpell": {
+    "name": "TransformationOverland",
+    "displayName": "Transformation Overland",
+    "category": "CC",
+    "curriculum": "Transfiguration",
+    "uiVisible": true,
+    "cooldown": 20.0
+  },
+  "BP_TripJinxSpell": {
+    "name": "TripJinx",
+    "displayName": "Trip Jinx",
+    "category": "Unknown",
+    "curriculum": "Tricksters",
+    "uiVisible": false,
+    "cooldown": 10.0
+  },
+  "BP_TrollBoulderSpell": {
+    "name": "TrollBoulder",
+    "displayName": "Troll Boulder",
+    "category": "Unknown",
+    "curriculum": "Unknown",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_VanishmentSpell": {
+    "name": "Vanishment",
+    "displayName": "Vanishment",
+    "category": "Sanctuary",
+    "curriculum": "Transfiguration",
+    "uiVisible": true,
+    "cooldown": 0
+  },
+  "BP_VenomousTentacula_Attack_SpitSpell": {
+    "name": "VenomousTentacula_Attack_Spit",
+    "displayName": "Venomous Tentacula (Attack  Spit)",
+    "category": "Unknown",
+    "curriculum": "DarkArts",
+    "uiVisible": false,
+    "cooldown": 0
+  },
+  "BP_WingardiumSpell": {
+    "name": "Wingardium",
+    "displayName": "Wingardium",
+    "category": "Tool",
+    "curriculum": "Charms",
+    "uiVisible": true,
+    "cooldown": 0.5
+  },
+  "BP_WingardiumMaximaSpell": {
+    "name": "WingardiumMaxima",
+    "displayName": "Wingardium Maxima",
+    "category": "Tool",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 100.0
+  },
+  "BP_WingardiumMTSpell": {
+    "name": "WingardiumMT",
+    "displayName": "Wingardium M T",
+    "category": "Tool",
+    "curriculum": "Charms",
+    "uiVisible": false,
+    "cooldown": 100.0
+  }
+}

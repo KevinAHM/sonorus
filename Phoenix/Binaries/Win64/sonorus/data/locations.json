@@ -1,0 +1,202 @@
+{
+  "AstronomyTower": {
+    "name": "Astronomy Tower",
+    "desc": "The Astronomy Tower of Hogwarts castle"
+  },
+  "BellTowerCourtyard": {
+    "name": "Bell Tower Courtyard",
+    "desc": "The Bell Tower Courtyard of Hogwarts castle"
+  },
+  "Boathouse": {
+    "name": "Boathouse",
+    "desc": "The boathouse outside of Hogwarts castle"
+  },
+  "CentralTower": {
+    "name": "Central Hall",
+    "desc": "The Central Hall of Hogwarts castle"
+  },
+  "CharmsClass": {
+    "name": "Charms Classroom",
+    "desc": "Professor Ronen's Charms classroom"
+  },
+  "ClockTowerCourtyard": {
+    "name": "Clock Tower Courtyard ",
+    "desc": "The Clock Tower Courtyard of Hogwarts castle"
+  },
+  "CoastArm": {
+    "name": "Manor Cape"
+  },
+  "CoastLake": {
+    "name": "Marunweem Lake"
+  },
+  "DADATower": {
+    "name": "Defence Against the Dark Arts Tower",
+    "desc": "The Defence Against the Dark Arts Tower of Hogwarts castle"
+  },
+  "DIVINATIONCLASS": {
+    "name": "Divination Classroom"
+  },
+  "DadaClass": {
+    "name": "Defence Against the Dark Arts Classroom",
+    "desc": "Professor Hecat's Defence Against the Dark Arts classroom"
+  },
+  "FacultyTower": {
+    "name": "Faculty Tower",
+    "desc": "The faculty tower of Hogwarts castle"
+  },
+  "FigClass": {
+    "name": "Professor Fig's Classroom",
+    "desc": "Professor Fig's classroom"
+  },
+  "FlyingClass": {
+    "name": "Flying Class Lawn",
+    "desc": "Madam Kogawa's Flying class area"
+  },
+  "ForbiddenForest": {
+    "name": "Forbidden Forest"
+  },
+  "GrandStaircaseTower": {
+    "name": "Grand Staircase Tower",
+    "desc": "The Grand Staircase Tower of Hogwarts castle"
+  },
+  "Grandstaircase": {
+    "name": "Grand Staircase",
+    "desc": "The Grand Staircase of Hogwarts castle"
+  },
+  "GreatHall": {
+    "name": "Great Hall",
+    "desc": "The Great Hall of Hogwarts castle"
+  },
+  "Greenhouses": {
+    "name": "Greenhouses",
+    "desc": "The Hogwarts Greenhouses where Herbology class is taught"
+  },
+  "GryffindorCommonRoom": {
+    "name": "Gryffindor Common Room",
+    "desc": "The common room of Gryffindor house"
+  },
+  "Haven": {
+    "name": "The Map Chamber",
+    "desc": "A secret room nestled below Hogwarts, created centuries ago by a mysterious group of professors"
+  },
+  "Helmsdale": {
+    "name": "Cragcroftshire"
+  },
+  "Hogsmeade": {
+    "name": "Hogsmeade Valley"
+  },
+  "Hogwarts": {
+    "name": "Hogwarts"
+  },
+  "HogwartsArea": {
+    "name": "North Hogwarts Region"
+  },
+  "HogwartsCastle": {
+    "name": "Hogwarts Castle"
+  },
+  "HogwartsGreenhouses": {
+    "name": "Hogwarts Greenhouses"
+  },
+  "HogwartsValley": {
+    "name": "Hogwarts Valley"
+  },
+  "HospitalWing": {
+    "name": "Hospital Wing",
+    "desc": "The hospital wing of Hogwarts castle"
+  },
+  "HufflepuffCommonRoom": {
+    "name": "Hufflepuff Common Room",
+    "desc": "The common room of Hufflepuff house"
+  },
+  "Library": {
+    "name": "Library",
+    "desc": "The Library of Hogwarts castle"
+  },
+  "LowerGrandstaircase": {
+    "name": "Lower Grand Staircase",
+    "desc": "The Lower Grand Staircase of Hogwarts castle"
+  },
+  "MagicalCreatures": {
+    "name": "Beasts Classroom",
+    "desc": "The Beasts classroom outside of Hogwarts castle"
+  },
+  "MouthOfForbiddenForest": {
+    "name": "South Hogwarts Region"
+  },
+  "NorthCoast": {
+    "name": "Poidsear Coast"
+  },
+  "NorthExitHogwarts": {
+    "name": "Hogwarts North Exit",
+    "desc": "The north exit of Hogwarts castle"
+  },
+  "NorthSwamp": {
+    "name": "North Ford Bog"
+  },
+  "NorthTower": {
+    "name": "West Tower",
+    "desc": "The West Tower of Hogwarts castle"
+  },
+  "PittUponFord": {
+    "name": "Pitt-upon-Ford"
+  },
+  "PotionsClass": {
+    "name": "Potions Classroom",
+    "desc": "Professor Sharp's Potions classroom"
+  },
+  "QuadCourtyard": {
+    "name": "Quad Courtyard",
+    "desc": "The Quad Courtyard of Hogwarts castle"
+  },
+  "RavenclawCommonRoom": {
+    "name": "Ravenclaw Common Room",
+    "desc": "The common room of Ravenclaw house"
+  },
+  "RavenclawTower": {
+    "name": "Ravenclaw Tower",
+    "desc": "The Ravenclaw Tower of Hogwarts castle"
+  },
+  "RoomOfRequirement": {
+    "name": "Room of Requirement",
+    "desc": "A secret room in Hogwarts that only appears whenever the seeker has real need of it"
+  },
+  "SanBakarsTower": {
+    "name": "San Bakar's Tower"
+  },
+  "SlytherinCommonRoom": {
+    "name": "Slytherin Common Room",
+    "desc": "The common room of Slytherin house"
+  },
+  "SouthCoast": {
+    "name": "Clagmar Coast"
+  },
+  "SouthExitHogwarts": {
+    "name": "Hogwarts South Exit",
+    "desc": "The south exit of Hogwarts castle"
+  },
+  "SouthSwamp": {
+    "name": "South Sea Bog"
+  },
+  "TransfigurationClass": {
+    "name": "Transfiguration Classroom",
+    "desc": "Professor Weasley's Transfiguration classroom"
+  },
+  "TransfigurationCourtyard": {
+    "name": "Transfiguration Courtyard",
+    "desc": "The Transfiguration Courtyard of Hogwarts castle"
+  },
+  "TrophyRoom": {
+    "name": "Trophy Room ",
+    "desc": "The Trophy Room of Hogwarts castle"
+  },
+  "Undercroft": {
+    "name": "Undercroft"
+  },
+  "ViaductCourtyard": {
+    "name": "Viaduct Courtyard",
+    "desc": "The Viaduct Courtyard of Hogwarts castle"
+  },
+  "WestHogwarts": {
+    "name": "Feldcroft Region"
+  }
+}
