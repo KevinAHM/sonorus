@@ -44,12 +44,6 @@ No subscriptions required. No API costs for normal use.
 
 **Important: Disable any existing UE4SS installation first!** The version on Nexus Mods is outdated and crash-prone. Sonorus includes the latest experimental UE4SS build.
 
-**Using Vortex:**
-1. Download and install through Vortex
-2. Deploy the mod
-3. Launch Hogwarts Legacy
-4. Follow the setup wizard in your browser
-
 **Manual Installation:**
 1. Extract the mod files
 2. Copy contents to your game's `Phoenix` folder (overwrite when prompted)
