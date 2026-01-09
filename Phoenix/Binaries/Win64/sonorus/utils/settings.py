@@ -68,7 +68,8 @@ DEFAULT_SETTINGS = {
         "dedup_window": 5,
         "ambient_dedup_window": 15,
         "track_ambient": True,
-        "max_spell_entries": 3
+        "max_spell_entries": 3,
+        "realistic_memory": True
     },
     "prompts": {
         "default": "You are {name}, someone in the 1890s wizarding world at Hogwarts or Hogsmeade. Respond in character. Keep responses to 1-3 sentences. The user may be using voice input, so interpret the intent behind their words rather than reacting to odd phrasing or apparent misspellings.\n\nVoice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal effects only. Valid: [sighs], [laughs], [whispers], [shouts], [clears throat], [pause]. NEVER use visual/physical tags like [smile], [nods], [waves], [grins] - these break the voice system. Most responses need no tags.",
@@ -100,17 +101,20 @@ DEFAULT_SETTINGS = {
         "target_selection_max_tokens": 8192,  # High default for reasoning token budgets
         "interjection_model": "gemini-2.5-flash-lite",
         "interjection_max_tokens": 8192,  # High default for reasoning token budgets
-        "actions_enabled": False  # Experimental: Allow NPCs to use Follow/Leave/Stop actions
+        "actions_enabled": False,  # Experimental: Allow NPCs to use Follow/Leave/Stop actions
+        "gear_context": True,  # Include player gear/attire in NPC context
+        "mission_context": True  # Include current quest info for companion AI
     },
     "input": {
         "chat_enabled": True,
         "chat_hotkey": "enter",  # Options: enter, k, /, ;, ', y, t, `, backquote
-        "stop_hotkey": "f8",  # Hotkey to interrupt all ongoing conversations
+        "stop_hotkey": "delete",  # Hotkey to interrupt all ongoing conversations
         "idle_timeout_minutes": 20  # 0 = disabled, otherwise AI stops after X minutes of no movement
     },
     "stt": {
         "provider": "none",  # "none" | "deepgram" | "whisper"
         "hotkey": "middle_mouse",
+        "voice_spells": True,  # Cast spells by saying their names
         "sample_rate": 16000,
         "channels": 1,
         "deepgram": {
@@ -125,6 +129,9 @@ DEFAULT_SETTINGS = {
             "model": "whisper-1",
             "language": ""  # Empty for auto-detect
         }
+    },
+    "performance": {
+        "loop_interval_ms": 100  # 100-1000ms, lower = more responsive, higher = better FPS
     }
 }
 

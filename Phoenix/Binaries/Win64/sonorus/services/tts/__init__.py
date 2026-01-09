@@ -62,9 +62,9 @@ def prepare_tts(text, character_name, **kwargs):
     return get_provider().prepare_tts(text, character_name, **kwargs)
 
 
-def get_or_create_voice(character_name, lang=None):
+def get_or_create_voice(character_name, lang=None, lua_socket=None):
     """Get voice for character, cloning if necessary."""
-    return get_provider().get_or_create_voice(character_name, lang)
+    return get_provider().get_or_create_voice(character_name, lang, lua_socket)
 
 
 def list_voices(lang=None):
@@ -75,6 +75,58 @@ def list_voices(lang=None):
 def get_voice(name, lang=None):
     """Get a specific voice by name."""
     return get_provider().get_voice(name, lang)
+
+
+def refresh_voices(provider_name=None):
+    """
+    Refresh voice cache for specified provider(s).
+
+    Args:
+        provider_name: 'inworld', 'elevenlabs', or None for all cached providers
+
+    Raises:
+        Exception: If refresh fails (propagates provider-specific error)
+    """
+    global _providers
+
+    if provider_name:
+        # Refresh specific provider
+        if provider_name in _providers:
+            print(f"[TTS] Refreshing voice cache for {provider_name}")
+            _providers[provider_name].get_voice_cache().refresh()
+    else:
+        # Refresh all cached providers
+        for name, provider in _providers.items():
+            print(f"[TTS] Refreshing voice cache for {name}")
+            provider.get_voice_cache().refresh()
+
+
+def clear_provider_cache(provider_name=None):
+    """
+    Clear cached provider instance(s), forcing re-initialization on next use.
+
+    Args:
+        provider_name: 'inworld', 'elevenlabs', or None for all providers
+    """
+    global _providers
+
+    if provider_name:
+        if provider_name in _providers:
+            print(f"[TTS] Clearing cached provider: {provider_name}")
+            del _providers[provider_name]
+        # Also clear provider-specific module caches
+        if provider_name == 'inworld':
+            from .inworld import clear_voice_cache
+            clear_voice_cache()
+    else:
+        print("[TTS] Clearing all cached providers")
+        _providers.clear()
+        # Clear all provider module caches
+        try:
+            from .inworld import clear_voice_cache
+            clear_voice_cache()
+        except ImportError:
+            pass
 
 
 def is_available() -> bool:
@@ -102,13 +154,12 @@ def get_provider_name() -> str:
 def synthesize_to_bytes(text, character_name, lang=None):
     """Synthesize text to raw PCM audio bytes."""
     provider = get_provider()
+    # get_or_create_voice now raises specific exceptions on failure
     voice = provider.get_or_create_voice(character_name, lang)
-    if not voice:
-        raise Exception(f"Voice '{character_name}' not found.")
 
     voice_id = voice.get('voiceId') or voice.get('voice_id')
     if not voice_id:
-        raise Exception(f"Voice ID not found for '{character_name}'")
+        raise Exception(f"Voice '{character_name}' has no voice ID. Try refreshing the voice cache.")
 
     pcm_chunks = []
     def on_chunk(pcm_bytes, word_timing):

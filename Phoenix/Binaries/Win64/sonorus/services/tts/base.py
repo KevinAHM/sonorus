@@ -167,16 +167,21 @@ class BaseTTSProvider(ABC):
     # ----------------------------------------
 
     def get_or_create_voice(self, character_name: str,
-                            lang: Optional[str] = None) -> Optional[Dict]:
+                            lang: Optional[str] = None,
+                            lua_socket: Any = None) -> Optional[Dict]:
         """
         Get a voice for a character, cloning it if necessary.
 
         Args:
             character_name: Character name (e.g., "SebastianSallow")
             lang: Language code. Uses provider default if None.
+            lua_socket: Socket server for sending notifications
 
         Returns:
-            Voice dict with voiceId, or None if unavailable
+            Voice dict with voiceId
+
+        Raises:
+            Exception: With specific reason if voice cannot be obtained
         """
         if lang is None:
             lang = self.get_default_language()
@@ -184,6 +189,7 @@ class BaseTTSProvider(ABC):
         # Check cache first
         cache = self.get_voice_cache()
         if not cache._loaded:
+            # load() raises specific exceptions on failure
             cache.load()
 
         voice = cache.get(character_name, lang)
@@ -192,15 +198,23 @@ class BaseTTSProvider(ABC):
             return voice
 
         # Not in cache - try to clone
-        print(f"[{self.name}] Voice not found, attempting to clone: {character_name}")
+        print(f"[{self.name}] Voice not found in {self.name}, attempting to clone: {character_name}")
 
         ref_path = find_voice_reference(character_name, "15s")
         if not ref_path:
             print(f"[{self.name}] No reference file for: {character_name}")
-            return None
+            raise Exception(f"Voice reference file not found for '{character_name}'. Ensure voice references are extracted.")
 
         print(f"[{self.name}] Using reference: {os.path.basename(ref_path)}")
-        return self.clone_voice(character_name, ref_path, lang)
+
+        # Notify player that we're cloning
+        if lua_socket:
+            lua_socket.send_notification("Cloning voice, please wait...")
+
+        cloned = self.clone_voice(character_name, ref_path, lang)
+        if not cloned:
+            raise Exception(f"Voice cloning failed for '{character_name}'. Check the server logs for details.")
+        return cloned
 
     def speak(self, text: str, character_name: str,
               lang: Optional[str] = None,
@@ -209,7 +223,8 @@ class BaseTTSProvider(ABC):
               on_download_complete: Optional[Callable] = None,
               lua_socket: Any = None,
               initial_positions: Optional[Dict] = None,
-              turn_id: Optional[str] = None) -> Dict:
+              turn_id: Optional[str] = None,
+              abort_check: Optional[Callable[[], bool]] = None) -> Dict:
         """
         Speak text as a character with 3D audio.
         Streams TTS and plays audio in real-time.
@@ -230,10 +245,15 @@ class BaseTTSProvider(ABC):
             lua_socket: Socket server for real-time position updates
             initial_positions: Dict with camX/Y/Z, camYaw, npcX/Y/Z for 3D position
             turn_id: Turn identifier for coordinator
+            abort_check: Callable that returns True if we should abort
 
         Returns:
             {"success": bool, "word_timings": list, "error": str or None}
         """
+        # Check for abort before starting
+        if abort_check and abort_check():
+            return {"success": False, "word_timings": [], "error": "Aborted"}
+
         try:
             from audio.spatial import create_tts_stream, get_player
         except ImportError as e:
@@ -247,7 +267,7 @@ class BaseTTSProvider(ABC):
             coordinator = None
 
         # Get or create voice
-        voice = self.get_or_create_voice(character_name, lang)
+        voice = self.get_or_create_voice(character_name, lang, lua_socket)
         if not voice:
             return {"success": False, "word_timings": [], "error": f"No voice for {character_name}"}
 
@@ -340,6 +360,11 @@ class BaseTTSProvider(ABC):
         if not buffer_ready.wait(timeout=15.0):
             return {"success": False, "word_timings": [], "error": "Timeout waiting for TTS buffer"}
 
+        # Check for abort after buffering
+        if abort_check and abort_check():
+            print("[Speak] Aborted after buffering")
+            return {"success": False, "word_timings": [], "error": "Aborted"}
+
         if tts_error[0]:
             return {"success": False, "word_timings": [], "error": tts_error[0]}
 
@@ -389,7 +414,8 @@ class BaseTTSProvider(ABC):
                     lang: Optional[str] = None,
                     on_chunk: Optional[Callable] = None,
                     abort_check: Optional[Callable[[], bool]] = None,
-                    on_ready: Optional[Callable] = None) -> Optional[Tuple]:
+                    on_ready: Optional[Callable] = None,
+                    lua_socket: Any = None) -> Optional[Tuple]:
         """
         Download TTS audio into buffer without playing.
         Used for pre-buffering the next response while current audio plays.
@@ -402,11 +428,12 @@ class BaseTTSProvider(ABC):
             abort_check: Callable that returns True if we should abort
             on_ready: Callback when enough audio is buffered to start playing
                       (called with tts_stream, word_timings, visemes)
+            lua_socket: Socket server for sending notifications
 
         Returns:
             (tts_stream, word_timings, visemes) tuple on success, None if failed/aborted
         """
-        voice = self.get_or_create_voice(character_name, lang)
+        voice = self.get_or_create_voice(character_name, lang, lua_socket)
         if not voice:
             print(f"[PrepareTTS] No voice for {character_name}")
             return None

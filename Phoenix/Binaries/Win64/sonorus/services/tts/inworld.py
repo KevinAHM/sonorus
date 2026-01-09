@@ -9,11 +9,9 @@ import sys
 import time
 import base64
 import json
-import urllib.request
-import urllib.error
 from typing import Dict, Optional, Callable
 
-import requests  # For proper streaming
+import requests
 
 from dotenv import load_dotenv
 
@@ -112,7 +110,11 @@ class InworldVoiceCache(VoiceCache):
         return f"{name}_{lang}"
 
     def load(self) -> bool:
-        """Load voices from Inworld API."""
+        """Load voices from Inworld API.
+
+        Raises:
+            Exception: With specific error message for API failures
+        """
         config = _get_inworld_config()
         workspace = config["workspace_id"]
         api_url = config["api_url"].rstrip('/')
@@ -120,7 +122,7 @@ class InworldVoiceCache(VoiceCache):
 
         if not workspace:
             print("[Inworld] No workspace ID configured")
-            return False
+            raise Exception("Inworld workspace ID not configured. Set it in TTS settings.")
 
         url = f"{api_url}/voices/v1/workspaces/{workspace}/voices"
 
@@ -129,13 +131,27 @@ class InworldVoiceCache(VoiceCache):
             "Content-Type": "application/json",
         }
 
-        req = urllib.request.Request(url, headers=headers, method="GET")
-
         try:
             print(f"[Inworld] Loading voices from {workspace}...")
-            with urllib.request.urlopen(req, timeout=30) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            response = requests.get(url, headers=headers, timeout=30)
 
+            if response.status_code == 401:
+                print(f"[Inworld] API error: 401 Unauthorized")
+                raise Exception("Inworld API key is invalid. Check your API key in TTS settings.")
+
+            if response.status_code == 403:
+                print(f"[Inworld] API error: 403 Forbidden")
+                raise Exception("Inworld API key does not have access to this workspace. Check that your API key is valid for this workspace ID.")
+
+            if response.status_code == 404:
+                print(f"[Inworld] API error: 404 Not Found")
+                raise Exception(f"Inworld workspace '{workspace}' not found. Check your workspace ID in TTS settings.")
+
+            if response.status_code != 200:
+                print(f"[Inworld] API error: {response.status_code} {response.reason}")
+                raise Exception(f"Inworld API error: {response.status_code} {response.reason}")
+
+            data = response.json()
             voices = data.get("voices", [])
             self._voices.clear()
             self._by_id.clear()
@@ -157,12 +173,15 @@ class InworldVoiceCache(VoiceCache):
             print(f"[Inworld] Loaded {len(voices)} voices")
             return True
 
-        except urllib.error.HTTPError as e:
-            print(f"[Inworld] API error: {e.code} {e.reason}")
-            return False
+        except requests.exceptions.RequestException as e:
+            print(f"[Inworld] Request failed: {e}")
+            raise Exception(f"Cannot connect to Inworld API: {e}")
         except Exception as e:
+            # Re-raise our own exceptions, wrap others
+            if "Inworld" in str(e):
+                raise
             print(f"[Inworld] Failed to load voices: {e}")
-            return False
+            raise Exception(f"Failed to load Inworld voices: {e}")
 
 
 # ============================================
@@ -178,6 +197,14 @@ def _get_voice_cache() -> InworldVoiceCache:
     if _voice_cache is None:
         _voice_cache = InworldVoiceCache()
     return _voice_cache
+
+
+def clear_voice_cache():
+    """Clear the module-level voice cache, forcing reload on next use."""
+    global _voice_cache
+    if _voice_cache is not None:
+        print("[Inworld] Clearing voice cache")
+        _voice_cache = None
 
 
 class InworldProvider(BaseTTSProvider):
@@ -254,18 +281,30 @@ class InworldProvider(BaseTTSProvider):
             "Content-Type": "application/json",
         }
 
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST"
-        )
-
         try:
-            print(f"[Inworld] Cloning voice: {display_name} ({lang})...")
-            with urllib.request.urlopen(req, timeout=120) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            file_size = os.path.getsize(reference_wav_path)
+            print(f"[Inworld] Cloning voice: {display_name} ({lang}), file size: {file_size / 1024:.1f} KB...")
 
+            response = requests.post(url, json=payload, headers=headers, timeout=180)
+
+            if response.status_code != 200:
+                error_msg = f"HTTP {response.status_code}"
+                error_body = response.text[:300] if response.text else ""
+                print(f"[Inworld] Clone error: {error_msg}")
+                if error_body:
+                    print(f"[Inworld] Details: {error_body}")
+                el = _get_event_logger()
+                if el:
+                    el.log_voice_clone_event(
+                        character_name=display_name,
+                        language=lang,
+                        reference_filename=os.path.basename(reference_wav_path),
+                        status="error",
+                        error=f"{error_msg}: {error_body}"
+                    )
+                return None
+
+            data = response.json()
             voice = data.get("voice", {})
             voice_id = voice.get("voiceId", "")
 
@@ -301,12 +340,8 @@ class InworldProvider(BaseTTSProvider):
                     )
                 return None
 
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode("utf-8") if e.fp else ""
-            error_msg = f"{e.code} {e.reason}"
-            print(f"[Inworld] Clone error: {error_msg}")
-            if error_body:
-                print(f"[Inworld] Details: {error_body[:300]}")
+        except requests.exceptions.Timeout:
+            print(f"[Inworld] Clone timed out after 180s")
             el = _get_event_logger()
             if el:
                 el.log_voice_clone_event(
@@ -314,7 +349,19 @@ class InworldProvider(BaseTTSProvider):
                     language=lang,
                     reference_filename=os.path.basename(reference_wav_path),
                     status="error",
-                    error=error_msg
+                    error="Request timed out after 180 seconds"
+                )
+            return None
+        except requests.exceptions.RequestException as e:
+            print(f"[Inworld] Clone request failed: {e}")
+            el = _get_event_logger()
+            if el:
+                el.log_voice_clone_event(
+                    character_name=display_name,
+                    language=lang,
+                    reference_filename=os.path.basename(reference_wav_path),
+                    status="error",
+                    error=f"Request failed: {str(e)}"
                 )
             return None
         except Exception as e:

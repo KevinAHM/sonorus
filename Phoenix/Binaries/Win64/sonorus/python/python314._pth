@@ -1,0 +1,6 @@
+python314.zip
+.
+Lib\site-packages
+
+# Enable site-packages for pip
+import site

@@ -40,6 +40,9 @@ class LuaSocketServer:
         # Turn complete handshake (Lua signals when mouth animation is done)
         self._turn_complete_event = threading.Event()
         self._turn_complete_event.set()  # Initially complete (no pending turn)
+        # Context refresh handshake (request fresh nearbyNpcs from Lua)
+        self._context_refresh_event = threading.Event()
+        self._context_refresh_pending = False
         # Position data from Lua (camera + NPC positions for 3D audio)
         self._positions = {
             "camX": 0, "camY": 0, "camZ": 0,
@@ -90,6 +93,8 @@ class LuaSocketServer:
                 # Start receive thread for this client
                 recv_thread = threading.Thread(target=self._receive_loop, daemon=True)
                 recv_thread.start()
+                # Send initial tracking settings
+                self.send_tracking_settings()
             except sock_lib.timeout:
                 continue
             except Exception as e:
@@ -109,6 +114,21 @@ class LuaSocketServer:
                 print(f"[Socket] Send failed: {e}")
                 self.client = None
                 return False
+
+    def send_tracking_settings(self):
+        """Send dialogue tracking settings to Lua."""
+        try:
+            from .settings import load_settings
+            settings = load_settings()
+            history = settings.get('history', {})
+            self.send({
+                "type": "tracking_settings",
+                "track_ambient": history.get('track_ambient', True),
+                "track_cutscene": history.get('track_cutscene', True),
+            })
+            print("[Socket] Sent tracking settings to Lua")
+        except Exception as e:
+            print(f"[Socket] Error sending tracking settings: {e}")
 
     def send_lipsync_start(self, speaker: str = None, start_time: float = None, turn_id: str = None, visemes: list = None, scale: float = None):
         """Signal audio playback starting."""
@@ -262,6 +282,10 @@ class LuaSocketServer:
         if msg_type == "game_context":
             with self._context_lock:
                 self._game_context = msg.get("data", {})
+            # Signal any pending context refresh
+            if self._context_refresh_pending:
+                self._context_refresh_pending = False
+                self._context_refresh_event.set()
             print(f"[Socket] Game context received: {len(self._game_context)} fields")
         elif msg_type == "pause_state":
             # Immediate pause state update (more responsive than full context)
@@ -277,11 +301,11 @@ class LuaSocketServer:
                 if capture:
                     capture.force_close(reason)
         elif msg_type == "reset":
-            # Lua signaled reset (F8 key)
-            if self._conv_state:
-                self._conv_state.reset()
+            # Lua signaled reset (F8 key or response to our reset)
+            # DON'T call reset() here - it clears the interrupted flag
+            # The processing code will handle cleanup when it sees the flag
             self.send_conversation_state("idle")
-            print("[Socket] Reset received from Lua - conversation state reset")
+            print("[Socket] Reset received from Lua")
         elif msg_type == "shutdown":
             # Lua requested server shutdown
             print("[Socket] Shutdown requested from Lua")
@@ -320,12 +344,13 @@ class LuaSocketServer:
                 "npcZ": msg.get("npcZ", 0),
             }
 
-            # Store initial positions so get_positions() returns them immediately
-            # This ensures first speaker has valid 3D position before audio starts
-            # For player speaker, we skip 3D positioning (audio plays centered)
+            # NOTE: We do NOT update _positions here anymore! That was causing audio
+            # to briefly jump to the NEXT speaker's position while the current speaker
+            # is still playing (because turn_ready comes in during pre-buffering).
+            # Instead, positions are passed through send_play_turn() return value and
+            # set via set_initial_positions() when the turn actually starts playing.
+            # The continuous "positions" messages from Lua handle updates during playback.
             if has_positions and not is_player_speaker:
-                with self._context_lock:
-                    self._positions = initial_positions.copy()
                 print(f"[Socket] Turn ready: {turn_id} (actor_found={actor_found}) "
                       f"npc_pos=({initial_positions['npcX']:.0f},{initial_positions['npcY']:.0f},{initial_positions['npcZ']:.0f})")
             elif is_player_speaker:
@@ -369,6 +394,14 @@ class LuaSocketServer:
             print("[Socket] Turn complete - mouth closed")
             self._turn_complete_event.set()
 
+        elif msg_type == "record_dialogue":
+            # Lua sends dialogue entries for Python to persist
+            entry = msg.get("entry")
+            if entry and isinstance(entry, dict):
+                self._record_dialogue_entry(entry)
+            elif entry:
+                print(f"[Socket] WARNING: record_dialogue received non-dict entry: {type(entry).__name__} = {repr(entry)[:100]}")
+
     def wait_for_turn_complete(self, timeout: float = 2.0) -> bool:
         """Wait for previous turn's mouth animation to complete.
         Returns True if complete, False on timeout."""
@@ -376,6 +409,35 @@ class LuaSocketServer:
             return True
         print(f"[Socket] Turn complete timeout after {timeout}s")
         return False
+
+    def _record_dialogue_entry(self, entry):
+        """Append a dialogue entry from Lua and save to file.
+
+        This is the sole writer for dialogue_history.json - Lua sends entries
+        here instead of writing directly to avoid race conditions.
+        """
+        try:
+            from .dialogue import load_dialogue_history, save_dialogue_history
+
+            # Load current history (use None for game_context since Lua entries don't need it)
+            history = load_dialogue_history(None)
+
+            # Dedup location entries - skip if last entry is same location
+            # This handles the case where Lua's _G.LastRecordedLocation resets on reload
+            if entry.get("type") == "location" and history:
+                last_entry = history[-1]
+                if (last_entry.get("type") == "location" and
+                    last_entry.get("location") == entry.get("location")):
+                    print(f"[Socket] Skipping duplicate location entry: {entry.get('location')}")
+                    return
+
+            # Append new entry
+            history.append(entry)
+
+            # Save
+            save_dialogue_history(history)
+        except Exception as e:
+            print(f"[Socket] Error recording dialogue entry: {e}")
 
     def mark_turn_started(self):
         """Mark that a new turn is starting (clear complete event)."""
@@ -390,6 +452,52 @@ class LuaSocketServer:
         """Get cached game context (thread-safe)."""
         with self._context_lock:
             return self._game_context.copy()
+
+    def request_context_refresh(self, groups: list = None, timeout: float = 2.0) -> dict:
+        """
+        Request game context from Lua with optional group filtering.
+
+        Args:
+            groups: List of context groups to request (e.g., ["state", "npcs"]).
+                   If None or empty, requests all context (backwards compatible).
+                   Valid groups: position, state, time, player, gear, npcs, zone, mission, companion
+            timeout: How long to wait for Lua response
+
+        Returns:
+            Context dict (may be partial if groups specified), or empty dict on timeout
+        """
+        # Clear event and mark pending
+        self._context_refresh_event.clear()
+        self._context_refresh_pending = True
+
+        # Build request message
+        msg = {"type": "request_context"}
+        if groups:
+            msg["groups"] = groups
+
+        # Send request to Lua
+        success = self.send(msg)
+        if not success:
+            print("[Socket] Failed to send context refresh request")
+            self._context_refresh_pending = False
+            return self.get_game_context()  # Return cached on failure
+
+        # Wait for game_context message
+        if self._context_refresh_event.wait(timeout=timeout):
+            groups_str = ", ".join(groups) if groups else "all"
+            print(f"[Socket] Fresh context received ({groups_str})")
+            return self.get_game_context()
+        else:
+            print(f"[Socket] Context refresh timeout after {timeout}s - using cached context")
+            self._context_refresh_pending = False
+            return self.get_game_context()
+
+    def request_state_only(self, timeout: float = 0.2) -> dict:
+        """
+        Quick state-only context refresh for input capture checks.
+        Returns just combat/cinematic/pause state fields.
+        """
+        return self.request_context_refresh(groups=["state"], timeout=timeout)
 
     def get_connection_id(self):
         """Get current connection ID (increments on each new client connection)."""

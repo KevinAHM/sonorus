@@ -12,6 +12,44 @@ import wave
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.settings import load_settings
 
+# Spell names for keyword boosting (tricky pronunciations)
+# These help Deepgram recognize Harry Potter spell incantations
+SPELL_KEYTERMS = [
+    # Two-word spells (most likely to be misheard)
+    "Avada Kedavra",
+    "Wingardium Leviosa",
+    "Arresto Momentum",
+    "Petrificus Totalus",
+    # Latin-derived spells
+    "Levioso",
+    "Accio",
+    "Depulso",
+    "Descendo",
+    "Flipendo",
+    "Glacius",
+    "Incendio",
+    "Confringo",
+    "Diffindo",
+    "Expelliarmus",
+    "Expulso",
+    "Crucio",
+    "Imperio",
+    "Stupefy",
+    "Lumos",
+    "Nox",
+    "Reparo",
+    "Revelio",
+    "Protego",
+    "Confundo",
+    "Oppugno",
+    "Obliviate",
+    "Episkey",
+    "Evanesco",
+    "Conjuration",
+    "Transformation",
+    "Disillusionment",
+]
+
 
 def transcribe(audio_data: bytes, sample_rate: int = 16000) -> dict:
     """
@@ -52,15 +90,30 @@ def transcribe(audio_data: bytes, sample_rate: int = 16000) -> dict:
         # When model_improvement is False in settings, we opt OUT (mip_opt_out=True)
         mip_opt_out = not dg_settings.get('model_improvement', False)
 
+        # Determine model and keyword parameter
+        model = dg_settings.get('model', 'nova-3')
+        is_nova3 = 'nova-3' in model.lower()
+
+        # Build transcription parameters
+        transcribe_params = {
+            'request': wav_data,
+            'model': model,
+            'language': dg_settings.get('language', 'en-US'),
+            'mip_opt_out': mip_opt_out,
+            'smart_format': True,  # Intelligent formatting with punctuation/capitalization
+            'filler_words': True,  # Include disfluencies like "uh", "um"
+        }
+
+        # Add spell keywords based on model
+        # Nova-3 uses 'keyterm', Nova-2 uses 'keywords' with intensifiers
+        if is_nova3:
+            transcribe_params['keyterm'] = SPELL_KEYTERMS
+        else:
+            # Nova-2: keywords require intensifier (e.g., "spell:2")
+            transcribe_params['keywords'] = [f"{spell}:2" for spell in SPELL_KEYTERMS]
+
         # v5 API: parameters passed directly instead of PrerecordedOptions
-        response = client.listen.v1.media.transcribe_file(
-            request=wav_data,
-            model=dg_settings.get('model', 'nova-3'),
-            language=dg_settings.get('language', 'en-US'),
-            mip_opt_out=mip_opt_out,
-            smart_format=True,  # Intelligent formatting with punctuation/capitalization
-            filler_words=True,  # Include disfluencies like "uh", "um"
-        )
+        response = client.listen.v1.media.transcribe_file(**transcribe_params)
 
         # Extract result
         result = response.results.channels[0].alternatives[0]

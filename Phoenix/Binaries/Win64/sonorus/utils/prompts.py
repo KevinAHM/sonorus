@@ -3,9 +3,8 @@ Character prompt utilities for Sonorus.
 Handles prompt template substitution and character configuration.
 """
 
-import re
-
 from .settings import load_settings, DEFAULT_SETTINGS
+from .localization import get_display_name
 
 
 def substitute_placeholders(prompt, context):
@@ -20,17 +19,24 @@ def substitute_placeholders(prompt, context):
     return prompt
 
 
-def get_character(char_id, char_name=None, game_context=None):
-    """Get character name and prompt from settings, including bios for context."""
+def get_character(npc_id, game_context=None):
+    """
+    Get character display name and prompt from settings, including bios for context.
+
+    Args:
+        npc_id: Internal NPC ID (e.g., "SebastianSallow", "NellieOggspire")
+        game_context: Optional game context dict for placeholder substitution
+
+    Returns:
+        Tuple of (display_name, prompt) where display_name is like "Sebastian Sallow"
+    """
     settings = load_settings()
     prompts = settings.get('prompts', {})
     bios = prompts.get('bios', {})
     default_prompt = prompts.get('default', DEFAULT_SETTINGS['prompts']['default'])
 
-    # Prettify character name
-    display_name = char_name or "Hogwarts Resident"
-    if char_name:
-        display_name = re.sub(r'([a-z])([A-Z])', r'\1 \2', char_name)
+    # Get display name from ID using localization
+    display_name = get_display_name(npc_id) if npc_id else "Hogwarts Resident"
 
     # Build context for placeholder substitution
     placeholder_context = {
@@ -62,8 +68,8 @@ def get_character(char_id, char_name=None, game_context=None):
     # Build bio context section
     bio_sections = []
 
-    # Get NPC bio (try raw name, then prettified name)
-    npc_bio = bios.get(char_name) if char_name else None
+    # Get NPC bio (try ID first, then display name)
+    npc_bio = bios.get(npc_id) if npc_id else None
     if not npc_bio:
         npc_bio = bios.get(display_name)
     if npc_bio:

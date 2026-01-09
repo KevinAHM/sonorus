@@ -5,6 +5,7 @@ Handles ID to display name mapping and reverse lookups.
 
 import os
 import json
+import re
 
 from .settings import DATA_DIR
 
@@ -29,6 +30,29 @@ def load_localization():
             print(f"[Localization] Error loading: {e}")
             _localization_cache = {}
     return _localization_cache
+
+
+def get_display_name(npc_id):
+    """
+    Convert NPC ID to display name using localization.
+
+    Args:
+        npc_id: Internal ID like "NellieOggspire", "SebastianSallow"
+
+    Returns:
+        Display name like "Nellie Oggspire", "Sebastian Sallow"
+    """
+    if not npc_id:
+        return "Unknown"
+
+    # Check localization for proper display name
+    loc = load_localization()
+    if npc_id in loc:
+        return loc[npc_id]
+
+    # Fallback: add spaces at camelCase boundaries
+    # "NellieOggspire" -> "Nellie Oggspire"
+    return re.sub(r'([a-z])([A-Z])', r'\1 \2', npc_id)
 
 
 def get_reverse_localization():

@@ -105,59 +105,74 @@ def set_lua_socket(socket):
     _lua_socket = socket
 
 # Vision prompt template
-VISION_PROMPT = """You are describing what is currently visible in this Hogwarts Legacy screenshot. Provide a grounded, immediate description focusing on the environment, visible objects, and character actions.
+VISION_PROMPT = """You are describing what is currently visible in this Hogwarts Legacy screenshot. Your description will be used by NPCs to understand what they can see and comment on. Be specific and vivid enough that someone could have a conversation about any element you mention.
 
 ## Context:
 - Location: {location}
 - Time: {time_of_day}
 
+{player_section}
+
 {visible_npcs_section}
-
 {nearby_landmarks_section}
-
 ## CORE INSTRUCTIONS:
 
-**Perspective:** Third-person view. The player character model in view is a camera artifact—DO NOT mention or describe it.
+**Perspective:** Third-person view following the player character.
 
 **Description Priorities:**
 
-1. **Environment & Objects** (ESSENTIAL):
+1. **The Player Character** (IMPORTANT):
+   - The player character is the figure the camera follows (typically center or slightly off-center)
+   - Use the player info above to identify them - describe what they're doing, their pose, position in the scene
+   - Example: "Harry stands near the entrance, his Gryffindor robes visible beneath his dark cloak"
+
+2. **Environment & Objects** (ESSENTIAL - be specific and descriptive):
    - Spatial scale and overall layout
-   - Architecture, materials, textures, and light sources
-   - Specific visible objects: furniture, doors, windows, decorations
-   - Use fixtures to anchor locations (doorway, hearth, pillar, shelf)
-   - NAME recognizable Wizarding World elements: Floo Flames, House banners, magical creatures, potion ingredients, spell effects, broomsticks, etc. Don't describe these generically.
+   - Architecture: materials, style, condition (weathered stone, polished wood, ornate carvings)
+   - **Notable objects deserve rich detail**: If there's a fireplace, describe its style, carvings, what's on the mantle, the quality of the flames. If there's a painting, describe its subject and frame. If there's a desk, note what's on it.
+   - Decorative elements: tapestries (what they depict), suits of armor (style/condition), statues (who/what), candles/torches (lit/unlit), plants
+   - Magical elements: floating candles, moving portraits, enchanted objects, Floo Flames, House banners, magical creatures, potion ingredients, spell effects
+   - Colors and color schemes - dominant hues, contrasts
+   - Object states: doors open/closed, books open/stacked, cauldrons bubbling/empty
 
-2. **Character Actions** (only for visible NPCs):
-   - ONLY describe what you can CLEARLY SEE - pose, gesture, position
-   - DO NOT invent or assume actions (sitting, reading, etc.) unless unmistakably visible
-   - Placement via scene fixtures only
+3. **Other Characters** (NPCs):
+   - ONLY describe what you can CLEARLY SEE - pose, gesture, position, what they're doing
+   - DO NOT invent or assume actions unless unmistakably visible
+   - Placement via scene fixtures (standing by the window, seated near the fire)
 
-3. **Atmosphere**:
-   - Weather effects (if outdoors), lighting mood
-   - Overall energy and feel
+4. **Atmosphere**:
+   - Lighting quality: warm firelight, cold moonlight, bright daylight, dim torchlight
+   - Weather effects (if outdoors)
+   - Overall mood and energy
 
-**CRITICAL - Character Identification:**
-- NEVER name a character unless you are 100% certain (unique/distinctive appearance like main story characters)
-- For generic students/NPCs, use descriptive labels based ONLY on visible details:
+**CRITICAL - NPC Identification:**
+- **"VISIBLE" list is authoritative**: Characters listed under "VISIBLE" ARE confirmed in the screenshot.
+- **Name tags for identification only**: Use floating name tags to identify WHO a character is, but don't describe the name tag itself in your output.
+- **Cross-reference**: If you see a character and "Sebastian Sallow" is in the VISIBLE list, that character is Sebastian - just describe them by name.
+- **Extra characters**: If you see more characters than are in the VISIBLE list, describe them generically:
   - "A student" / "Two students" (if no house visible)
   - "A Hufflepuff student" (if house robes/colors clearly visible)
-  - "A male Gryffindor student and a female Ravenclaw student"
   - "A professor in dark robes"
-- The "Nearby" section lists characters/creatures NEAR the player by game data - they may not be visible in the screenshot. Do not assume a visible character is someone from this list unless you can verify their identity visually
+- **"NEARBY but not visible"**: These characters are NOT in the screenshot - don't describe them
 
 **Output Format:**
 
-**Scene:** [3-5 sentences. Describe what you see at the given location. Layout, specific objects with visual details, strictly factual and present tense. Include specific positional details if relevant (e.g., "near the fountain", "by the staircase").]
+**Scene:** [4-6 sentences. Describe the space and its contents with enough detail that someone could comment on specific elements. What would catch someone's eye? What makes this space distinctive? Include materials, colors, decorative details.]
 
-**Visible characters:** [For each visible NPC, 1-2 sentences on ONLY what is clearly visible - pose, clothing, position. Use generic descriptions unless identity is certain. Skip if none visible.]
+**Player:** [1-2 sentences describing where {player_name} is positioned in the scene and what they appear to be doing. Reference their attire if distinctive.]
 
-**Atmosphere:** [1-2 sentences on lighting, mood, energy.]
+**Notable details:** [2-3 specific elements worth mentioning - an interesting object, decoration, or feature. Describe each with 1-2 sentences of vivid detail. These are things someone might point at and say "look at that" or ask about.]
+
+**Visible characters:** [For each visible NPC (not the player), 1-2 sentences on what is clearly visible - their name (if name tag visible), pose, clothing, position, apparent activity. Skip if none visible besides the player.]
+
+**Atmosphere:** [1-2 sentences on lighting quality, mood, ambient details.]
 
 **Style Rules:**
-- Active, present tense; concrete details
-- Anchor with scene fixtures, no distances or directions
-- ONLY describe what is CLEARLY visible on-screen - when in doubt, leave it out
+- Active, present tense; concrete, specific details
+- Describe objects as if you might discuss them - "an ornate silver candelabra" not just "a candelabra"
+- Include colors, materials, conditions, decorative features
+- ONLY describe what is CLEARLY visible - when in doubt, leave it out
+- **Ignore UI elements**: Don't mention name tags, interaction prompts ("F TALK"), health bars, minimaps, button hints, or any game interface elements - describe only the world and characters themselves
 
 **If Unable to Describe:**
 If the screenshot is a loading screen, too dark, blurry, obscured by UI/menus, shows too limited an area (e.g., staring at a wall/corner), or is otherwise impossible to describe meaningfully, respond with ONLY: `UNCLEAR: <brief reason>`"""
@@ -329,14 +344,8 @@ class VisionAgent:
         self._capture_complete = threading.Event()
         self._capture_complete.set()  # Initially not capturing
 
-        # Idle detection
-        self.last_known_pos = None  # For movement tracking
-        self.last_movement_time = time.time()
-        self.is_idle = False
-
-        # Activity state tracking (for Lua - foreground/idle status)
+        # Activity state tracking (for Lua - foreground status only, idle handled by Lua)
         self._last_sent_foreground = None
-        self._last_sent_idle = None
         self._last_connection_id = 0  # Track socket reconnects to force state sync
 
         # OpenAI client (for OpenRouter)
@@ -363,27 +372,22 @@ class VisionAgent:
         print("[VisionAgent] Stopped")
 
     def _run_loop(self):
-        """Background loop - sends activity state for ambient dialog gating"""
-        print("[VisionAgent] Activity state loop started")
+        """Background loop - sends foreground state to Lua for ambient dialog gating"""
+        print("[VisionAgent] Foreground state loop started")
 
         while self.running:
             try:
-                # Send activity state to Lua (foreground + idle for ambient dialog gating)
+                # Send foreground state to Lua (idle detection now handled by Lua)
                 self._send_activity_state()
 
-                # Read current position and update idle status
-                current_pos = self._read_position()
-                if current_pos:
-                    self._update_idle_status(current_pos)
-
-                # Poll every 500ms
-                time.sleep(0.5)
+                # Poll every 2 seconds (just foreground check, no position needed)
+                time.sleep(2.0)
 
             except Exception as e:
                 print(f"[VisionAgent] Error in loop: {e}")
-                time.sleep(1)
+                time.sleep(2.0)
 
-        print("[VisionAgent] Activity state loop ended")
+        print("[VisionAgent] Foreground state loop ended")
 
     def capture_now(self):
         """Trigger a capture if cooldown elapsed. Called from input handlers."""
@@ -414,12 +418,37 @@ class VisionAgent:
         threading.Thread(target=self._do_capture_async, daemon=True).start()
 
     def _do_capture_async(self):
-        """Async wrapper for capture - reads position and settings internally"""
+        """Async wrapper for capture - does handshake for fresh context"""
         try:
             settings = get_vision_settings()
-            current_pos = self._read_position()
-            if current_pos:
-                self._do_capture(current_pos, settings)
+
+            # Request fresh context for capture (handshake replaces periodic polling)
+            # "vision" group does line trace visibility checks for on-screen NPCs
+            # "player" group gets playerName/playerHouse, "gear" gets playerGear
+            if _lua_socket:
+                game_context = _lua_socket.request_context_refresh(
+                    groups=["position", "state", "time", "zone", "player", "gear", "npcs", "vision"],
+                    timeout=0.5
+                )
+            else:
+                game_context = {}
+
+            # Extract position from fresh context
+            x = game_context.get('x')
+            y = game_context.get('y')
+            z = game_context.get('z')
+
+            if x is not None and y is not None and z is not None:
+                current_pos = {
+                    'x': x,
+                    'y': y,
+                    'z': z,
+                    'timestamp': time.time(),
+                    'location': game_context.get('location', 'Unknown'),
+                }
+                self._do_capture(current_pos, settings, game_context)
+            else:
+                print("[VisionAgent] No position data - skipping capture")
         finally:
             # Always mark capture as complete
             self._capture_in_progress = False
@@ -437,43 +466,10 @@ class VisionAgent:
             print("[VisionAgent] Capture wait timed out")
         return result
 
-    def _update_idle_status(self, current_pos):
-        """Check for movement and update idle status"""
-        # Get idle timeout from settings
-        from utils.settings import load_settings
-        all_settings = load_settings()
-        idle_timeout_minutes = all_settings.get('input', {}).get('idle_timeout_minutes', 20)
-
-        # If disabled (0), never idle
-        if idle_timeout_minutes == 0:
-            if self.is_idle:
-                self.is_idle = False
-                print("[VisionAgent] Idle detection disabled")
-            self.last_known_pos = current_pos.copy()
-            return
-
-        # Check for movement against last known position
-        if self.last_known_pos:
-            distance = calculate_distance(current_pos, self.last_known_pos)
-            if distance > 50:  # Moved more than 50 units (~0.5m)
-                if self.is_idle:
-                    print("[VisionAgent] Movement detected - resuming AI functions")
-                self.last_movement_time = time.time()
-                self.is_idle = False
-
-        # Update last known position
-        self.last_known_pos = current_pos.copy()
-
-        # Check if idle timeout exceeded
-        idle_seconds = time.time() - self.last_movement_time
-        idle_timeout_seconds = idle_timeout_minutes * 60
-
-        if not self.is_idle and idle_seconds > idle_timeout_seconds:
-            self.is_idle = True
-            print(f"[VisionAgent] Player idle for {idle_timeout_minutes} minutes - pausing AI functions")
-
     def _send_activity_state(self, force=False):
-        """Send foreground/idle state to Lua if changed (for ambient dialog gating)"""
+        """Send foreground state to Lua if changed (for ambient dialog gating).
+        Idle detection is now handled by Lua directly.
+        """
         if not _lua_socket:
             return
 
@@ -484,43 +480,14 @@ class VisionAgent:
             force = True  # New connection, force send current state
 
         foreground = is_game_foreground()
-        idle = self.is_idle
 
         # Only send if state changed (or forced)
-        if force or foreground != self._last_sent_foreground or idle != self._last_sent_idle:
+        if force or foreground != self._last_sent_foreground:
             _lua_socket.send({
                 "type": "activity_state",
-                "foreground": foreground,
-                "idle": idle
+                "foreground": foreground
             })
             self._last_sent_foreground = foreground
-            self._last_sent_idle = idle
-
-    def _read_position(self):
-        """Read player position from game_context (sent via socket from Lua)"""
-        try:
-            game_context = self._read_game_context()
-            if not game_context:
-                return None
-
-            # Position is now included in game_context
-            x = game_context.get('x')
-            y = game_context.get('y')
-            z = game_context.get('z')
-
-            # If no position data yet, return None
-            if x is None or y is None or z is None:
-                return None
-
-            return {
-                'x': x,
-                'y': y,
-                'z': z,
-                'timestamp': time.time(),  # Use current time since context is live
-                'location': game_context.get('location', 'Unknown'),
-            }
-        except:
-            return None
 
     def _read_game_context(self):
         """Read game context from socket cache"""
@@ -528,14 +495,15 @@ class VisionAgent:
             return _lua_socket.get_game_context()
         return {}
 
-    def _do_capture(self, current_pos, settings):
+    def _do_capture(self, current_pos, settings, game_context=None):
         """Capture screenshot and generate description"""
         # Check if game is in foreground
         if not is_game_foreground():
             return  # Silently skip - no need to spam logs
 
-        # Check game context
-        game_context = self._read_game_context()
+        # Use passed context (from handshake in _do_capture_async)
+        if game_context is None:
+            game_context = self._read_game_context()
 
         # Don't capture until player has loaded into game (skip main menu)
         if not game_context.get('playerLoaded', False):
@@ -587,14 +555,14 @@ class VisionAgent:
         try:
             # Create mss instance fresh in this thread (not thread-safe across threads)
             with mss.mss() as sct:
-                # Try to get game window bounds, fall back to primary monitor
+                # Try to get game window bounds, fall back to full screen
                 monitor = get_game_window_rect()
                 if monitor:
                     print(f"[VisionAgent] Capturing window: {monitor['width']}x{monitor['height']}")
                 else:
-                    monitor = sct.monitors[1]  # Primary monitor
-                    print("[VisionAgent] Window not found, skipping")
-                    return None
+                    # Fullscreen mode - capture primary monitor
+                    monitor = sct.monitors[1]
+                    print(f"[VisionAgent] Fullscreen mode - capturing: {monitor['width']}x{monitor['height']}")
 
                 # Capture
                 screenshot = sct.grab(monitor)
@@ -644,17 +612,51 @@ class VisionAgent:
         else:
             time_of_day = "Night"
 
-        # Nearby NPCs section
+        # Player section - name, house, and gear
+        player_name = game_context.get('playerName', 'the player')
+        player_house = game_context.get('playerHouse', '')
+        player_gear = game_context.get('playerGear', '')
+
+        player_lines = [f"## Player Character: {player_name}"]
+        if player_house:
+            player_lines.append(f"- House: {player_house}")
+        if player_gear:
+            player_lines.append(f"- Current attire: {player_gear}")
+        # Add status info if relevant
+        if game_context.get('hoodUp'):
+            player_lines.append("- Hood is up")
+        if game_context.get('inStealth'):
+            player_lines.append("- Disillusionment charm active (semi-transparent/shimmering)")
+        if game_context.get('isOnBroom'):
+            player_lines.append("- Flying on a broom")
+        player_section = "\n".join(player_lines)
+
+        # Visible NPCs section - line trace confirmed visible (not occluded)
+        visible = game_context.get('visibleNpcs', [])
         nearby = game_context.get('nearbyNpcs', [])
-        if nearby:
-            npc_lines = ["## Nearby (not necessarily visible):"]
-            for npc in nearby[:5]:  # Limit to 5
+
+        npc_lines = []
+
+        # Visible NPCs - confirmed visible via line trace (not blocked by walls)
+        if visible:
+            npc_lines.append("## Characters VISIBLE (confirmed on-screen, look for their name tags):")
+            for npc in visible[:5]:
                 name = npc.get('name', 'Unknown')
                 distance = npc.get('distance', 0)
                 npc_lines.append(f"- {name} ({distance:.0f} units away)")
-            visible_npcs_section = "\n".join(npc_lines)
-        else:
-            visible_npcs_section = "## Nearby: (none detected)"
+
+        # Nearby but not visible - either off-screen or occluded
+        if nearby:
+            visible_names = {npc.get('name', '').lower() for npc in visible}
+            not_visible = [npc for npc in nearby if npc.get('name', '').lower() not in visible_names]
+            if not_visible:
+                npc_lines.append("## Characters NEARBY but not visible (off-screen or behind walls):")
+                for npc in not_visible[:3]:
+                    name = npc.get('name', 'Unknown')
+                    distance = npc.get('distance', 0)
+                    npc_lines.append(f"- {name} ({distance:.0f} units away)")
+
+        visible_npcs_section = "\n".join(npc_lines) if npc_lines else "## Nearby: (none detected)"
 
         # Nearby landmarks section (provides spatial context)
         # Exclude current location from landmarks (both specific zone and broad region)
@@ -667,14 +669,16 @@ class VisionAgent:
                     lm_lines.append(f"- {lm['name']}: {lm['distance']} {lm['direction']}")
                 else:
                     lm_lines.append(f"- {lm['name']}: {lm['distance']}")
-            nearby_landmarks_section = "\n".join(lm_lines)
+            nearby_landmarks_section = "\n".join(lm_lines) + "\n"
         else:
-            nearby_landmarks_section = ""
+            nearby_landmarks_section = "\n"
 
         # Format prompt
         prompt = VISION_PROMPT.format(
             location=location,
             time_of_day=time_of_day,
+            player_name=player_name,
+            player_section=player_section,
             visible_npcs_section=visible_npcs_section,
             nearby_landmarks_section=nearby_landmarks_section
         )
@@ -727,6 +731,8 @@ class VisionAgent:
                 for i, part in enumerate(parts):
                     if part.strip() == 'Scene:' and i+1 < len(parts):
                         context['scene'] = parts[i+1].strip().strip(':').strip()
+                    elif part.strip() == 'Player:' and i+1 < len(parts):
+                        context['player'] = parts[i+1].strip().strip(':').strip()
                     elif part.strip() == 'Visible characters:' and i+1 < len(parts):
                         context['characters'] = parts[i+1].strip().strip(':').strip()
                     elif part.strip() == 'Atmosphere:' and i+1 < len(parts):

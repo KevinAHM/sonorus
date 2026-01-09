@@ -46,6 +46,100 @@ def _get_event_logger():
             pass
     return _event_logger
 
+
+# Store last error for retrieval by callers when chat() returns None
+_last_error = None
+
+
+def get_last_error() -> Optional[str]:
+    """Get the last error message from a failed LLM call."""
+    return _last_error
+
+
+def _set_last_error(error: Optional[str]):
+    """Set the last error message."""
+    global _last_error
+    _last_error = error
+
+
+def _parse_llm_error(error: Exception) -> str:
+    """
+    Parse LLM API errors into user-friendly messages for the event log.
+    Works for Gemini, OpenRouter, and OpenAI errors.
+
+    Known error patterns:
+    - 429 RESOURCE_EXHAUSTED (free quota) -> "free quota exhausted"
+    - 503 UNAVAILABLE (overloaded) -> "model overloaded"
+    - 400 INVALID_ARGUMENT (bad API key) -> "api key not valid"
+    - 401 (auth) -> "api key not valid"
+    - 400 "not a valid model ID" -> "invalid model id"
+    - Otherwise: extract the 'message' field or return as-is
+    """
+    error_str = str(error)
+
+    # Check for known error codes/patterns
+    if '429' in error_str:
+        if 'RESOURCE_EXHAUSTED' in error_str:
+            if 'free_tier' in error_str.lower() or 'quota' in error_str.lower():
+                return "daily free quota exhausted"
+        return "rate limit exceeded"
+
+    if '503' in error_str and 'UNAVAILABLE' in error_str:
+        return "model overloaded"
+
+    # Auth errors (401, "No cookie auth credentials", etc.)
+    if '401' in error_str or 'UNAUTHENTICATED' in error_str:
+        return "api key not valid"
+
+    if 'No cookie auth credentials' in error_str:
+        return "api key not valid"
+
+    # Invalid model ID (OpenRouter)
+    if 'not a valid model ID' in error_str:
+        return "invalid model id"
+
+    # Bad API key (Gemini style)
+    if '400' in error_str and 'API key not valid' in error_str:
+        return "api key not valid"
+
+    if '400' in error_str and 'INVALID_ARGUMENT' in error_str:
+        return "invalid request"
+
+    if '403' in error_str or 'PERMISSION_DENIED' in error_str:
+        return "permission denied"
+
+    if '404' in error_str or 'NOT_FOUND' in error_str:
+        return "model not found"
+
+    # Try to extract the message from the error dict
+    # Format: "Error code: 400 - {'error': {'message': '...'}}"
+    try:
+        # Find the JSON-like dict in the error string
+        import ast
+        brace_start = error_str.find('{')
+        if brace_start != -1:
+            dict_str = error_str[brace_start:]
+            error_dict = ast.literal_eval(dict_str)
+            if isinstance(error_dict, dict):
+                msg = error_dict.get('error', {}).get('message', '')
+                if msg:
+                    # Return first sentence or first 80 chars
+                    first_sentence = msg.split('.')[0].strip()
+                    if len(first_sentence) <= 80:
+                        return first_sentence.lower()
+                    return first_sentence[:80].lower() + "..."
+    except:
+        pass
+
+    # Fallback: return a truncated version of the original
+    if len(error_str) <= 80:
+        return error_str
+    return error_str[:80] + "..."
+
+
+# Keep alias for backwards compatibility
+_parse_gemini_error = _parse_llm_error
+
 # Module state
 from utils.settings import DATA_DIR
 SETTINGS_FILE = Path(DATA_DIR) / "settings.json"
@@ -229,8 +323,10 @@ def _format_reasoning_gemini(model: str, max_tokens: int, enabled: bool) -> Dict
             return {"thinking_level": "minimal"}
 
     # Gemini 2.x and earlier use thinking_budget
+    # Minimum is 512, maximum is 24576
     if enabled:
-        return {"thinking_budget": max_tokens // 2}
+        budget = max(512, min(max_tokens // 2, 24576))
+        return {"thinking_budget": budget}
     else:
         return {"thinking_budget": 0}
 
@@ -349,11 +445,13 @@ def _chat_gemini(messages: List[Dict[str, Any]],
 
     except Exception as e:
         print(f"[LLM] Gemini error: {e}")
+        friendly_error = _parse_llm_error(e)
+        _set_last_error(friendly_error)
         payload = {"model": model, "temperature": temperature, "max_tokens": max_tokens, "messages": messages}
         log_llm(payload, error=str(e))
         el = _get_event_logger()
         if el:
-            el.log_llm_event(model=model, context=context, status="error", error=str(e))
+            el.log_llm_event(model=model, context=context, status="error", error=friendly_error)
         return None
 
 
@@ -373,8 +471,9 @@ def chat(messages: List[Dict[str, Any]],
         context: Context for logging ("chat", "target_selection", "interjection", "vision", "sentiment")
 
     Returns:
-        Response text or None on failure
+        Response text or None on failure (check get_last_error() for details)
     """
+    _set_last_error(None)  # Clear any stale error
     settings = load_settings()
     provider = _get_provider()
 
@@ -477,12 +576,14 @@ def chat(messages: List[Dict[str, Any]],
 
     except Exception as e:
         print(f"[LLM] Error from {model}: {e}")
+        friendly_error = _parse_llm_error(e)
+        _set_last_error(friendly_error)
         payload = {"model": model, "temperature": temperature, "max_tokens": max_tokens, "messages": messages}
         log_llm(payload, error=str(e))
         # Log error event
         el = _get_event_logger()
         if el:
-            el.log_llm_event(model=model, context=context, status="error", error=str(e))
+            el.log_llm_event(model=model, context=context, status="error", error=friendly_error)
         return None
 
 
@@ -581,12 +682,14 @@ def _chat_with_vision_gemini(prompt: str, image_b64: str,
 
     except Exception as e:
         print(f"[LLM] Gemini vision error: {e}")
+        friendly_error = _parse_llm_error(e)
+        _set_last_error(friendly_error)
         messages = [{"role": "user", "content": f"[Vision request with image]\n\n{prompt}"}]
         payload = {"model": model, "temperature": temperature, "max_tokens": max_tokens, "messages": messages}
         log_llm(payload, error=str(e))
         el = _get_event_logger()
         if el:
-            el.log_llm_event(model=model, context="vision", status="error", error=str(e))
+            el.log_llm_event(model=model, context="vision", status="error", error=friendly_error)
         return None
 
 
@@ -683,13 +786,15 @@ def chat_with_vision(prompt: str, image_b64: str,
 
     except Exception as e:
         print(f"[LLM] Vision error: {e}")
+        friendly_error = _parse_llm_error(e)
+        _set_last_error(friendly_error)
         log_messages = [{"role": "user", "content": f"[Vision request with image]\n\n{prompt}"}]
         payload = {"model": model, "temperature": temperature, "max_tokens": max_tokens, "messages": log_messages}
         log_llm(payload, error=str(e))
         # Log error event
         el = _get_event_logger()
         if el:
-            el.log_llm_event(model=model, context="vision", status="error", error=str(e))
+            el.log_llm_event(model=model, context="vision", status="error", error=friendly_error)
         return None
 
 

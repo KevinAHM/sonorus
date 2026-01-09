@@ -24,11 +24,13 @@ from .text_utils import (
     parse_target_result,
     filter_npcs_by_earshot,
     validate_speaker_in_nearby,
+    detect_spell_in_text,
 )
 
 from .localization import (
     MAIN_LOCALIZATION_FILE,
     load_localization,
+    get_display_name,
     get_reverse_localization,
     id_from_name,
     find_npc_id_by_name,
@@ -54,7 +56,9 @@ from .dialogue import (
     collapse_consecutive_spells,
     filter_dialogue_history,
     prettify_voice_name,
+    format_dialogue_entry,
     format_dialogue_history,
+    is_named_npc,
 )
 
 from .game_context import (

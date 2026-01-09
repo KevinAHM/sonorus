@@ -1,0 +1,18 @@
+[
+    {
+        "mod_name": "BPML_GenericFunctions",
+        "mod_enabled": true
+    },
+    {
+        "mod_name": "BPModLoaderMod",
+        "mod_enabled": true
+    },
+    {
+        "mod_name": "ConsoleEnablerMod",
+        "mod_enabled": true
+    },
+    {
+        "mod_name": "SonorusMod",
+        "mod_enabled": true
+    }
+]

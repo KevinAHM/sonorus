@@ -13,7 +13,7 @@ import math
 # Add parent to path for utils imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.settings import SONORUS_DIR
+from utils.settings import SONORUS_DIR, load_settings
 
 # TESTING: Disable 3D positioning to diagnose lag (plays mono audio at center)
 DISABLE_3D_POSITIONING = False
@@ -551,17 +551,27 @@ class Audio3DPlayer:
                 # NOTE: Initial positions are set via set_initial_positions() BEFORE this call
                 # No need to call update() here - positions are passed explicitly through the call chain
 
+                # Load audio settings
+                from utils.settings import load_settings
+                settings = load_settings()
+                audio_cfg = settings.get('audio', {})
+
+                # Volume: user % + 50% boost (100% = 1.0 + 0.5 = 1.5 gain)
+                user_volume = audio_cfg.get('volume', 100) / 100.0
+                gain = user_volume + 0.5
+                rolloff = audio_cfg.get('rolloff', 0.5)
+
                 # Configure 3D audio
                 source_pos = self.position_reader.get_source_position()
                 self.source.set_position(source_pos)
-                self.source.set_gain(1.5)  # Volume boost (1.0 = normal, 1.5 = 50% louder)
-                self.source.set_rolloff_factor(0.5)  # How fast volume drops with distance
+                self.source.set_gain(gain)
+                self.source.set_rolloff_factor(rolloff)
                 self.source.set_reference_distance(2.0)  # Distance at full volume (meters)
                 self.source.set_max_distance(100.0)  # Max distance (meters)
 
                 # DIAGNOSTIC: Log 3D audio setup
                 print(f"[Audio3D] Source position: {source_pos}")
-                print(f"[Audio3D] Config: Gain=1.5, Rolloff=0.5, RefDist=2.0m, MaxDist=100m")
+                print(f"[Audio3D] Config: Gain={gain}, Rolloff={rolloff}, RefDist=2.0m, MaxDist=100m")
 
                 # Set up listener (camera position)
                 listener = oalGetListener()
@@ -638,6 +648,13 @@ class Audio3DPlayer:
             if not self.abort_flag and self.source is not None:
                 try:
                     while self.source.get_state() == AL_PLAYING:
+                        if self.abort_flag:
+                            # Abort requested during wait - stop immediately
+                            try:
+                                self.source.stop()
+                            except Exception:
+                                pass
+                            break
                         time.sleep(0.02)
                 except Exception:
                     pass  # State check failed, assume done

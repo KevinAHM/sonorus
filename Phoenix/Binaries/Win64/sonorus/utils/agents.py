@@ -4,6 +4,7 @@ Handles target selection and interjection decision-making.
 """
 
 from .settings import load_settings
+from .dialogue import format_dialogue_entry
 
 # Import llm module from parent directory (handles logging internally)
 import llm
@@ -35,14 +36,13 @@ def run_target_selection_agent(player_input, looked_at_npc, nearby_characters, r
 
     # Format recent dialogue (last 5 lines)
     dialogue_lines = []
-    for entry in recent_dialogue[-5:]:
-        speaker = entry.get('speaker', 'Unknown')
-        target = entry.get('target', '')
-        text = entry.get('text', '')
-        if target:
-            dialogue_lines.append(f"{speaker} (to {target}): {text}")
-        else:
-            dialogue_lines.append(f"{speaker}: {text}")
+    for i, entry in enumerate(recent_dialogue[-5:]):
+        if not isinstance(entry, dict):
+            print(f"[TargetAgent] ERROR: Entry {i} is {type(entry).__name__}, not dict: {repr(entry)[:200]}")
+            continue
+        line = format_dialogue_entry(entry, include_time=False, mark_player=True)
+        if line:
+            dialogue_lines.append(line)
     dialogue_str = "\n".join(dialogue_lines) if dialogue_lines else "No recent dialogue."
 
     prompt = f"""You are an AI decision-maker determining which NPC {player_name} (the player) is addressing.
@@ -84,10 +84,10 @@ Consider:
 
 Output format (EXACTLY one of these):
 - "0" = No NPCs nearby, or player explicitly requested someone not present
-- "NPC Name>player" = NPC speaks to {player_name} (the player)
-- "NPC1 Name>NPC2 Name" = NPC1 speaks to NPC2
+- "NpcId>player" = NPC speaks to {player_name} (the player)
+- "NpcId>NpcId" = First NPC speaks to second NPC
 
-Output ONLY the result, nothing else. The NPC name MUST match one from the Nearby NPCs list."""
+Output ONLY the result, nothing else. The NPC ID MUST exactly match one from the Nearby NPCs list (e.g., "SebastianSallow", not "Sebastian Sallow")."""
 
     messages = [{"role": "user", "content": prompt}]
 
@@ -109,73 +109,81 @@ Output ONLY the result, nothing else. The NPC name MUST match one from the Nearb
     return "0"
 
 
-def run_interjection_agent(last_speaker, last_target, last_message, nearby_characters, recent_dialogue, player_name="Player"):
+def run_interjection_agent(last_speaker_id, last_speaker_name, last_target_name, last_message, nearby_characters, recent_dialogue, player_name="Player"):
     """
     Run the interjection agent to determine if another NPC should speak.
-    Returns: "0" (silence preferred) or "NPC Name>target"
+
+    Args:
+        last_speaker_id: Internal ID of who just spoke (e.g., "SebastianSallow")
+        last_speaker_name: Display name of who just spoke (e.g., "Sebastian Sallow")
+        last_target_name: Display name of who they spoke to (e.g., "Adri Valter")
+        last_message: What they said
+        nearby_characters: List of nearby NPCs with 'name' field (ID format)
+        recent_dialogue: Recent dialogue history
+        player_name: Player's display name
+
+    Returns:
+        "0" (no one speaks) or "NpcId>target" (e.g., "NellieOggspire>player")
     """
     settings = load_settings()
     conv_settings = settings.get('conversation', {})
     model = conv_settings.get('interjection_model', 'google/gemini-2.0-flash-001')
 
     # Format nearby NPCs (excluding last speaker)
-    nearby_formatted = []
+    other_npcs = []
     for char in nearby_characters[:10]:
         name = char.get('name', 'Unknown')
         distance_m = round(char.get('distance', 0) / 100)  # UE units (cm) to meters
-        if name.lower() != last_speaker.lower():
-            nearby_formatted.append(f"- {name} ({distance_m}m away)")
-    nearby_str = "\n".join(nearby_formatted) if nearby_formatted else "No other NPCs nearby."
+        if name.lower() != last_speaker_id.lower():
+            other_npcs.append(f"- {name} ({distance_m}m away)")
+
+    # Short-circuit: if no other NPCs can speak, don't bother calling LLM
+    if not other_npcs:
+        print("[InterjectionAgent] No other NPCs nearby - returning 0")
+        return "0"
+
+    nearby_str = "\n".join(other_npcs)
 
     # Format recent dialogue (last 15 lines for better context)
     dialogue_lines = []
-    for entry in recent_dialogue[-15:]:
-        speaker = entry.get('speaker', 'Unknown')
-        target = entry.get('target', '')
-        text = entry.get('text', '')
-        is_player = entry.get('isPlayer', False)
-        # Mark player messages clearly
-        speaker_label = f"[PLAYER] {speaker}" if is_player else speaker
-        if target:
-            dialogue_lines.append(f"{speaker_label} (to {target}): {text}")
-        else:
-            dialogue_lines.append(f"{speaker_label}: {text}")
+    for i, entry in enumerate(recent_dialogue[-15:]):
+        if not isinstance(entry, dict):
+            print(f"[InterjectionAgent] ERROR: Entry {i} is {type(entry).__name__}, not dict: {repr(entry)[:200]}")
+            print(f"[InterjectionAgent] Full recent_dialogue types: {[type(e).__name__ for e in recent_dialogue[-15:]]}")
+            continue
+        line = format_dialogue_entry(entry, include_time=False, mark_player=True)
+        if line:
+            dialogue_lines.append(line)
     dialogue_str = "\n".join(dialogue_lines) if dialogue_lines else "No recent dialogue."
 
-    prompt = f"""Select which NPC should speak next, if anyone.
+    prompt = f"""Select which nearby NPC should speak next, if anyone.
 
 ## What Just Happened
-{last_speaker} said to {last_target}: "{last_message}"
+{last_speaker_name} said to {last_target_name}: "{last_message}"
 
-## Other Nearby NPCs (ONLY these NPCs can be selected)
+## Nearby NPCs Who Can Speak
 {nearby_str}
 
-## Recent Dialogue (for context only - speakers may no longer be nearby)
+## Recent Dialogue (for context)
 {dialogue_str}
 
-## CRITICAL RULES
-1. You may ONLY select NPCs from the "Other Nearby NPCs" list above
-2. If an NPC appears in dialogue history but is NOT in the nearby list, they are NOT available
-3. NEVER select {last_speaker} (they just spoke)
-4. NEVER select {player_name} - they are the player character, not an NPC
-5. Return "0" if no suitable NPC is in the nearby list
+## Rules
+- ONLY select from the NPCs listed above
+- Return "0" if no one has a reason to speak
 
-## Selection Criteria
-Consider:
-1. If the player addressed multiple NPCs (e.g., "you two", "what do you all think"), those who haven't responded should speak
-2. Was this NPC directly mentioned or addressed?
-3. Does their role require a response?
-4. Are they emotionally affected by what was said?
-5. Would they naturally interject based on personality?
+## When Should Someone Speak?
+- They were directly addressed or mentioned
+- They have a strong emotional reaction to what was said
+- Their personality would naturally lead them to interject
 
-If the conversation has naturally concluded or no one has a reason to speak, return "0".
+Output EXACTLY one of:
+- "0" = No one speaks
+- "NpcId>player" = NPC speaks to the player ({player_name})
+- "NpcId>NpcId" = NPC speaks to another NPC
 
-Output format (EXACTLY one of these):
-- "0" = No one speaks (or no valid NPC in range)
-- "NPC Name>player" = NPC speaks to {player_name} (the player)
-- "NPC Name>{last_speaker}" = NPC responds to the last speaker
+Example: "SebastianSallow>player" or "DuncanHobhouse>NellieOggspire"
 
-Output ONLY the result, nothing else. The NPC name MUST match one from the Nearby NPCs list."""
+Output ONLY the result, nothing else. The NPC ID MUST exactly match one from the Nearby NPCs list (e.g., "SebastianSallow", not "Sebastian Sallow")."""
 
     messages = [{"role": "user", "content": prompt}]
 

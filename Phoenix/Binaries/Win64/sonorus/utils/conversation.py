@@ -17,6 +17,7 @@ class ConversationState:
         self.max_turns = 6  # Hard limit (configurable)
         self.pending_player_input = None  # Player interrupted - handle after current
         self.interrupted = False  # Flag to stop interjection chain
+        self.pending_history_entries = []  # History entries waiting for audio to complete
 
     def reset(self):
         """Reset for new conversation"""
@@ -26,7 +27,23 @@ class ConversationState:
         self.turn_count = 0
         self.pending_player_input = None
         self.interrupted = False
+        self.pending_history_entries = []  # Discard uncommitted entries
         return self
+
+    def add_pending_history(self, entry):
+        """Add a history entry that will be committed when audio completes"""
+        self.pending_history_entries.append(entry)
+
+    def commit_pending_history(self, dialogue_history, save_func):
+        """Commit all pending history entries to actual history"""
+        if self.pending_history_entries:
+            for entry in self.pending_history_entries:
+                dialogue_history.append(entry)
+            save_func(dialogue_history)
+            count = len(self.pending_history_entries)
+            self.pending_history_entries = []
+            return count
+        return 0
 
     def add_to_queue(self, speaker, target, full_text, segments=None, speaker_id=None):
         """Add a response to the queue with optional sentence segments

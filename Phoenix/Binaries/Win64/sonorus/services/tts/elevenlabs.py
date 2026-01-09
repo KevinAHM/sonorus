@@ -6,29 +6,25 @@ Supports voice cloning with LRU deletion when plan limit reached.
 
 Key difference from Inworld: ElevenLabs provides character-level timestamps
 that are converted to word-level format for lipsync compatibility.
+
+Uses pure HTTP requests (requests/urllib) instead of the ElevenLabs SDK.
 """
 import os
 import sys
 import time
 import base64
 import json
+import urllib.request
+import urllib.error
 from typing import Dict, Optional, Callable
 
+import requests  # For proper streaming
 from dotenv import load_dotenv
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from .base import BaseTTSProvider, VoiceCache
-
-# ElevenLabs SDK
-ELEVENLABS_AVAILABLE = False
-try:
-    from elevenlabs.client import ElevenLabs
-    from elevenlabs.types import VoiceSettings
-    ELEVENLABS_AVAILABLE = True
-except ImportError:
-    print("[WARN] elevenlabs SDK not installed - run: pip install elevenlabs")
 
 # Parent directory (sonorus/) since this module is in services/tts/
 SONORUS_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -87,6 +83,15 @@ def _get_elevenlabs_config():
         "sample_rate": int(elevenlabs_settings.get('sample_rate', 24000)),
         "speed": float(tts_settings.get('speed', 1.0)),
     }
+
+
+def _get_auth_header():
+    """Build auth header for ElevenLabs API"""
+    config = _get_elevenlabs_config()
+    api_key = config["api_key"]
+    if not api_key:
+        raise ValueError("ElevenLabs API key not configured (set in Config Page or .env)")
+    return f"{api_key}"
 
 
 # ============================================
@@ -221,39 +226,38 @@ class ElevenLabsVoiceCache(VoiceCache):
         """Generate cache key - ignore lang for multilingual provider."""
         return name
 
-    def _get_client(self):
-        """Create fresh ElevenLabs client."""
-        if not ELEVENLABS_AVAILABLE:
-            raise RuntimeError("ElevenLabs SDK not installed")
-        config = _get_elevenlabs_config()
-        api_key = config["api_key"]
-        api_url = config["api_url"].rstrip('/')
-        if not api_key:
-            raise ValueError("ElevenLabs API key not configured (set in Config Page or .env)")
-        return ElevenLabs(api_key=api_key, base_url=api_url)
-
     def load(self) -> bool:
         """Load voices from ElevenLabs API."""
+        config = _get_elevenlabs_config()
+        api_url = config["api_url"].rstrip('/')
+
+        url = f"{api_url}/v1/voices"
+
+        headers = {
+            "xi-api-key": _get_auth_header(),
+            "Content-Type": "application/json",
+        }
+
+        req = urllib.request.Request(url, headers=headers, method="GET")
+
         try:
-            client = self._get_client()
             print("[ElevenLabs] Loading voices...")
+            with urllib.request.urlopen(req, timeout=30) as response:
+                data = json.loads(response.read().decode("utf-8"))
 
-            response = client.voices.get_all()
-
+            voices = data.get("voices", [])
             self._voices.clear()
             self._by_id.clear()
 
-            voices = response.voices
-
             for voice in voices:
-                display_name = voice.name
-                voice_id = voice.voice_id
+                display_name = voice.get("name", "")
+                voice_id = voice.get("voice_id", "")
 
                 voice_dict = {
                     "displayName": display_name,
                     "voiceId": voice_id,
-                    "category": getattr(voice, 'category', 'unknown'),
-                    "labels": getattr(voice, 'labels', {}),
+                    "category": voice.get("category", "unknown"),
+                    "labels": voice.get("labels", {}),
                 }
 
                 self._voices[display_name] = voice_dict
@@ -264,9 +268,19 @@ class ElevenLabsVoiceCache(VoiceCache):
             print(f"[ElevenLabs] Loaded {len(self._voices)} voices")
             return True
 
+        except urllib.error.HTTPError as e:
+            print(f"[ElevenLabs] API error: {e.code} {e.reason}")
+            if e.code == 401:
+                raise Exception("ElevenLabs API key is invalid. Check your API key in TTS settings.")
+            elif e.code == 403:
+                raise Exception("ElevenLabs API key does not have permission. Check your subscription.")
+            else:
+                raise Exception(f"ElevenLabs API error: {e.code} {e.reason}")
         except Exception as e:
             print(f"[ElevenLabs] Failed to load voices: {e}")
-            return False
+            if "ElevenLabs" in str(e):
+                raise
+            raise Exception(f"Cannot connect to ElevenLabs API: {e}")
 
 
 # ============================================
@@ -323,16 +337,27 @@ class ElevenLabsProvider(BaseTTSProvider):
         """
         try:
             cache = self.get_voice_cache()
-            client = cache._get_client()
+            config = _get_elevenlabs_config()
+            api_url = config["api_url"].rstrip('/')
 
-            response = client.voices.get_all()
-            voices = response.voices
+            # Fetch current voices via HTTP
+            list_url = f"{api_url}/v1/voices"
+            headers = {
+                "xi-api-key": _get_auth_header(),
+                "Content-Type": "application/json",
+            }
+
+            req = urllib.request.Request(list_url, headers=headers, method="GET")
+            with urllib.request.urlopen(req, timeout=30) as response:
+                data = json.loads(response.read().decode("utf-8"))
+
+            voices = data.get("voices", [])
 
             cloned_voices = {}
             for voice in voices:
-                category = getattr(voice, 'category', '')
-                if category == 'cloned':
-                    cloned_voices[voice.name] = voice
+                category = voice.get("category", "")
+                if category == "cloned":
+                    cloned_voices[voice.get("name", "")] = voice
 
             if not cloned_voices:
                 print("[ElevenLabs] No cloned voices to delete")
@@ -344,11 +369,16 @@ class ElevenLabsProvider(BaseTTSProvider):
                 return False
 
             target = cloned_voices[lru_name]
-            voice_id = target.voice_id
-            voice_name = target.name
+            voice_id = target.get("voice_id", "")
+            voice_name = target.get("name", "")
 
             print(f"[ElevenLabs] Deleting least recently used voice: {voice_name} ({voice_id})")
-            client.voices.delete(voice_id)
+
+            # Delete via HTTP
+            delete_url = f"{api_url}/v1/voices/{voice_id}"
+            delete_req = urllib.request.Request(delete_url, headers=headers, method="DELETE")
+            with urllib.request.urlopen(delete_req, timeout=30) as response:
+                pass  # 200 OK means success
 
             # Remove from cache
             if voice_name in cache._voices:
@@ -372,6 +402,18 @@ class ElevenLabsProvider(BaseTTSProvider):
             print(f"[ElevenLabs] Deleted voice: {voice_name}")
             return True
 
+        except urllib.error.HTTPError as e:
+            print(f"[ElevenLabs] API error deleting voice: {e.code} {e.reason}")
+            el = _get_event_logger()
+            if el:
+                el.log_voice_clone_event(
+                    character_name="unknown",
+                    language="multilingual",
+                    reference_filename="",
+                    status="error",
+                    error=f"Failed to delete LRU voice: {e.code} {e.reason}"
+                )
+            return False
         except Exception as e:
             print(f"[ElevenLabs] Failed to delete LRU voice: {e}")
             el = _get_event_logger()
@@ -398,33 +440,54 @@ class ElevenLabsProvider(BaseTTSProvider):
             return None
 
         cache = self.get_voice_cache()
+        config = _get_elevenlabs_config()
+        api_url = config["api_url"].rstrip('/')
 
         def attempt_clone():
             """Attempt to clone the voice, returns (voice_dict, error_str)"""
             try:
-                client = cache._get_client()
                 print(f"[ElevenLabs] Cloning voice: {display_name}...")
 
-                # SDK expects opened file handles, not paths
+                url = f"{api_url}/v1/voices/add"
+                headers = {
+                    "xi-api-key": _get_auth_header(),
+                }
+
+                # Use multipart/form-data with requests library
                 with open(reference_wav_path, "rb") as f:
-                    voice = client.voices.ivc.create(
-                        name=display_name,
-                        description=f"Cloned voice for {display_name} (Hogwarts Legacy)",
-                        files=[f],
-                    )
+                    files = {
+                        "files": (os.path.basename(reference_wav_path), f, "audio/wav"),
+                    }
+                    data = {
+                        "name": display_name,
+                        "description": f"Cloned voice for {display_name} (Hogwarts Legacy)",
+                    }
+                    response = requests.post(url, headers=headers, files=files, data=data, timeout=120)
+
+                if response.status_code != 200:
+                    error_body = response.text[:500] if response.text else ""
+                    return None, f"HTTP {response.status_code}: {error_body}"
+
+                result = response.json()
+                voice_id = result.get("voice_id", "")
+
+                if not voice_id:
+                    return None, "No voice_id in response"
 
                 voice_dict = {
                     "displayName": display_name,
-                    "voiceId": voice.voice_id,
+                    "voiceId": voice_id,
                     "category": "cloned",
                 }
 
                 cache._voices[display_name] = voice_dict
-                cache._by_id[voice.voice_id] = voice_dict
+                cache._by_id[voice_id] = voice_dict
 
-                print(f"[ElevenLabs] Voice cloned: {display_name} -> {voice.voice_id}")
+                print(f"[ElevenLabs] Voice cloned: {display_name} -> {voice_id}")
                 return voice_dict, None
 
+            except requests.exceptions.RequestException as e:
+                return None, f"Request failed: {str(e)}"
             except Exception as e:
                 return None, str(e)
 
@@ -531,6 +594,7 @@ class ElevenLabsProvider(BaseTTSProvider):
             True on success, False on error
         """
         config = self.get_config()
+        api_url = config["api_url"].rstrip('/')
         sample_rate = config["sample_rate"]
         model_id = config["model"]
         stability = config["stability"]
@@ -538,14 +602,35 @@ class ElevenLabsProvider(BaseTTSProvider):
 
         output_format = f"pcm_{sample_rate}"
 
+        url = f"{api_url}/v1/text-to-speech/{voice_id}/stream/with-timestamps?output_format={output_format}"
+
+        payload = {
+            "text": text,
+            "model_id": model_id,
+            "voice_settings": {
+                "stability": stability,
+                "similarity_boost": similarity_boost,
+            }
+        }
+
+        headers = {
+            "xi-api-key": _get_auth_header(),
+            "Content-Type": "application/json",
+        }
+
         print(f"[ElevenLabs] Model: {model_id}, Stability: {stability}, Similarity: {similarity_boost}")
 
         try:
-            cache = self.get_voice_cache()
-            client = cache._get_client()
-
             print(f"[ElevenLabs] Synthesizing: {text[:80]}...")
             print(f"[ElevenLabs] Voice ID: {voice_id}")
+
+            response = requests.post(url, json=payload, headers=headers, stream=True, timeout=60)
+            print(f"[ElevenLabs] Response status: {response.status_code}")
+
+            if response.status_code != 200:
+                print(f"[ElevenLabs] HTTP Error: {response.status_code}")
+                print(f"[ElevenLabs] Body: {response.text[:500]}")
+                return False
 
             chunks_received = 0
             total_audio_bytes = 0
@@ -557,61 +642,64 @@ class ElevenLabsProvider(BaseTTSProvider):
             accumulated_starts = []
             accumulated_ends = []
 
-            # Use stream_with_timestamps for character-level timing data
-            response = client.text_to_speech.stream_with_timestamps(
-                voice_id=voice_id,
-                output_format=output_format,
-                text=text,
-                model_id=model_id,
-                voice_settings=VoiceSettings(
-                    stability=stability,
-                    similarity_boost=similarity_boost,
-                )
-            )
+            # Stream lines as they arrive (newline-delimited JSON)
+            for line in response.iter_lines():
+                if not line:
+                    continue
 
-            for chunk in response:
-                chunk_recv_time = time.time()
+                try:
+                    chunk_recv_time = time.time()
+                    data = json.loads(line.decode("utf-8"))
 
-                # stream_with_timestamps returns objects with audio_base_64 (base64 string)
-                audio_bytes = None
-                if hasattr(chunk, 'audio_base_64') and chunk.audio_base_64:
-                    audio_bytes = base64.b64decode(chunk.audio_base_64)
+                    # Raw API uses audio_base64 (not audio_base_64 like SDK)
+                    audio_b64 = data.get("audio_base64", "")
 
-                if audio_bytes and len(audio_bytes) > 0:
-                    chunks_received += 1
-                    total_audio_bytes += len(audio_bytes)
-                    chunk_recv_times.append(chunk_recv_time)
+                    if audio_b64:
+                        audio_bytes = base64.b64decode(audio_b64)
 
-                    elapsed = chunk_recv_time - stream_start_time
-                    inter_chunk_gap = 0
-                    if len(chunk_recv_times) > 1:
-                        inter_chunk_gap = chunk_recv_time - chunk_recv_times[-2]
+                        if len(audio_bytes) > 0:
+                            chunks_received += 1
+                            total_audio_bytes += len(audio_bytes)
+                            chunk_recv_times.append(chunk_recv_time)
 
-                    print(f"[ElevenLabs] Chunk {chunks_received}: {len(audio_bytes)} bytes, "
-                          f"gap={inter_chunk_gap*1000:.0f}ms, elapsed={elapsed:.2f}s")
+                            elapsed = chunk_recv_time - stream_start_time
+                            inter_chunk_gap = 0
+                            if len(chunk_recv_times) > 1:
+                                inter_chunk_gap = chunk_recv_time - chunk_recv_times[-2]
 
-                    if len(audio_bytes) % 2 != 0:
-                        print(f"[ElevenLabs] WARNING: PCM size {len(audio_bytes)} is ODD")
+                            print(f"[ElevenLabs] Chunk {chunks_received}: {len(audio_bytes)} bytes, "
+                                  f"gap={inter_chunk_gap*1000:.0f}ms, elapsed={elapsed:.2f}s")
 
-                    # Process character alignment data
-                    word_alignment = None
-                    if hasattr(chunk, 'alignment') and chunk.alignment:
-                        alignment = chunk.alignment
-                        # SDK uses: .characters, .character_start_times_seconds, .character_end_times_seconds
-                        if hasattr(alignment, 'characters') and alignment.characters:
-                            accumulated_chars.extend(alignment.characters)
-                        if hasattr(alignment, 'character_start_times_seconds') and alignment.character_start_times_seconds:
-                            accumulated_starts.extend(alignment.character_start_times_seconds)
-                        if hasattr(alignment, 'character_end_times_seconds') and alignment.character_end_times_seconds:
-                            accumulated_ends.extend(alignment.character_end_times_seconds)
+                            if len(audio_bytes) % 2 != 0:
+                                print(f"[ElevenLabs] WARNING: PCM size {len(audio_bytes)} is ODD")
 
-                        word_alignment = convert_char_to_word_alignment(
-                            accumulated_chars,
-                            accumulated_starts,
-                            accumulated_ends
-                        )
+                            # Process character alignment data
+                            word_alignment = None
+                            alignment = data.get("alignment")
+                            if alignment:
+                                # Raw API field names
+                                chars = alignment.get("characters", [])
+                                starts = alignment.get("character_start_times_seconds", [])
+                                ends = alignment.get("character_end_times_seconds", [])
 
-                    on_chunk(audio_bytes, word_alignment)
+                                if chars:
+                                    accumulated_chars.extend(chars)
+                                if starts:
+                                    accumulated_starts.extend(starts)
+                                if ends:
+                                    accumulated_ends.extend(ends)
+
+                                word_alignment = convert_char_to_word_alignment(
+                                    accumulated_chars,
+                                    accumulated_starts,
+                                    accumulated_ends
+                                )
+
+                            on_chunk(audio_bytes, word_alignment)
+
+                except json.JSONDecodeError as e:
+                    print(f"[ElevenLabs] JSON error: {e}")
+                    continue
 
             # Streaming summary
             total_stream_time = time.time() - stream_start_time
@@ -634,6 +722,19 @@ class ElevenLabsProvider(BaseTTSProvider):
 
             return chunks_received > 0
 
+        except requests.exceptions.RequestException as e:
+            print(f"[ElevenLabs] Request failed: {e}")
+            el = _get_event_logger()
+            if el:
+                el.log_tts_event(
+                    voice_id=voice_id,
+                    text_excerpt=text[:100],
+                    audio_bytes=0,
+                    text_length=len(text),
+                    status="error",
+                    error=f"Request failed: {str(e)}"
+                )
+            return False
         except Exception as e:
             print(f"[ElevenLabs] Synthesis failed: {e}")
             import traceback

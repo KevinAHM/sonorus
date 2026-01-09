@@ -40,6 +40,12 @@ def _play_sound(path, delay=0):
             print(f"[STT] Sound playback error: {e}")
     threading.Thread(target=_play, daemon=True).start()
 
+
+def play_error_sound():
+    """Play error sound for blocked actions (public API)."""
+    _play_sound(_SOUND_ERR)
+
+
 user32 = ctypes.windll.user32
 
 # Windows message types
@@ -443,6 +449,7 @@ class STTCapture:
 
 # Module-level instance management (follows input_capture.py pattern)
 _capture_instance = None
+_stored_callbacks = {}  # Persist callbacks for hot-reload from disabled state
 
 
 def get_capture():
@@ -450,9 +457,30 @@ def get_capture():
     return _capture_instance
 
 
+def register_callbacks(on_transcribe_callback, check_pause=None, on_error=None):
+    """Register callbacks for STT without starting capture.
+
+    Call this at startup to enable hot-reload even when STT starts disabled.
+    """
+    global _stored_callbacks
+    _stored_callbacks = {
+        'on_transcribe': on_transcribe_callback,
+        'check_pause': check_pause,
+        'on_error': on_error
+    }
+
+
 def start_capture(on_transcribe_callback, hotkey='middle_mouse', check_pause=None, on_error=None):
     """Start STT capture with callback."""
-    global _capture_instance
+    global _capture_instance, _stored_callbacks
+
+    # Store callbacks for potential hot-reload later
+    _stored_callbacks = {
+        'on_transcribe': on_transcribe_callback,
+        'check_pause': check_pause,
+        'on_error': on_error
+    }
+
     if _capture_instance:
         _capture_instance.stop()
     _capture_instance = STTCapture(on_transcribe_callback, hotkey, check_pause, on_error)
@@ -472,3 +500,52 @@ def set_capture_hotkey(hotkey):
     """Update hotkey on running capture."""
     if _capture_instance:
         _capture_instance.set_hotkey(hotkey)
+
+
+def restart_capture():
+    """Restart STT capture with fresh settings, reusing stored callbacks.
+
+    Works whether STT is currently running or not - can enable from disabled state
+    if callbacks were previously registered via start_capture().
+
+    Returns True if capture was (re)started, False if STT not available or no callbacks.
+    """
+    global _capture_instance
+
+    # Get callbacks - from running instance or stored
+    if _capture_instance:
+        on_transcribe = _capture_instance.on_transcribe
+        check_pause = _capture_instance.check_pause
+        on_error = _capture_instance.on_error
+        _capture_instance.stop()
+    elif _stored_callbacks:
+        on_transcribe = _stored_callbacks.get('on_transcribe')
+        check_pause = _stored_callbacks.get('check_pause')
+        on_error = _stored_callbacks.get('on_error')
+    else:
+        print("[STT] Restart failed: no callbacks registered")
+        return False
+
+    # Load fresh settings
+    from utils.settings import load_settings
+    from services import stt as stt_service
+
+    settings = load_settings()
+    stt_settings = settings.get('stt', {})
+
+    # Check if STT is available with current settings
+    if not stt_service.is_available():
+        provider = stt_settings.get('provider', 'none')
+        if provider == 'none':
+            print("[STT] Disabled (provider: none)")
+        else:
+            print(f"[STT] Provider '{provider}' not configured (missing API key)")
+        _capture_instance = None
+        return False
+
+    # Start with fresh settings
+    hotkey = stt_settings.get('hotkey', 'middle_mouse')
+    _capture_instance = STTCapture(on_transcribe, hotkey, check_pause, on_error)
+    _capture_instance.start()
+    print(f"[STT] Capture started (hotkey: {hotkey})")
+    return True

@@ -4,8 +4,9 @@ Phoneme-based Lip Sync Module
 Converts words → phonemes (via Gruut) → visemes (blendshape values)
 Outputs timeline for Lua to read and apply to character.
 
-Gap-filling: When word visemes don't cover audio segments (e.g., [laughs], [sighs]),
-amplitude-based visemes fill the gaps with smooth blending at boundaries.
+Gap-filling: ONLY when burst tags like [laughs], [sighs] are detected in text,
+amplitude-based visemes fill gaps where no word visemes exist.
+Gaps are bounded with closed mouth (jaw=0) at start/end to prevent overlap.
 """
 import os
 import sys
@@ -25,6 +26,10 @@ try:
 except ImportError:
     NUMPY_AVAILABLE = False
     print("[WARN] Numpy not available - amplitude gap-fill disabled")
+
+# Toggle for amplitude-based gap filling (for vocal bursts like [laughs], [sighs])
+# Set to False to disable gap-filling entirely
+AMPLITUDE_GAP_FILL_ENABLED = False  # Toggle: True = enabled, False = disabled
 
 # Gruut for phoneme conversion
 try:
@@ -213,10 +218,10 @@ def amplitude_visemes_for_audio(pcm_data: bytes, sample_rate: int = 44100,
             rms = float(np.sqrt(np.mean(window ** 2)))  # Convert to native Python float
 
             # Scale RMS to jaw (0-1), with threshold for silence
-            if rms < 0.01:
+            if rms < 0.02:
                 jaw = 0.0
             else:
-                jaw = min(1.0, (rms - 0.01) * 5.0)
+                jaw = min(1.0, (rms - 0.02) * 4.0)
                 jaw = jaw ** 0.7  # Soften curve for more natural movement
 
             visemes.append({
@@ -234,7 +239,7 @@ def amplitude_visemes_for_audio(pcm_data: bytes, sample_rate: int = 44100,
 
 
 def find_coverage_gaps(word_visemes: list, audio_end: float,
-                       audio_start: float = 0, min_gap_ms: float = 1500) -> list:
+                       audio_start: float = 0, min_gap_ms: float = 1000) -> list:
     """
     Find time ranges where word visemes don't provide coverage.
 
@@ -242,13 +247,16 @@ def find_coverage_gaps(word_visemes: list, audio_end: float,
         word_visemes: List of viseme dicts with 't' timestamps
         audio_end: End time of audio segment (base_time + chunk_duration)
         audio_start: Start time of audio segment (base_time for this chunk)
-        min_gap_ms: Minimum gap size to consider (default 1500ms = 1.5s)
+        min_gap_ms: Minimum gap size to consider (default 1000ms = 1s)
                     Only fills significant gaps like [laughs], [sighs], not word spacing
 
     Returns:
         List of (start, end) tuples representing gaps
     """
+    print(f"[Lipsync] find_coverage_gaps: audio_start={audio_start:.3f}s, audio_end={audio_end:.3f}s, min_gap={min_gap_ms}ms")
+
     if not word_visemes:
+        print(f"[Lipsync]   No word visemes - entire audio is a gap")
         return [(audio_start, audio_end)] if audio_end > audio_start else []
 
     gaps = []
@@ -258,10 +266,15 @@ def find_coverage_gaps(word_visemes: list, audio_end: float,
     # Sort by time
     sorted_visemes = sorted(word_visemes, key=lambda v: v.get('t', 0))
 
-    # Gap before first viseme (but not before audio_start)
     first_t = sorted_visemes[0].get('t', 0)
+    last_t = sorted_visemes[-1].get('t', 0)
+    print(f"[Lipsync]   Word viseme range: {first_t:.3f}s - {last_t:.3f}s ({len(sorted_visemes)} visemes)")
+
+    # Gap before first viseme (but not before audio_start)
     if first_t - audio_start > min_gap:
-        gaps.append((audio_start, first_t - buffer))
+        gap = (audio_start, first_t - buffer)
+        gaps.append(gap)
+        print(f"[Lipsync]   Gap before first word: {gap[0]:.3f}s - {gap[1]:.3f}s ({(gap[1]-gap[0])*1000:.0f}ms)")
 
     # Gaps between visemes
     for i in range(len(sorted_visemes) - 1):
@@ -270,68 +283,110 @@ def find_coverage_gaps(word_visemes: list, audio_end: float,
         gap_size = next_t - curr_t
 
         if gap_size > min_gap:
-            gaps.append((curr_t + buffer, next_t - buffer))
+            gap = (curr_t + buffer, next_t - buffer)
+            gaps.append(gap)
+            print(f"[Lipsync]   Gap between visemes: {gap[0]:.3f}s - {gap[1]:.3f}s ({(gap[1]-gap[0])*1000:.0f}ms)")
 
     # Gap after last viseme
-    last_t = sorted_visemes[-1].get('t', 0)
     if audio_end - last_t > min_gap:
-        gaps.append((last_t + buffer, audio_end))
+        gap = (last_t + buffer, audio_end)
+        gaps.append(gap)
+        print(f"[Lipsync]   Gap after last word: {gap[0]:.3f}s - {gap[1]:.3f}s ({(gap[1]-gap[0])*1000:.0f}ms)")
+
+    if not gaps:
+        print(f"[Lipsync]   No gaps >= {min_gap_ms}ms found")
 
     return gaps
 
 
 def fill_gaps_with_amplitude(word_visemes: list, amplitude_visemes: list,
-                              gaps: list, blend_ms: float = 50) -> list:
+                              gaps: list, burst_type: str = None) -> list:
     """
     Fill gaps in word viseme coverage with amplitude visemes.
-    Smoothly blends at boundaries to avoid jarring transitions.
+    ONLY called when a burst tag ([laugh], [sigh], etc.) is detected.
 
     Word visemes are ALWAYS preserved exactly as-is.
+    Amplitude visemes are placed STRICTLY within gaps - no overlap.
+    Each gap starts and ends with closed mouth (jaw=0).
 
     Args:
         word_visemes: Original word-based visemes (preserved exactly)
         amplitude_visemes: Amplitude-generated visemes for gap filling
         gaps: List of (start, end) time tuples from find_coverage_gaps
-        blend_ms: Blend duration at gap boundaries (default 50ms)
+        burst_type: The detected burst type (e.g., 'laugh', 'sigh')
 
     Returns:
         Combined list sorted by time
     """
     if not amplitude_visemes or not gaps:
+        print(f"[Lipsync] Gap-fill skipped: no amplitude visemes or no gaps")
         return word_visemes
-
-    blend_time = blend_ms / 1000
 
     # Start with word visemes (preserved exactly)
     result = [v.copy() for v in word_visemes]
 
-    for gap_start, gap_end in gaps:
+    # Get word viseme timestamps for overlap checking
+    word_times = set()
+    for v in word_visemes:
+        word_times.add(round(v.get('t', 0), 3))
+
+    print(f"[Lipsync] Gap-fill for burst '{burst_type}': {len(gaps)} gap(s), {len(word_visemes)} word visemes")
+
+    for gap_idx, (gap_start, gap_end) in enumerate(gaps):
         if gap_end <= gap_start:
+            print(f"[Lipsync]   Gap {gap_idx}: invalid (end <= start), skipping")
             continue
 
-        # Find amplitude visemes within this gap that have actual amplitude
+        gap_duration = gap_end - gap_start
+        print(f"[Lipsync]   Gap {gap_idx}: {gap_start:.3f}s - {gap_end:.3f}s ({gap_duration:.3f}s)")
+
+        # Add opening closure frame at gap start
+        opening_frame = {
+            't': round(gap_start, 3),
+            'jaw': 0.0,
+            'smile': 0.0,
+            'funnel': 0.0,
+            '_amplitude': True
+        }
+
+        # Check no overlap with word visemes
+        if round(gap_start, 3) not in word_times:
+            result.append(opening_frame)
+            print(f"[Lipsync]     Added opening closure at {gap_start:.3f}s")
+        else:
+            print(f"[Lipsync]     Opening closure skipped - overlaps word viseme at {gap_start:.3f}s")
+
+        # Find amplitude visemes STRICTLY within this gap (with margin)
+        margin = 0.05  # 50ms margin from gap edges
+        inner_start = gap_start + margin
+        inner_end = gap_end - margin
+
         gap_visemes = []
         for v in amplitude_visemes:
             t = v.get('t', 0)
-            if gap_start <= t <= gap_end and v.get('jaw', 0) > 0.02:
-                v_copy = v.copy()
+            # Strictly within gap (not at edges) and has amplitude
+            if inner_start < t < inner_end and v.get('jaw', 0) > 0.1:
+                # Double-check no overlap with word visemes
+                if round(t, 3) not in word_times:
+                    gap_visemes.append(v.copy())
 
-                # Apply smooth blend at gap boundaries
-                # Ease in at gap start
-                if t < gap_start + blend_time and blend_time > 0:
-                    blend_factor = (t - gap_start) / blend_time
-                    blend_factor = max(0.0, min(1.0, blend_factor))
-                    v_copy['jaw'] = round(float(v_copy['jaw'] * blend_factor), 2)
-
-                # Ease out at gap end
-                if t > gap_end - blend_time and blend_time > 0:
-                    blend_factor = (gap_end - t) / blend_time
-                    blend_factor = max(0.0, min(1.0, blend_factor))
-                    v_copy['jaw'] = round(float(v_copy['jaw'] * blend_factor), 2)
-
-                gap_visemes.append(v_copy)
-
+        print(f"[Lipsync]     Found {len(gap_visemes)} amplitude visemes in gap interior")
         result.extend(gap_visemes)
+
+        # Add closing closure frame at gap end
+        closing_frame = {
+            't': round(gap_end, 3),
+            'jaw': 0.0,
+            'smile': 0.0,
+            'funnel': 0.0,
+            '_amplitude': True
+        }
+
+        if round(gap_end, 3) not in word_times:
+            result.append(closing_frame)
+            print(f"[Lipsync]     Added closing closure at {gap_end:.3f}s")
+        else:
+            print(f"[Lipsync]     Closing closure skipped - overlaps word viseme at {gap_end:.3f}s")
 
     # Sort by time
     result.sort(key=lambda v: v.get('t', 0))
@@ -543,50 +598,70 @@ def process_word_alignment(word_alignment, lang=None, auto_send=True,
             "funnel": v.get("funnel", 0)
         })
 
-    # Gap filling with amplitude visemes
+    # Gap filling with amplitude visemes - ONLY when burst tags detected
     gap_filled = False
     amplitude_count = 0
-    if pcm_data and NUMPY_AVAILABLE:
+
+    # First check for burst tags - only gap-fill if we find one
+    burst = detect_audio_burst_tag(text) if text else None
+
+    if burst and pcm_data and NUMPY_AVAILABLE and AMPLITUDE_GAP_FILL_ENABLED:
+        print(f"[Lipsync] Burst tag detected: '{burst}' - enabling amplitude gap-fill")
+
         # Calculate audio duration for this chunk
         chunk_duration = len(pcm_data) / 2 / sample_rate  # 16-bit = 2 bytes/sample
         audio_end = base_time + chunk_duration
+        print(f"[Lipsync] Chunk: base_time={base_time:.3f}s, duration={chunk_duration:.3f}s, end={audio_end:.3f}s")
 
         # Generate amplitude visemes for entire audio chunk (relative to chunk start)
         amp_visemes = amplitude_visemes_for_audio(pcm_data, sample_rate)
+        print(f"[Lipsync] Generated {len(amp_visemes)} amplitude visemes from audio")
 
         # Offset amplitude timestamps by base_time (they're chunk-relative, need absolute)
         for v in amp_visemes:
             v['t'] += base_time
 
         # Filter word visemes to only those within this chunk's time range
-        # (word_visemes are absolute, but we only want gaps within THIS chunk)
         chunk_word_visemes = [v for v in word_visemes
                              if base_time <= v.get('t', 0) <= audio_end]
+        print(f"[Lipsync] Word visemes in chunk: {len(chunk_word_visemes)} of {len(word_visemes)} total")
+
+        # Log word viseme timestamps for debugging
+        if chunk_word_visemes:
+            word_times_str = ", ".join([f"{v.get('t', 0):.3f}" for v in chunk_word_visemes[:10]])
+            if len(chunk_word_visemes) > 10:
+                word_times_str += f"... (+{len(chunk_word_visemes) - 10} more)"
+            print(f"[Lipsync] Word viseme times: [{word_times_str}]")
 
         # Find gaps in word viseme coverage (within this chunk's time range)
         gaps = find_coverage_gaps(chunk_word_visemes, audio_end, audio_start=base_time)
+        print(f"[Lipsync] Found {len(gaps)} gap(s) in coverage")
 
         if gaps:
             # Fill gaps with amplitude visemes (word visemes preserved exactly)
-            combined = fill_gaps_with_amplitude(word_visemes, amp_visemes, gaps)
+            combined = fill_gaps_with_amplitude(word_visemes, amp_visemes, gaps, burst)
 
-            # Detect audio burst tags for smile/funnel modifiers (bonus)
-            burst = detect_audio_burst_tag(text) if text else None
-            if burst:
-                combined = apply_burst_modifiers(combined, burst)
-                print(f"[Lipsync] Applied '{burst}' modifiers to amplitude visemes")
+            # Apply burst modifiers (smile/funnel based on burst type)
+            combined = apply_burst_modifiers(combined, burst)
+            print(f"[Lipsync] Applied '{burst}' modifiers to amplitude visemes")
 
             # Count how many amplitude visemes were added
             amplitude_count = sum(1 for v in combined if v.get('_amplitude'))
             if amplitude_count > 0:
                 gap_filled = True
-                print(f"[Lipsync] Gap-filled: {amplitude_count} amplitude visemes added to {len(gaps)} gap(s)")
+                print(f"[Lipsync] Gap-fill complete: {amplitude_count} amplitude visemes added")
 
             # Clean up internal markers
             for v in combined:
                 v.pop('_amplitude', None)
 
             word_visemes = combined
+        else:
+            print(f"[Lipsync] No gaps found for burst '{burst}' - word visemes cover entire audio")
+    elif burst:
+        print(f"[Lipsync] Burst tag '{burst}' detected but gap-fill disabled or no audio data")
+    else:
+        print(f"[Lipsync] No burst tag in text - skipping amplitude gap-fill")
 
     # Add smooth mouth closure frames (200ms, 4 steps) AFTER gap filling
     # Only add closure for the FINAL chunk, not intermediate chunks

@@ -222,7 +222,7 @@ def format_beacons_for_llm(beacons):
         else:
             parts.append(f"{b['name']} ({b['distance']})")
 
-    return "Nearby landmarks: " + ", ".join(parts)
+    return "**Nearby landmarks:** " + ", ".join(parts)
 
 
 def format_beacons_for_vision(beacons):

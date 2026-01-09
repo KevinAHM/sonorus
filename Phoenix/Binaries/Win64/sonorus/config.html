@@ -7,6 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=Crimson+Text:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+    <script src="/js/confetti.min.js"></script>
     <style>
         :root {
             /* Core palette - aged parchment & dark academia */
@@ -536,6 +537,54 @@
             background: #a13000;
         }
 
+        .btn-warning {
+            background: var(--warning);
+            border-color: #7a5a00;
+            color: var(--parchment-light);
+        }
+
+        .btn-warning:hover {
+            background: #8a6c00;
+        }
+
+        .configure-link {
+            display: flex;
+            align-items: center;
+            gap: var(--space-sm);
+            padding: var(--space-sm) var(--space-md);
+            margin-bottom: var(--space-md);
+            background: linear-gradient(135deg, rgba(212, 168, 75, 0.15) 0%, rgba(212, 168, 75, 0.08) 100%);
+            border: 2px dashed var(--gold-dark);
+            border-radius: var(--radius-md);
+            color: var(--ink-brown);
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 0.95rem;
+            transition: all 0.2s ease;
+        }
+
+        .configure-link:hover {
+            background: linear-gradient(135deg, rgba(212, 168, 75, 0.25) 0%, rgba(212, 168, 75, 0.15) 100%);
+            border-color: var(--gold-bright);
+            transform: translateX(4px);
+        }
+
+        .configure-link-icon {
+            font-size: 1.1rem;
+        }
+
+        .configure-link-arrow {
+            margin-left: auto;
+            font-size: 1.2rem;
+            opacity: 0.7;
+            transition: transform 0.2s ease;
+        }
+
+        .configure-link:hover .configure-link-arrow {
+            transform: translateX(4px);
+            opacity: 1;
+        }
+
         /* Button groups */
         .btn-group {
             display: flex;
@@ -809,6 +858,128 @@
             opacity: 0.5;
         }
 
+        /* History Edit Mode */
+        .history-edit-mode .history-table tr:hover td {
+            background: rgba(212, 168, 75, 0.1);
+        }
+
+        .history-table tr.selected td {
+            background: rgba(212, 168, 75, 0.2);
+            border-color: var(--gold-dark);
+        }
+
+        .history-table tr.selected:hover td {
+            background: rgba(212, 168, 75, 0.25);
+        }
+
+        .history-checkbox-cell,
+        .history-delete-cell {
+            width: 36px;
+            text-align: center;
+            padding: var(--space-sm) var(--space-xs) !important;
+        }
+
+        .history-checkbox {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+            accent-color: var(--gold-dark);
+        }
+
+        .history-delete-btn {
+            background: none;
+            border: none;
+            color: var(--ink-brown);
+            opacity: 0.4;
+            cursor: pointer;
+            font-size: 1rem;
+            padding: 4px 8px;
+            border-radius: 3px;
+            transition: all 0.15s ease;
+        }
+
+        .history-delete-btn:hover {
+            opacity: 1;
+            color: var(--ember-red);
+            background: rgba(139, 37, 0, 0.1);
+        }
+
+        .history-edit-bar {
+            display: none;
+            position: sticky;
+            bottom: 0;
+            background: linear-gradient(180deg, var(--parchment-dark) 0%, var(--parchment-mid) 100%);
+            border-top: 2px solid var(--gold-dark);
+            padding: var(--space-sm) var(--space-md);
+            margin-top: var(--space-md);
+            align-items: center;
+            gap: var(--space-md);
+            justify-content: space-between;
+            box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.2);
+        }
+
+        .history-edit-bar.active {
+            display: flex;
+        }
+
+        .history-edit-bar .selected-count {
+            font-family: var(--font-display);
+            font-size: 0.85rem;
+            color: var(--gold-dark);
+            letter-spacing: 0.03em;
+        }
+
+        .history-edit-bar .btn-group {
+            display: flex;
+            gap: var(--space-sm);
+        }
+
+        .btn-sm {
+            padding: var(--space-xs) var(--space-sm);
+            font-size: 0.8rem;
+        }
+
+        .tabs-with-edit {
+            display: flex;
+            align-items: center;
+            gap: 2px;
+            margin-bottom: var(--space-md);
+            background: var(--leather-mid);
+            padding: 2px;
+            border-radius: 4px;
+        }
+
+        .tabs-with-edit .tab {
+            flex: 1;
+        }
+
+        .tabs-with-edit .edit-btn-container {
+            padding: 0 var(--space-sm);
+        }
+
+        .edit-mode-indicator {
+            display: none;
+            align-items: center;
+            gap: var(--space-xs);
+            font-family: var(--font-display);
+            font-size: 0.75rem;
+            color: var(--gold-bright);
+            padding: var(--space-xs) var(--space-sm);
+            background: rgba(212, 168, 75, 0.15);
+            border: 1px solid var(--gold-dark);
+            border-radius: 3px;
+            margin-left: auto;
+        }
+
+        .history-edit-mode .edit-mode-indicator {
+            display: flex;
+        }
+
+        .edit-mode-indicator::before {
+            content: '\270E';
+            font-size: 0.9rem;
+        }
+
         /* Scrollbar styling */
         ::-webkit-scrollbar {
             width: 10px;
@@ -1032,6 +1203,34 @@
             font-size: 0.75rem;
             color: var(--text-muted);
             white-space: nowrap;
+        }
+
+        /* Success row styling */
+        .event-row-success {
+            border-left: 3px solid var(--success);
+        }
+
+        /* Error row styling */
+        .event-row-error {
+            border-left: 3px solid var(--ember-red);
+            background: linear-gradient(90deg, rgba(139, 37, 0, 0.12) 0%, transparent 50%);
+        }
+
+        .event-error-message {
+            grid-column: 3 / -1;
+            font-size: 0.75rem;
+            color: #3c2d0d;
+            padding: 2px 0 4px 0;
+            margin-top: -4px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .event-error-message::before {
+            content: "⚠";
+            color: var(--ember-red);
+            font-size: 0.7rem;
         }
 
         @keyframes fadeIn {
@@ -1476,7 +1675,7 @@
         <!-- Header -->
         <header class="grimoire-header">
             <h1 class="grimoire-title">Sonorus</h1>
-            <p class="grimoire-subtitle">Configuration Grimoire</p>
+            <p class="grimoire-subtitle">Configuration Grimoire <span id="versionBadge" style="font-size: 0.8em; opacity: 0.7;"></span></p>
             <div class="server-status">
                 <span class="status-dot" id="serverStatus"></span>
                 <span id="serverStatusText">Connected to Server</span>
@@ -1576,8 +1775,12 @@
                     <p class="field-hint">
                         Tests voice synthesis with your configured TTS provider. The audio will play
                         through your system speakers.
-                        <a href="#chapterTTS" onclick="scrollToSection('chapterTTS')">Configure TTS settings &rarr;</a>
                     </p>
+                    <a href="#chapterTTS" onclick="scrollToSection('chapterTTS')" class="configure-link">
+                        <span class="configure-link-icon">⚙️</span>
+                        <span>Configure TTS settings first</span>
+                        <span class="configure-link-arrow">&rarr;</span>
+                    </a>
                     <div class="field-row" style="margin-bottom: 10px;">
                         <label for="setupTtsText">Test Text:</label>
                         <input type="text" id="setupTtsText"
@@ -1603,8 +1806,12 @@
                     </div>
                     <p class="field-hint">
                         Tests your configured AI models to ensure they respond correctly.
-                        <a href="#chapterLLMProvider" onclick="scrollToSection('chapterLLMProvider')">Configure LLM settings &rarr;</a>
                     </p>
+                    <a href="#chapterLLMProvider" onclick="scrollToSection('chapterLLMProvider')" class="configure-link">
+                        <span class="configure-link-icon">⚙️</span>
+                        <span>Configure LLM settings first</span>
+                        <span class="configure-link-arrow">&rarr;</span>
+                    </a>
                     <div id="setupLlmModels" class="setup-model-list">
                         <!-- Populated by JavaScript -->
                     </div>
@@ -1663,6 +1870,13 @@
                     </label>
                 </div>
                 <p class="field-hint" style="margin-top: var(--space-sm);">When enabled, this configuration page will automatically open in your browser when the server starts.</p>
+
+                <div style="margin-top: var(--space-lg); padding-top: var(--space-md); border-top: 1px solid var(--gold-dark);">
+                    <button class="btn btn-primary" id="restartServerBtn" onclick="restartServer()" disabled>
+                        Restart Server
+                    </button>
+                    <p class="field-hint" id="restartServerHint" style="margin-top: var(--space-sm);">Server is offline</p>
+                </div>
             </div>
         </section>
 
@@ -1754,6 +1968,20 @@
                         <option value="f10">F10</option>
                         <option value="enter">Enter</option>
                     </select>
+                </div>
+
+                <div class="field-group">
+                    <label class="field-label">Cast Spells with Voice</label>
+                    <p class="field-hint">Say spell names like "Lumos" or "Accio" to cast them</p>
+                    <div class="toggle-wrapper" style="padding: 0;">
+                        <label class="toggle">
+                            <input type="checkbox" id="stt_voice_spells" checked
+                                   onchange="updateSetting('stt.voice_spells', this.checked)">
+                            <span class="toggle-track">
+                                <span class="toggle-thumb"></span>
+                            </span>
+                        </label>
+                    </div>
                 </div>
             </div>
         </section>
@@ -1946,6 +2174,34 @@
                     <strong>Warning:</strong> Experimental feature. When enabled, NPCs can use actions like Follow (become companion), Leave, or Stop.
                     This may interfere with quests or cause unexpected game behavior. Use at your own risk!
                 </p>
+
+                <div class="toggle-wrapper" style="margin-top: var(--space-lg);">
+                    <span class="toggle-label">Include Player Gear in Context</span>
+                    <label class="toggle">
+                        <input type="checkbox" id="conv_gear_context"
+                               onchange="updateSetting('conversation.gear_context', this.checked)">
+                        <span class="toggle-track">
+                            <span class="toggle-thumb"></span>
+                        </span>
+                    </label>
+                </div>
+                <p class="field-hint" style="margin-top: var(--space-xs);">
+                    When enabled, NPCs can see what the player is wearing. Disable if NPCs comment on your attire too often.
+                </p>
+
+                <div class="toggle-wrapper" style="margin-top: var(--space-lg);">
+                    <span class="toggle-label">Include Mission Info for Companions</span>
+                    <label class="toggle">
+                        <input type="checkbox" id="conv_mission_context"
+                               onchange="updateSetting('conversation.mission_context', this.checked)">
+                        <span class="toggle-track">
+                            <span class="toggle-thumb"></span>
+                        </span>
+                    </label>
+                </div>
+                <p class="field-hint" style="margin-top: var(--space-xs);">
+                    When enabled, your companion knows your current quest objective. They won't push you to do it, but may reference it naturally in conversation.
+                </p>
             </div>
         </section>
 
@@ -1966,6 +2222,7 @@
                 <div class="field-group">
                     <label class="field-label">Text Chat Hotkey</label>
                     <p class="field-hint">Key to press to open the text chat input. Enter works like traditional game chat.</p>
+                    <p class="field-hint"><strong>Note:</strong>Enable subtitles in-game</p>
                     <select id="input_chat_hotkey" onchange="updateSetting('input.chat_hotkey', this.value)">
                         <option value="enter">Enter (Recommended)</option>
                         <option value="f1">F1</option>
@@ -1978,7 +2235,8 @@
                         <option value="f8">F8</option>
                         <option value="f9">F9</option>
                         <option value="f10">F10</option>
-                        <option value="middle_mouse">Middle Mouse</option>
+                        <option value="f11">F11</option>
+                        <option value="f12">F12</option>
                     </select>
                 </div>
 
@@ -1997,7 +2255,8 @@
                         <option value="f8">F8</option>
                         <option value="f9">F9</option>
                         <option value="f10">F10</option>
-                        <option value="enter">Enter</option>
+                        <option value="f11">F11</option>
+                        <option value="f12">F12</option>
                     </select>
                 </div>
 
@@ -2005,7 +2264,7 @@
                     <label class="field-label">Stop Conversation Hotkey</label>
                     <p class="field-hint">Press to immediately interrupt all ongoing AI conversations and stop NPC speech.</p>
                     <select id="input_stop_hotkey" onchange="updateSetting('input.stop_hotkey', this.value)">
-                        <option value="f8">F8 (Recommended)</option>
+                        <option value="delete">Delete (Recommended)</option>
                         <option value="f1">F1</option>
                         <option value="f2">F2</option>
                         <option value="f3">F3</option>
@@ -2013,9 +2272,11 @@
                         <option value="f5">F5</option>
                         <option value="f6">F6</option>
                         <option value="f7">F7</option>
+                        <option value="f8">F8</option>
                         <option value="f9">F9</option>
                         <option value="f10">F10</option>
-                        <option value="escape">Escape</option>
+                        <option value="f11">F11</option>
+                        <option value="f12">F12</option>
                     </select>
                 </div>
 
@@ -2090,34 +2351,12 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
 
                 <div class="field-group">
                     <label class="field-label">3D Audio Rolloff</label>
-                    <p class="field-hint">How quickly sound fades with distance</p>
+                    <p class="field-hint">How quickly sound fades with distance (lower = slower falloff)</p>
                     <div class="range-wrapper">
                         <input type="range" id="audioRolloff" min="0.1" max="2.0" step="0.1" value="0.5"
                                oninput="updateRangeValue('audioRolloff', this.value); updateSetting('audio.rolloff', parseFloat(this.value))">
                         <span class="range-value" id="audioRolloffValue">0.5</span>
                     </div>
-                </div>
-
-                <div class="toggle-wrapper">
-                    <span class="toggle-label">Mute NPC Original Audio</span>
-                    <label class="toggle">
-                        <input type="checkbox" id="muteOriginal" checked
-                               onchange="updateSetting('audio.mute_original', this.checked)">
-                        <span class="toggle-track">
-                            <span class="toggle-thumb"></span>
-                        </span>
-                    </label>
-                </div>
-
-                <div class="toggle-wrapper">
-                    <span class="toggle-label">Enable Lip Sync</span>
-                    <label class="toggle">
-                        <input type="checkbox" id="enableLipsync" checked
-                               onchange="updateSetting('lipsync.enabled', this.checked)">
-                        <span class="toggle-track">
-                            <span class="toggle-thumb"></span>
-                        </span>
-                    </label>
                 </div>
             </div>
         </section>
@@ -2132,10 +2371,30 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                 <span class="chapter-toggle">&#9660;</span>
             </div>
             <div class="chapter-content">
-                <div class="tabs">
+                <!-- NPC Perspective Filter -->
+                <div class="field-group" style="margin-bottom: var(--space-md);">
+                    <label class="field-label" for="historyPerspective">View As</label>
+                    <p class="field-hint">Preview what a specific NPC remembers (based on earshot)</p>
+                    <div style="display: flex; gap: var(--space-sm); align-items: center;">
+                        <select id="historyPerspective" onchange="filterHistoryByPerspective()" style="flex: 1;">
+                            <option value="all">All (default)</option>
+                            <!-- Populated dynamically with NPC names -->
+                        </select>
+                        <button id="clearNpcMemoryBtn" class="btn btn-warning" style="display: none; white-space: nowrap;"
+                                onclick="clearNpcMemory()">
+                            Clear Memory
+                        </button>
+                    </div>
+                </div>
+
+                <div class="tabs tabs-with-edit" id="historyTabs">
                     <button class="tab active" onclick="switchTab(event, 'historyRecent')">Recent</button>
                     <button class="tab" onclick="switchTab(event, 'historyAll')">All History</button>
                     <button class="tab" onclick="switchTab(event, 'historySettings')">Settings</button>
+                    <div class="edit-btn-container">
+                        <button id="historyEditBtn" class="btn btn-secondary btn-sm" onclick="toggleHistoryEditMode()">Edit</button>
+                    </div>
+                    <div class="edit-mode-indicator">Editing</div>
                 </div>
 
                 <div class="tab-content active" id="historyRecent">
@@ -2212,9 +2471,34 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
 
                     <div class="toggle-wrapper">
                         <span class="toggle-label">Track NPC Ambient Dialogue</span>
+                        <p class="field-hint" style="margin: 0 0 8px 0; font-size: 0.85em;">Random NPC world chatter (townspeople, students, etc.)</p>
                         <label class="toggle">
                             <input type="checkbox" id="trackAmbient" checked
                                    onchange="updateSetting('history.track_ambient', this.checked)">
+                            <span class="toggle-track">
+                                <span class="toggle-thumb"></span>
+                            </span>
+                        </label>
+                    </div>
+
+                    <div class="toggle-wrapper">
+                        <span class="toggle-label">Track Cutscene Dialogue</span>
+                        <p class="field-hint" style="margin: 0 0 8px 0; font-size: 0.85em;">Native game cutscenes and cinematics</p>
+                        <label class="toggle">
+                            <input type="checkbox" id="trackCutscene" checked
+                                   onchange="updateSetting('history.track_cutscene', this.checked)">
+                            <span class="toggle-track">
+                                <span class="toggle-thumb"></span>
+                            </span>
+                        </label>
+                    </div>
+
+                    <div class="toggle-wrapper">
+                        <span class="toggle-label">Realistic Memory</span>
+                        <p class="field-hint" style="margin: 0 0 8px 0; font-size: 0.85em;">NPCs only remember conversations they witnessed (were within earshot)</p>
+                        <label class="toggle">
+                            <input type="checkbox" id="realisticMemory" checked
+                                   onchange="updateSetting('history.realistic_memory', this.checked)">
                             <span class="toggle-track">
                                 <span class="toggle-thumb"></span>
                             </span>
@@ -2249,6 +2533,15 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                         <button class="btn btn-danger" onclick="clearHistoryWithConfirm()">Clear All History</button>
                     </div>
                 </div>
+
+                <!-- Edit Mode Action Bar -->
+                <div id="historyEditBar" class="history-edit-bar">
+                    <span class="selected-count"><span id="historySelectedCount">0</span> entries selected</span>
+                    <div class="btn-group">
+                        <button class="btn btn-danger btn-sm" id="deleteSelectedBtn" onclick="deleteSelectedHistoryEntries()" disabled>Delete Selected</button>
+                        <button class="btn btn-secondary btn-sm" onclick="toggleHistoryEditMode()">Done</button>
+                    </div>
+                </div>
             </div>
         </section>
 
@@ -2270,7 +2563,6 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
         // ============================================
         const LANGUAGE_OPTIONS = [
             { value: "EN_US", label: "English (US)" },
-            { value: "EN_GB", label: "English (UK)" },
             { value: "DE_DE", label: "German" },
             { value: "ES_ES", label: "Spanish" },
             { value: "FR_FR", label: "French" },
@@ -2288,8 +2580,8 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                     New to Inworld? <a href="https://inworld.ai/signup?ref=7HQNN63N" target="_blank">Sign up with our link</a> to get $25 free credit!`,
                 fields: [
                     { id: "api_url", type: "text", label: "API URL", placeholder: "https://api.inworld.ai", default: "https://api.inworld.ai", hint: "Base URL for the Inworld API (leave default unless using a proxy)" },
-                    { id: "workspace_id", type: "text", label: "Workspace ID", placeholder: "default-xxxxx" },
-                    { id: "api_key", type: "password", label: "API Key", placeholder: "Base64 encoded key" },
+                    { id: "workspace_id", type: "text", label: "Workspace ID", placeholder: "default-xxxxx", hint: "Find this in the API Keys section (bottom left of sidebar) in the Inworld console" },
+                    { id: "api_key", type: "password", label: "API Key", placeholder: "Base64 encoded key", hint: "Use Basic (Base64) key, not JWT - must have Read + Write access" },
                     { id: "language", type: "select", label: "Voice Language", options: LANGUAGE_OPTIONS },
                     { id: "model", type: "text", label: "TTS Model", placeholder: "inworld-tts-1-max", default: "inworld-tts-1-max" },
                     { id: "temperature", type: "range", label: "TTS Temperature", hint: "Higher = more expressive/varied", min: 0.1, max: 2.0, step: 0.1, default: 1.1 },
@@ -2306,7 +2598,7 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                 description: "Pro plan recommended for optimal experience. Lower plans have reduced audio quality and fewer cloned voices (Free: 3, Starter: 10, Creator: 30, Pro: 100+). When voice limit is reached, least recently used clones are auto-deleted. Monthly voice clone operations: Free 55, Starter 65, Creator 95, Pro 290.",
                 fields: [
                     { id: "api_url", type: "text", label: "API URL", placeholder: "https://api.elevenlabs.io", default: "https://api.elevenlabs.io", hint: "Base URL for the ElevenLabs API (leave default unless using a proxy)" },
-                    { id: "api_key", type: "password", label: "API Key", placeholder: "xi-xxxxxxxx" },
+                    { id: "api_key", type: "password", label: "API Key", placeholder: "xi-xxxxxxxx", hint: "Make sure your API key has Read + Write access" },
                     { id: "plan", type: "select", label: "Plan", hint: "Determines max audio quality and voice slots", options: [
                         { value: "free", label: "Free (16kHz)" },
                         { value: "starter", label: "Starter (22kHz)" },
@@ -2352,11 +2644,56 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
 
         // Deepgram language options by model capability
         const DEEPGRAM_LANGUAGES_NOVA3 = [
-            { value: "en", label: "English" }
+            { value: "multi", label: "Multilingual (EN, ES, FR, DE, HI, RU, PT, JA, IT, NL)" },
+            { value: "bg", label: "Bulgarian" },
+            { value: "ca", label: "Catalan" },
+            { value: "cs", label: "Czech" },
+            { value: "da", label: "Danish" },
+            { value: "da-DK", label: "Danish (Denmark)" },
+            { value: "nl", label: "Dutch" },
+            { value: "en", label: "English" },
+            { value: "en-US", label: "English (US)" },
+            { value: "en-AU", label: "English (Australia)" },
+            { value: "en-GB", label: "English (UK)" },
+            { value: "en-IN", label: "English (India)" },
+            { value: "en-NZ", label: "English (New Zealand)" },
+            { value: "et", label: "Estonian" },
+            { value: "fi", label: "Finnish" },
+            { value: "nl-BE", label: "Flemish" },
+            { value: "fr", label: "French" },
+            { value: "fr-CA", label: "French (Canada)" },
+            { value: "de", label: "German" },
+            { value: "de-CH", label: "German (Switzerland)" },
+            { value: "el", label: "Greek" },
+            { value: "hi", label: "Hindi" },
+            { value: "hu", label: "Hungarian" },
+            { value: "id", label: "Indonesian" },
+            { value: "it", label: "Italian" },
+            { value: "ja", label: "Japanese" },
+            { value: "ko", label: "Korean" },
+            { value: "ko-KR", label: "Korean (South Korea)" },
+            { value: "lv", label: "Latvian" },
+            { value: "lt", label: "Lithuanian" },
+            { value: "ms", label: "Malay" },
+            { value: "no", label: "Norwegian" },
+            { value: "pl", label: "Polish" },
+            { value: "pt", label: "Portuguese" },
+            { value: "pt-BR", label: "Portuguese (Brazil)" },
+            { value: "pt-PT", label: "Portuguese (Portugal)" },
+            { value: "ro", label: "Romanian" },
+            { value: "ru", label: "Russian" },
+            { value: "sk", label: "Slovak" },
+            { value: "es", label: "Spanish" },
+            { value: "es-419", label: "Spanish (Latin America)" },
+            { value: "sv", label: "Swedish" },
+            { value: "sv-SE", label: "Swedish (Sweden)" },
+            { value: "tr", label: "Turkish" },
+            { value: "uk", label: "Ukrainian" },
+            { value: "vi", label: "Vietnamese" }
         ];
 
         const DEEPGRAM_LANGUAGES_NOVA2 = [
-            { value: "multi", label: "Multilingual (Auto-detect)" },
+            { value: "multi", label: "Multilingual (EN, ES)" },
             { value: "bg", label: "Bulgarian" },
             { value: "ca", label: "Catalan" },
             { value: "zh-HK", label: "Chinese (Cantonese, Hong Kong)" },
@@ -2633,9 +2970,9 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
         }
 
         const LLM_PROVIDER_HINTS = {
-            gemini: '<strong>(Recommended)</strong> Google\'s Gemini API with generous free tier. <a href="https://aistudio.google.com/app/apikey" target="_blank">Get your free API key</a>.',
-            openrouter: 'Access 100+ AI models through one API. <a href="https://openrouter.ai/" target="_blank">Sign up at openrouter.ai</a> and add credits ($5 minimum purchase).',
-            openai: 'Direct access to OpenAI models (GPT-4, etc). <a href="https://auth.openai.com/create-account" target="_blank">Create account</a>, then get API key from <a href="https://platform.openai.com/api-keys" target="_blank">platform.openai.com</a>. Requires prepaid credits ($5 minimum top-up).'
+            gemini: '<strong>(Recommended)</strong> Google\'s Gemini API with free tier. <a href="https://aistudio.google.com/app/apikey" target="_blank">Get your free API key</a>. If you experience errors, you may be at the daily limit, in which case we recommend you switch to OpenRouter.',
+            openrouter: 'Access 100+ AI models through one API. <a href="https://openrouter.ai/" target="_blank">Sign up at openrouter.ai</a> and add credits ($5 minimum purchase - generally lasts a long time).',
+            openai: 'Direct access to OpenAI models (GPT-5, etc). <a href="https://auth.openai.com/create-account" target="_blank">Create account</a>, then get API key from <a href="https://platform.openai.com/api-keys" target="_blank">platform.openai.com</a>. Requires prepaid credits ($5 minimum top-up).'
         };
 
         // Gemini 3 Flash - switches to GA version after March 2026
@@ -2654,9 +2991,9 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
             },
             openrouter: {
                 chat: GEMINI_3_FLASH_OR,
-                vision: 'google/gemini-2.0-flash-001',
-                target: 'google/gemini-2.0-flash-001',
-                interjection: 'google/gemini-2.0-flash-001'
+                vision: 'google/gemini-2.5-flash-lite',
+                target: 'google/gemini-2.5-flash-lite',
+                interjection: 'google/gemini-2.5-flash-lite'
             },
             openai: {
                 chat: 'gpt-5-mini',
@@ -2675,24 +3012,10 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
             interjection: { path: 'conversation.interjection_model', elementId: 'conv_interjection_model' }
         };
 
-        // Get all known default values across all providers
-        function getAllDefaultModels() {
-            const defaults = new Set();
-            for (const provider of Object.values(MODEL_PRESETS)) {
-                for (const model of Object.values(provider)) {
-                    defaults.add(model);
-                }
-            }
-            return defaults;
-        }
-
-        // Apply model presets when switching providers
-        // Only changes fields that currently match a known default from any provider
+        // Apply model presets when switching providers - always resets to provider defaults
         function applyModelPresets(newProviderId) {
             const presets = MODEL_PRESETS[newProviderId];
             if (!presets) return;
-
-            const knownDefaults = getAllDefaultModels();
 
             for (const [key, field] of Object.entries(MODEL_FIELDS)) {
                 const newModel = presets[key];
@@ -2701,22 +3024,20 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                 const element = document.getElementById(field.elementId);
                 if (!element) continue;
 
-                // Always update placeholder to show current provider's default
+                // Always reset to provider's default model
                 element.placeholder = newModel;
+                const oldValue = element.value;
+                element.value = newModel;
 
-                const currentValue = element.value;
+                // Use appropriate update function based on field type
+                if (field.isAgent) {
+                    updateAgentSetting(field.agentId, field.prefix, field.fieldId, newModel);
+                } else {
+                    updateSetting(field.path, newModel);
+                }
 
-                // Only update if current value is a known default (not user-customized)
-                if (knownDefaults.has(currentValue)) {
-                    element.value = newModel;
-
-                    // Use appropriate update function based on field type
-                    if (field.isAgent) {
-                        updateAgentSetting(field.agentId, field.prefix, field.fieldId, newModel);
-                    } else {
-                        updateSetting(field.path, newModel);
-                    }
-                    console.log(`[ModelPresets] ${key}: ${currentValue} -> ${newModel}`);
+                if (oldValue !== newModel) {
+                    console.log(`[ModelPresets] ${key}: ${oldValue} -> ${newModel}`);
                 }
             }
         }
@@ -3072,6 +3393,7 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
         // Setup wizard state
         let setupStatus = null;
         let setupPollingInterval = null;
+        let setupConfettiShown = false;  // Only show confetti once per session when setup completes
 
         // Fetch with timeout helper (default 2s)
         function fetchWithTimeout(url, options = {}, timeoutMs = 2000) {
@@ -3118,6 +3440,13 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
 
                 stopSetupPolling();
                 hideSetupError();
+
+                // Celebrate with confetti when setup completes (only if we saw it incomplete first)
+                const wasIncomplete = setupStatus && !setupStatus.complete;
+                if (wasIncomplete && !setupConfettiShown && typeof confetti === 'function') {
+                    confetti();
+                    setupConfettiShown = true;
+                }
 
                 // Still update test steps so they show "Retest"
                 updateSetupStep(3, status.steps.tts);
@@ -3513,18 +3842,54 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                 const response = await fetchWithTimeout('/health');
                 const dot = document.getElementById('serverStatus');
                 const text = document.getElementById('serverStatusText');
+                const restartBtn = document.getElementById('restartServerBtn');
+                const restartHint = document.getElementById('restartServerHint');
 
                 if (response.ok) {
+                    const data = await response.json();
                     dot.classList.remove('disconnected');
                     text.textContent = 'Connected to Server';
+                    // Display version
+                    const versionBadge = document.getElementById('versionBadge');
+                    if (versionBadge && data.version) {
+                        versionBadge.textContent = 'v' + data.version;
+                    }
+                    // Enable restart button when connected
+                    if (restartBtn) {
+                        restartBtn.disabled = false;
+                        restartHint.textContent = 'Restart the Python server';
+                    }
                 } else {
                     throw new Error('Not OK');
                 }
             } catch (e) {
                 document.getElementById('serverStatus').classList.add('disconnected');
                 document.getElementById('serverStatusText').textContent = 'Server Disconnected';
+                // Disable restart button when disconnected
+                const restartBtn = document.getElementById('restartServerBtn');
+                const restartHint = document.getElementById('restartServerHint');
+                if (restartBtn) {
+                    restartBtn.disabled = true;
+                    restartHint.textContent = 'Server is offline';
+                }
             } finally {
                 statusCheckInFlight = false;
+            }
+        }
+
+        async function restartServer() {
+            const btn = document.getElementById('restartServerBtn');
+            const hint = document.getElementById('restartServerHint');
+
+            btn.disabled = true;
+            hint.textContent = 'Restarting server...';
+
+            try {
+                await fetch('/restart', { method: 'POST' });
+                hint.textContent = 'Server restarting, please wait...';
+                // Page will reconnect via existing health check loop
+            } catch (e) {
+                hint.textContent = 'Restart signal sent';
             }
         }
 
@@ -3573,6 +3938,7 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
             renderSTTProviderSettings(currentSTTProvider);
             setFieldValue('stt_hotkey', cfg.stt?.hotkey || 'middle_mouse');
             setFieldValue('input_stt_hotkey', cfg.stt?.hotkey || 'middle_mouse');
+            setCheckbox('stt_voice_spells', cfg.stt?.voice_spells !== false);
 
             // Player voice settings (in Voice Synthesis section, but stored in conversation settings)
             setCheckbox('playerVoiceEnabled', cfg.conversation?.player_voice_enabled === true);
@@ -3586,16 +3952,16 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
             applyModelPresets(currentLLMProvider);
 
             // Audio
-            setFieldValue('masterVolume', cfg.audio?.volume || 100);
-            setFieldValue('audioRolloff', cfg.audio?.rolloff || 0.5);
-            setCheckbox('muteOriginal', cfg.audio?.mute_original !== false);
-            setCheckbox('enableLipsync', cfg.lipsync?.enabled !== false);
+            setFieldValue('masterVolume', cfg.audio?.volume ?? 100);
+            setFieldValue('audioRolloff', cfg.audio?.rolloff ?? 0.5);
 
             // History
             setFieldValue('maxHistory', cfg.history?.max_entries || 100);
             setFieldValue('dedupWindow', cfg.history?.dedup_window || 5);
             setFieldValue('ambientDedupWindow', cfg.history?.ambient_dedup_window || 15);
             setCheckbox('trackAmbient', cfg.history?.track_ambient !== false);
+            setCheckbox('trackCutscene', cfg.history?.track_cutscene !== false);
+            setCheckbox('realisticMemory', cfg.history?.realistic_memory !== false);
             const maxLocEntries = cfg.history?.max_location_entries ?? 2;
             setFieldValue('maxLocationEntries', maxLocEntries);
             const maxSpellEntries = cfg.history?.max_spell_entries ?? 3;
@@ -3614,10 +3980,12 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
             setFieldValue('conv_interjection_model', cfg.conversation?.interjection_model || 'gemini-2.5-flash-lite');
             setFieldValue('conv_interjection_max_tokens', cfg.conversation?.interjection_max_tokens || 8192);
             setCheckbox('conv_actions_enabled', cfg.conversation?.actions_enabled === true);
+            setCheckbox('conv_gear_context', cfg.conversation?.gear_context !== false);
+            setCheckbox('conv_mission_context', cfg.conversation?.mission_context !== false);
 
             // Input settings
             setFieldValue('input_chat_hotkey', cfg.input?.chat_hotkey || 'enter');
-            setFieldValue('input_stop_hotkey', cfg.input?.stop_hotkey || 'f8');
+            setFieldValue('input_stop_hotkey', cfg.input?.stop_hotkey || 'delete');
             const idleTimeout = cfg.input?.idle_timeout_minutes ?? 20;
             setFieldValue('input_idle_timeout', idleTimeout);
             updateRangeValue('input_idle_timeout', idleTimeout == 0 ? 'Disabled' : idleTimeout + ' min');
@@ -3759,22 +4127,187 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
 
         // Pagination state
         let allHistory = [];
+        let filteredHistory = null;  // null = no filter (show all)
         let currentPage = 1;
         const ITEMS_PER_PAGE = 100;
 
+        // Edit mode state
+        let historyEditMode = false;
+        let selectedHistoryEntries = new Set();  // stores timestamps as strings for precision
+
+        // NPC name utilities (mirrors Python's dialogue.py)
+        const GENERIC_NPC_PREFIXES = [
+            'AdultMale', 'AdultFemale', 'ElderlyMale', 'ElderlyFemale',
+            'ChildMale', 'ChildFemale', 'TeenMale', 'TeenFemale'
+        ];
+
+        function isNamedNPC(voiceName) {
+            if (!voiceName) return false;
+            const lower = voiceName.toLowerCase();
+            if (lower === 'player' || lower === 'playermale' || lower === 'playerfemale') return false;
+            return !GENERIC_NPC_PREFIXES.some(prefix => voiceName.startsWith(prefix));
+        }
+
+        function prettifyVoiceName(voiceName) {
+            if (!voiceName) return 'Unknown';
+            const lower = voiceName.toLowerCase();
+            if (lower === 'player' || lower === 'playermale' || lower === 'playerfemale') return 'Player';
+            // Add spaces before capitals: "SebastianSallow" -> "Sebastian Sallow"
+            return voiceName.replace(/([a-z])([A-Z])/g, '$1 $2')
+                            .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2');
+        }
+
+        function getUniqueNPCsFromHistory(history) {
+            const npcIds = new Set();
+            for (const entry of history) {
+                // Add speaker if named NPC
+                const voiceName = entry.voiceName || '';
+                if (voiceName && isNamedNPC(voiceName)) {
+                    npcIds.add(voiceName);
+                }
+                // Add all earshot witnesses
+                if (Array.isArray(entry.earshot)) {
+                    for (const npcId of entry.earshot) {
+                        if (isNamedNPC(npcId)) {
+                            npcIds.add(npcId);
+                        }
+                    }
+                }
+            }
+            return Array.from(npcIds).sort((a, b) =>
+                prettifyVoiceName(a).localeCompare(prettifyVoiceName(b))
+            );
+        }
+
+        function populatePerspectiveDropdown(history) {
+            const select = document.getElementById('historyPerspective');
+            if (!select) return;
+            const currentValue = select.value;
+
+            // Clear existing options except "All"
+            select.innerHTML = '<option value="all">All (default)</option>';
+
+            // Get unique NPCs and add as options
+            const npcIds = getUniqueNPCsFromHistory(history);
+            for (const npcId of npcIds) {
+                const option = document.createElement('option');
+                option.value = npcId;
+                option.textContent = prettifyVoiceName(npcId);
+                select.appendChild(option);
+            }
+
+            // Restore selection if still valid
+            if (currentValue && [...select.options].some(o => o.value === currentValue)) {
+                select.value = currentValue;
+            } else {
+                select.value = 'all';
+                filteredHistory = null;
+            }
+
+            // Update clear button visibility
+            updateClearNpcButton();
+        }
+
+        function filterHistoryByPerspective() {
+            const npcId = document.getElementById('historyPerspective').value;
+
+            if (npcId === 'all') {
+                filteredHistory = null;
+            } else {
+                filteredHistory = allHistory.filter(entry => {
+                    // NPC was the speaker
+                    if (entry.voiceName === npcId) return true;
+                    // NPC was in earshot
+                    if (Array.isArray(entry.earshot) && entry.earshot.includes(npcId)) return true;
+                    // Legacy entry (no earshot field) - include for backwards compat
+                    if (!('earshot' in entry)) return true;
+                    return false;
+                });
+            }
+
+            // Update clear button
+            updateClearNpcButton();
+
+            // Re-render tables with filtered data
+            currentPage = 1;
+            const historyToRender = filteredHistory || allHistory;
+            const collapsed = collapseSpells(historyToRender);
+            populateHistoryTable(collapsed.slice(-10).reverse(), true);
+            renderAllHistory();
+        }
+
+        function updateClearNpcButton() {
+            const npcId = document.getElementById('historyPerspective').value;
+            const clearBtn = document.getElementById('clearNpcMemoryBtn');
+            if (!clearBtn) return;
+
+            if (npcId === 'all') {
+                clearBtn.style.display = 'none';
+            } else {
+                clearBtn.style.display = 'inline-block';
+                clearBtn.textContent = `Clear ${prettifyVoiceName(npcId)}'s Memory`;
+            }
+        }
+
+        async function clearNpcMemory() {
+            const npcId = document.getElementById('historyPerspective').value;
+            if (npcId === 'all') return;
+
+            const displayName = prettifyVoiceName(npcId);
+            const confirmed = confirm(
+                `This will remove ${displayName} from all conversation memories.\n\n` +
+                `• ${displayName} will be removed from all earshot witness lists\n` +
+                `• Entries only witnessed by ${displayName} will be deleted\n` +
+                `• Entries where ${displayName} spoke will be deleted\n\n` +
+                `This cannot be undone. Continue?`
+            );
+            if (!confirmed) return;
+
+            try {
+                const response = await fetch(`/api/dialogue-history/clear-npc/${encodeURIComponent(npcId)}`, {
+                    method: 'DELETE'
+                });
+                if (!response.ok) throw new Error('Failed to clear NPC memory');
+
+                const result = await response.json();
+                showToast(`Cleared ${displayName}'s memory (${result.entries_removed} entries removed)`, 'success');
+
+                // Reset to "All" and refresh
+                document.getElementById('historyPerspective').value = 'all';
+                filteredHistory = null;
+                await loadDialogueHistory();
+            } catch (error) {
+                console.error('Error clearing NPC memory:', error);
+                showToast('Error clearing NPC memory', 'error');
+            }
+        }
+
         async function loadDialogueHistory() {
+            // Skip auto-refresh during edit mode to prevent disruption
+            if (historyEditMode) return;
             if (historyLoadInFlight) return;
             historyLoadInFlight = true;
             try {
                 const response = await fetchWithTimeout('/api/dialogue-history');
                 if (response.ok) {
                     allHistory = await response.json();
-                    // Collapse spells first (on chronological data), then reverse for display
-                    const collapsed = collapseSpells(allHistory);
-                    // Recent tab: last 10, newest first
-                    populateHistoryTable(collapsed.slice(-10).reverse(), true);
-                    // All History tab: paginated, newest first
-                    renderAllHistory();
+
+                    // Populate NPC perspective dropdown
+                    populatePerspectiveDropdown(allHistory);
+
+                    // Apply current filter if any
+                    const npcId = document.getElementById('historyPerspective')?.value;
+                    if (npcId && npcId !== 'all') {
+                        filterHistoryByPerspective();
+                    } else {
+                        filteredHistory = null;
+                        // Collapse spells first (on chronological data), then reverse for display
+                        const collapsed = collapseSpells(allHistory);
+                        // Recent tab: last 10, newest first
+                        populateHistoryTable(collapsed.slice(-10).reverse(), true);
+                        // All History tab: paginated, newest first
+                        renderAllHistory();
+                    }
                 }
             } catch (e) {
                 // Silently ignore timeout/network errors during polling
@@ -3837,7 +4370,29 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
         }
 
         function populateHistoryTable(history, alreadyCollapsed = false) {
+            const table = document.querySelector('#historyRecent .history-table');
+            const thead = table.querySelector('thead tr');
             const tbody = document.getElementById('historyTableBody');
+
+            // Update header for edit mode
+            if (historyEditMode) {
+                if (!thead.querySelector('.history-checkbox-cell')) {
+                    thead.innerHTML = `
+                        <th class="history-checkbox-cell"><input type="checkbox" class="history-checkbox history-select-all" onchange="this.checked ? selectAllHistoryEntries() : deselectAllHistoryEntries()" title="Select all"></th>
+                        <th>Speaker</th>
+                        <th>Text</th>
+                        <th>Time</th>
+                        <th class="history-delete-cell"></th>
+                    `;
+                }
+            } else {
+                thead.innerHTML = `
+                    <th>Speaker</th>
+                    <th>Text</th>
+                    <th>Time</th>
+                `;
+            }
+
             tbody.innerHTML = '';
 
             // Collapse consecutive spell casts (skip if already done by caller)
@@ -3845,6 +4400,10 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
 
             for (const entry of collapsed) {
                 const row = document.createElement('tr');
+                const timestamp = entry.timestamp;
+                const timestampStr = String(timestamp);
+                row.dataset.timestamp = timestampStr;
+
                 let speaker = entry.speaker || entry.voiceName || 'Unknown';
                 let text = entry.text || '...';
                 let time;
@@ -3871,23 +4430,39 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                     time = formatEntryTime(entry);
                 }
 
-                row.className = rowClass;
-                row.innerHTML = `
-                    <td class="history-speaker">${escapeHtml(speaker)}</td>
-                    <td class="history-text">${escapeHtml(text)}</td>
-                    <td class="history-time">${time}</td>
-                `;
+                const isSelected = selectedHistoryEntries.has(timestampStr);
+                row.className = rowClass + (isSelected ? ' selected' : '');
+
+                if (historyEditMode) {
+                    row.innerHTML = `
+                        <td class="history-checkbox-cell"><input type="checkbox" class="history-checkbox" data-timestamp="${timestampStr}" ${isSelected ? 'checked' : ''} onchange="toggleHistoryEntrySelection('${timestampStr}', this)"></td>
+                        <td class="history-speaker">${escapeHtml(speaker)}</td>
+                        <td class="history-text">${escapeHtml(text)}</td>
+                        <td class="history-time">${time}</td>
+                        <td class="history-delete-cell"><button class="history-delete-btn" onclick="deleteSingleHistoryEntry('${timestampStr}')" title="Delete entry">&#10005;</button></td>
+                    `;
+                } else {
+                    row.innerHTML = `
+                        <td class="history-speaker">${escapeHtml(speaker)}</td>
+                        <td class="history-text">${escapeHtml(text)}</td>
+                        <td class="history-time">${time}</td>
+                    `;
+                }
                 tbody.appendChild(row);
             }
 
             if (collapsed.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;opacity:0.6;">No dialogue history yet</td></tr>';
+                const colspan = historyEditMode ? 5 : 3;
+                tbody.innerHTML = `<tr><td colspan="${colspan}" style="text-align:center;opacity:0.6;">No dialogue history yet</td></tr>`;
             }
         }
 
         function renderAllHistory() {
+            // Use filtered history if set, otherwise all history
+            const historyToRender = filteredHistory || allHistory;
+
             // Collapse consecutive spells first, then reverse for newest-first display
-            const collapsed = collapseSpells(allHistory);
+            const collapsed = collapseSpells(historyToRender);
             const reversed = [...collapsed].reverse(); // Newest first
             const totalPages = Math.ceil(reversed.length / ITEMS_PER_PAGE) || 1;
 
@@ -3900,9 +4475,36 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
             const end = start + ITEMS_PER_PAGE;
             const pageData = reversed.slice(start, end);
 
-            // Update count (show collapsed count)
+            // Update count (show collapsed count, indicate if filtered)
             const countEl = document.getElementById('historyAllCount');
-            countEl.textContent = `${collapsed.length} entries total (${allHistory.length} raw)`;
+            if (filteredHistory) {
+                const npcId = document.getElementById('historyPerspective')?.value;
+                const npcName = prettifyVoiceName(npcId);
+                countEl.textContent = `${collapsed.length} entries for ${npcName} (${allHistory.length} total)`;
+            } else {
+                countEl.textContent = `${collapsed.length} entries total (${allHistory.length} raw)`;
+            }
+
+            // Update header for edit mode
+            const table = document.querySelector('#historyAll .history-table');
+            const thead = table.querySelector('thead tr');
+            if (historyEditMode) {
+                if (!thead.querySelector('.history-checkbox-cell')) {
+                    thead.innerHTML = `
+                        <th class="history-checkbox-cell"><input type="checkbox" class="history-checkbox history-select-all" onchange="this.checked ? selectAllHistoryEntries() : deselectAllHistoryEntries()" title="Select all"></th>
+                        <th>Speaker</th>
+                        <th>Text</th>
+                        <th>Time</th>
+                        <th class="history-delete-cell"></th>
+                    `;
+                }
+            } else {
+                thead.innerHTML = `
+                    <th>Speaker</th>
+                    <th>Text</th>
+                    <th>Time</th>
+                `;
+            }
 
             // Render table
             const tbody = document.getElementById('historyAllTableBody');
@@ -3910,6 +4512,10 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
 
             for (const entry of pageData) {
                 const row = document.createElement('tr');
+                const timestamp = entry.timestamp;
+                const timestampStr = String(timestamp);
+                row.dataset.timestamp = timestampStr;
+
                 let speaker = entry.speaker || entry.voiceName || 'Unknown';
                 let text = entry.text || '...';
                 let time;
@@ -3936,17 +4542,30 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                     time = formatEntryTime(entry);
                 }
 
-                row.className = rowClass;
-                row.innerHTML = `
-                    <td class="history-speaker">${escapeHtml(speaker)}</td>
-                    <td class="history-text">${escapeHtml(text)}</td>
-                    <td class="history-time">${time}</td>
-                `;
+                const isSelected = selectedHistoryEntries.has(timestampStr);
+                row.className = rowClass + (isSelected ? ' selected' : '');
+
+                if (historyEditMode) {
+                    row.innerHTML = `
+                        <td class="history-checkbox-cell"><input type="checkbox" class="history-checkbox" data-timestamp="${timestampStr}" ${isSelected ? 'checked' : ''} onchange="toggleHistoryEntrySelection('${timestampStr}', this)"></td>
+                        <td class="history-speaker">${escapeHtml(speaker)}</td>
+                        <td class="history-text">${escapeHtml(text)}</td>
+                        <td class="history-time">${time}</td>
+                        <td class="history-delete-cell"><button class="history-delete-btn" onclick="deleteSingleHistoryEntry('${timestampStr}')" title="Delete entry">&#10005;</button></td>
+                    `;
+                } else {
+                    row.innerHTML = `
+                        <td class="history-speaker">${escapeHtml(speaker)}</td>
+                        <td class="history-text">${escapeHtml(text)}</td>
+                        <td class="history-time">${time}</td>
+                    `;
+                }
                 tbody.appendChild(row);
             }
 
             if (pageData.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;opacity:0.6;">No dialogue history yet</td></tr>';
+                const colspan = historyEditMode ? 5 : 3;
+                tbody.innerHTML = `<tr><td colspan="${colspan}" style="text-align:center;opacity:0.6;">No dialogue history yet</td></tr>`;
             }
 
             // Render pagination
@@ -4157,6 +4776,177 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
             }
         }
 
+        // ============================================
+        // History Edit Mode Functions
+        // ============================================
+        function toggleHistoryEditMode() {
+            historyEditMode = !historyEditMode;
+            const chapterContent = document.querySelector('#chapterHistory .chapter-content');
+            const editBtn = document.getElementById('historyEditBtn');
+            const editBar = document.getElementById('historyEditBar');
+
+            if (historyEditMode) {
+                chapterContent.classList.add('history-edit-mode');
+                editBtn.textContent = 'Cancel';
+                editBtn.classList.remove('btn-secondary');
+                editBtn.classList.add('btn-warning');
+                editBar.classList.add('active');
+            } else {
+                chapterContent.classList.remove('history-edit-mode');
+                editBtn.textContent = 'Edit';
+                editBtn.classList.remove('btn-warning');
+                editBtn.classList.add('btn-secondary');
+                editBar.classList.remove('active');
+                selectedHistoryEntries.clear();
+                // Refresh data when exiting edit mode
+                loadDialogueHistory();
+            }
+            // Re-render tables to show/hide checkboxes
+            const collapsed = collapseSpells(allHistory);
+            populateHistoryTable(collapsed.slice(-10).reverse(), true);
+            renderAllHistory();
+            updateHistorySelectionUI();
+        }
+
+        function toggleHistoryEntrySelection(timestampStr, checkbox) {
+            if (checkbox.checked) {
+                selectedHistoryEntries.add(timestampStr);
+            } else {
+                selectedHistoryEntries.delete(timestampStr);
+            }
+            updateHistorySelectionUI();
+            updateRowSelectionState(timestampStr, checkbox.checked);
+        }
+
+        function updateRowSelectionState(timestampStr, isSelected) {
+            // Update row visual state
+            document.querySelectorAll(`tr[data-timestamp="${timestampStr}"]`).forEach(row => {
+                if (isSelected) {
+                    row.classList.add('selected');
+                } else {
+                    row.classList.remove('selected');
+                }
+            });
+        }
+
+        function selectAllHistoryEntries() {
+            // Select all visible entries in current view
+            const activeTab = document.querySelector('.tab-content.active');
+            const tbody = activeTab.querySelector('tbody');
+            const checkboxes = tbody.querySelectorAll('.history-checkbox');
+
+            checkboxes.forEach(cb => {
+                const timestampStr = cb.dataset.timestamp;
+                if (timestampStr) {
+                    selectedHistoryEntries.add(timestampStr);
+                    cb.checked = true;
+                    cb.closest('tr').classList.add('selected');
+                }
+            });
+            updateHistorySelectionUI();
+        }
+
+        function deselectAllHistoryEntries() {
+            selectedHistoryEntries.clear();
+            document.querySelectorAll('.history-checkbox').forEach(cb => {
+                cb.checked = false;
+                cb.closest('tr').classList.remove('selected');
+            });
+            updateHistorySelectionUI();
+        }
+
+        function updateHistorySelectionUI() {
+            const count = selectedHistoryEntries.size;
+            document.getElementById('historySelectedCount').textContent = count;
+            document.getElementById('deleteSelectedBtn').disabled = count === 0;
+
+            // Update select-all checkboxes
+            document.querySelectorAll('.history-select-all').forEach(cb => {
+                const tbody = cb.closest('table').querySelector('tbody');
+                const rowCheckboxes = tbody.querySelectorAll('.history-checkbox');
+                const allChecked = rowCheckboxes.length > 0 &&
+                    Array.from(rowCheckboxes).every(c => c.checked);
+                cb.checked = allChecked;
+            });
+        }
+
+        async function deleteSelectedHistoryEntries() {
+            const count = selectedHistoryEntries.size;
+            if (count === 0) return;
+
+            const message = count === 1
+                ? 'Delete this entry? This cannot be undone.'
+                : `Delete ${count} entries? This cannot be undone.`;
+
+            if (!confirm(message)) return;
+
+            try {
+                // Convert string timestamps to numbers for API
+                const timestamps = Array.from(selectedHistoryEntries).map(s => parseFloat(s));
+                const response = await fetch('/api/dialogue-history/entries', {
+                    method: 'DELETE',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ timestamps })
+                });
+
+                if (response.ok) {
+                    const result = await response.json();
+                    // Remove from local data (compare as strings for precision)
+                    allHistory = allHistory.filter(e => !selectedHistoryEntries.has(String(e.timestamp)));
+                    if (filteredHistory) {
+                        filteredHistory = filteredHistory.filter(e => !selectedHistoryEntries.has(String(e.timestamp)));
+                    }
+                    selectedHistoryEntries.clear();
+
+                    // Re-render
+                    const collapsed = collapseSpells(allHistory);
+                    populateHistoryTable(collapsed.slice(-10).reverse(), true);
+                    renderAllHistory();
+                    updateHistorySelectionUI();
+
+                    showToast(`Deleted ${result.deleted} ${result.deleted === 1 ? 'entry' : 'entries'}`, 'success');
+                } else {
+                    showToast('Delete failed', 'error');
+                }
+            } catch (e) {
+                showToast('Delete failed: ' + e.message, 'error');
+            }
+        }
+
+        async function deleteSingleHistoryEntry(timestampStr) {
+            if (!confirm('Delete this entry? This cannot be undone.')) return;
+
+            try {
+                const timestamp = parseFloat(timestampStr);
+                const response = await fetch('/api/dialogue-history/entries', {
+                    method: 'DELETE',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ timestamps: [timestamp] })
+                });
+
+                if (response.ok) {
+                    // Remove from local data (compare as strings for precision)
+                    allHistory = allHistory.filter(e => String(e.timestamp) !== timestampStr);
+                    if (filteredHistory) {
+                        filteredHistory = filteredHistory.filter(e => String(e.timestamp) !== timestampStr);
+                    }
+                    selectedHistoryEntries.delete(timestampStr);
+
+                    // Re-render
+                    const collapsed = collapseSpells(allHistory);
+                    populateHistoryTable(collapsed.slice(-10).reverse(), true);
+                    renderAllHistory();
+                    updateHistorySelectionUI();
+
+                    showToast('Entry deleted', 'success');
+                } else {
+                    showToast('Delete failed', 'error');
+                }
+            } catch (e) {
+                showToast('Delete failed: ' + e.message, 'error');
+            }
+        }
+
         function importHistoryClick() {
             document.getElementById('historyImportInput').click();
         }
@@ -4344,21 +5134,33 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
         function renderEvent(eventObj) {
             const typeClass = eventObj.type.replace('_', '_');
             const statusClass = eventObj.status || 'success';
+            const isError = eventObj.status === 'error' && eventObj.error;
+            const isSuccess = eventObj.status === 'success' || !eventObj.status;
             const timeStr = formatRelativeTime(eventObj.timestamp);
             const infoStr = formatEventInfo(eventObj);
             const detailStr = formatEventDetail(eventObj);
             const metricStr = formatEventMetric(eventObj);
 
             const row = document.createElement('div');
-            row.className = 'event-row-new';
+            let rowClass = 'event-row-new';
+            if (isError) rowClass += ' event-row-error';
+            else if (isSuccess) rowClass += ' event-row-success';
+            row.className = rowClass;
             row.id = `event-${eventObj.id}`;
             row.dataset.timestamp = eventObj.timestamp;
+
+            let errorLine = '';
+            if (isError) {
+                errorLine = `<div class="event-error-message">${escapeHtml(eventObj.error)}</div>`;
+            }
+
             row.innerHTML = `
                 <div class="event-time">${timeStr}</div>
                 <div class="event-type ${typeClass}">${eventObj.type}</div>
                 <div class="event-status ${statusClass}"></div>
                 <div class="event-info">${escapeHtml(infoStr)}</div>
                 <div class="event-metric">${escapeHtml(metricStr)}</div>
+                ${errorLine}
             `;
 
             return row;

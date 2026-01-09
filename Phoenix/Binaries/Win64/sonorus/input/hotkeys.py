@@ -22,7 +22,10 @@ VK_F7 = 0x76
 VK_F8 = 0x77
 VK_F9 = 0x78
 VK_F10 = 0x79
+VK_F11 = 0x7A
+VK_F12 = 0x7B
 VK_ESCAPE = 0x1B
+VK_DELETE = 0x2E
 
 # Modifiers to ignore (let Alt+Tab, Win key, etc through)
 VK_MENU = 0x12
@@ -33,13 +36,13 @@ VK_CONTROL = 0x11
 HOTKEY_VK_MAP = {
     'f1': VK_F1, 'f2': VK_F2, 'f3': VK_F3, 'f4': VK_F4, 'f5': VK_F5,
     'f6': VK_F6, 'f7': VK_F7, 'f8': VK_F8, 'f9': VK_F9, 'f10': VK_F10,
-    'escape': VK_ESCAPE,
+    'f11': VK_F11, 'f12': VK_F12, 'escape': VK_ESCAPE, 'delete': VK_DELETE,
 }
 
 # Module state
 _listener = None
 _callback = None
-_hotkey_vk = VK_F8
+_hotkey_vk = VK_DELETE
 _check_pause = None
 
 
@@ -119,7 +122,7 @@ def start_capture(callback, hotkey='f8', check_pause=None):
 
     _callback = callback
     _check_pause = check_pause
-    _hotkey_vk = HOTKEY_VK_MAP.get(hotkey.lower(), VK_F8)
+    _hotkey_vk = HOTKEY_VK_MAP.get(hotkey.lower(), VK_DELETE)
 
     _listener = keyboard.Listener(
         win32_event_filter=_win32_event_filter,
@@ -138,3 +141,12 @@ def stop_capture():
         except:
             pass
         _listener = None
+
+
+def set_hotkey(hotkey):
+    """Update hotkey without restarting listener."""
+    global _hotkey_vk
+    new_vk = HOTKEY_VK_MAP.get(hotkey.lower(), VK_DELETE)
+    if new_vk != _hotkey_vk:
+        _hotkey_vk = new_vk
+        print(f"[StopCapture] Hotkey updated to: {hotkey} (VK={hex(_hotkey_vk)})")

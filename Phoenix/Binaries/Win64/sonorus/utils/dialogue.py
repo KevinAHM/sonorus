@@ -4,37 +4,52 @@ Handles loading, saving, filtering, and formatting of dialogue history.
 """
 
 import os
-import re
 import json
 
 from .settings import DATA_DIR, load_settings
+from .localization import get_display_name
 from constants import DIALOGUE_HISTORY_LIMIT
 
 
-def load_dialogue_history(game_context_func=None):
+def load_dialogue_history(game_context=None):
     """
     Load dialogue history from file, collapsing consecutive duplicates.
 
     Args:
-        game_context_func: Optional function that returns game context dict with 'playerName'
+        game_context: Either a dict with 'playerName', or a callable that returns such a dict.
+                     Accepts both for backwards compatibility.
     """
     path = os.path.join(DATA_DIR, "dialogue_history.json")
     try:
         with open(path, 'r', encoding='utf-8') as f:
             raw_history = json.load(f)
 
+        # Debug: check raw JSON for non-dict entries
+        raw_bad = [(i, type(e).__name__) for i, e in enumerate(raw_history) if not isinstance(e, dict)]
+        if raw_bad:
+            print(f"[DialogueHistory] RAW JSON has {len(raw_bad)} non-dict entries: {raw_bad[:5]}")
+
         # Get player name to normalize player entries
+        # Support both dict and callable for backwards compatibility
         player_name = ''
         try:
-            if game_context_func:
-                game_context = game_context_func()
-                player_name = game_context.get('playerName', '').lower()
+            if game_context:
+                if callable(game_context):
+                    ctx = game_context()  # Call if it's a function
+                else:
+                    ctx = game_context  # Use directly if it's a dict
+                player_name = ctx.get('playerName', '').lower()
         except:
             pass
 
         # Collapse consecutive identical NPC lines (cleans up rapid-fire repeats from Lua)
         cleaned = []
         for entry in raw_history:
+            # Skip non-dict entries (corrupted data)
+            if not isinstance(entry, dict):
+                print(f"[DialogueHistory] WARNING: Skipping non-dict entry: {type(entry).__name__} = {repr(entry)[:100]}")
+                continue
+
             # Normalize player entries (Lua captures player voice lines without isPlayer flag)
             if player_name and not entry.get('isAIResponse'):
                 speaker = entry.get('speaker', '').lower()
@@ -52,6 +67,11 @@ def load_dialogue_history(game_context_func=None):
 
         # Collapse consecutive spell casts (e.g., Stupefy spam -> "Cast Stupefy (5x)")
         cleaned = collapse_consecutive_spells(cleaned)
+
+        # Debug: check after processing
+        post_bad = [(i, type(e).__name__) for i, e in enumerate(cleaned) if not isinstance(e, dict)]
+        if post_bad:
+            print(f"[DialogueHistory] AFTER PROCESSING has {len(post_bad)} non-dict entries: {post_bad[:5]}")
 
         return cleaned
     except:
@@ -229,8 +249,29 @@ def filter_dialogue_history(history):
     return list(reversed(filtered))
 
 
+# Prefixes that indicate generic/ambient NPCs (not named characters)
+GENERIC_NPC_PREFIXES = (
+    "AdultMale", "AdultFemale", "ElderlyMale", "ElderlyFemale",
+    "ChildMale", "ChildFemale", "TeenMale", "TeenFemale"
+)
+
+
+def is_named_npc(voice_name):
+    """Return True if voice_name is a named NPC, not a generic townsperson."""
+    if not voice_name:
+        return False
+    return not any(voice_name.startswith(prefix) for prefix in GENERIC_NPC_PREFIXES)
+
+
 def prettify_voice_name(voice_name):
-    """Convert voice name slugs to readable names"""
+    """Convert voice name ID to readable display name.
+
+    Args:
+        voice_name: Internal voice ID (e.g., "SebastianSallow", "AdultMaleA")
+
+    Returns:
+        Display name (e.g., "Sebastian Sallow", "Male Townsperson")
+    """
     if not voice_name:
         return "Unknown"
 
@@ -249,16 +290,96 @@ def prettify_voice_name(voice_name):
         if voice_name.startswith(prefix):
             return label
 
-    # Add spaces before capital letters: "ErnieLark" -> "Ernie Lark"
-    pretty = re.sub(r'([a-z])([A-Z])', r'\1 \2', voice_name)
-    # Also handle sequences like "McGonagall" -> keep as is, but "MC" -> "M C" fix
-    pretty = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', pretty)
-
-    return pretty
+    # Use localization for named NPCs
+    return get_display_name(voice_name)
 
 
-def format_dialogue_history(history, limit=None):
-    """Format dialogue history for LLM context"""
+def format_dialogue_entry(entry, include_time=True, mark_player=False):
+    """Format a single dialogue entry for LLM context.
+
+    Args:
+        entry: Dialogue entry dict with speaker, text, type, etc.
+        include_time: Whether to include time prefix (default True)
+        mark_player: Whether to prefix player entries with [PLAYER] (default False)
+
+    Returns:
+        Formatted string for this entry, or None if entry should be skipped
+    """
+    # Handle case where entry is already a string (shouldn't happen, but be defensive)
+    if isinstance(entry, str):
+        return entry if entry else None
+
+    if not isinstance(entry, dict):
+        return None
+
+    speaker = entry.get("speaker", "Unknown")
+    voice_name = entry.get("voiceName", "")
+    target = entry.get("target", "")
+    text = entry.get("text", "")
+    game_time = entry.get("gameTime", "")
+    is_ai = entry.get("isAIResponse", False)
+    is_player = entry.get("isPlayer", False)
+    entry_type = entry.get("type", "")
+
+    if not text:
+        return None
+
+    # Time prefix
+    time_prefix = f"[{game_time}] " if (include_time and game_time) else ""
+
+    # Player tag prefix
+    player_prefix = "[PLAYER] " if (mark_player and is_player) else ""
+
+    # Handle location transition entries
+    if entry_type == 'location':
+        location = entry.get('location', text.replace('Entered ', ''))
+        return f"{time_prefix}[{player_prefix}{speaker} entered {location}]"
+
+    # Handle broom mount/dismount entries
+    if entry_type == 'broom':
+        return f"{time_prefix}[{text}]"
+
+    # Handle spell entries
+    if entry_type == 'spell':
+        count = entry.get('count', 1)
+        if count > 1:
+            # Time range format for collapsed spells
+            first_time = entry.get('firstGameTime', '')
+            last_time = game_time
+            if include_time and first_time and last_time and first_time != last_time:
+                time_str = f"[{first_time}-{last_time}] "
+            else:
+                time_str = time_prefix
+            return f"{time_str}{player_prefix}{speaker}: {text} ({count}x)"
+        else:
+            return f"{time_prefix}{player_prefix}{speaker}: {text}"
+
+    # Regular dialogue
+    if is_player or is_ai:
+        # Player/AI message
+        speaker_label = f"{player_prefix}{speaker}"
+        if target:
+            return f"{time_prefix}{speaker_label} (to {target}): {text}"
+        else:
+            return f"{time_prefix}{speaker_label}: {text}"
+    else:
+        # NPC ambient dialogue - prettify the name
+        raw_name = speaker if speaker and speaker != "Unknown" else voice_name
+        display_name = prettify_voice_name(raw_name)
+        if target:
+            return f"{time_prefix}{display_name} (to {target}): {text}"
+        else:
+            return f"{time_prefix}{display_name}: {text}"
+
+
+def format_dialogue_history(history, limit=None, for_npc_id=None):
+    """Format dialogue history for LLM context.
+
+    Args:
+        history: List of dialogue history entries
+        limit: Max entries to include (default from settings)
+        for_npc_id: If provided, filter to only entries this NPC witnessed (was speaker or in earshot)
+    """
     if not history:
         return ""
 
@@ -274,6 +395,28 @@ def format_dialogue_history(history, limit=None):
 
     # Filter duplicates first
     filtered = filter_dialogue_history(history)
+
+    # Filter by earshot if realistic memory is enabled and NPC specified
+    realistic_memory = settings.get('history', {}).get('realistic_memory', True)
+    if for_npc_id and realistic_memory:
+        def npc_witnessed(entry):
+            # NPC was the speaker
+            if entry.get('voiceName') == for_npc_id:
+                return True
+            # NPC was in earshot
+            if for_npc_id in entry.get('earshot', []):
+                return True
+            # Legacy handling: entries without earshot field
+            if 'earshot' not in entry:
+                # Player events (broom, location, spell) without earshot were never tracked
+                # Exclude them since NPC couldn't have witnessed
+                entry_type = entry.get('type', '')
+                if entry_type in ('broom', 'location', 'spell'):
+                    return False
+                # Dialogue entries (chatter, cutscene, ai_response) - include for backwards compat
+                return True
+            return False
+        filtered = [entry for entry in filtered if npc_witnessed(entry)]
 
     # Take last N entries
     recent = filtered[-limit:] if len(filtered) > limit else filtered
@@ -305,77 +448,19 @@ def format_dialogue_history(history, limit=None):
     lines = []
     prev_date = None
     for entry in recent:
-        speaker = entry.get("speaker", "Unknown")
-        voice_name = entry.get("voiceName", "")
-        target = entry.get("target", "")
-        text = entry.get("text", "")
         game_date = entry.get("gameDate", "")
-        game_time = entry.get("gameTime", "")
-        is_ai = entry.get("isAIResponse", False)
-        is_player = entry.get("isPlayer", False)
-
-        if not text:
-            continue
 
         # Add day divider when date changes
         if game_date and prev_date and game_date != prev_date:
             lines.append(f"--- {game_date} ---")
         prev_date = game_date if game_date else prev_date
 
-        # Time prefix (just time since date shown in divider)
-        time_prefix = f"[{game_time}] " if game_time else ""
-
-        # Handle location transition entries
-        if entry.get('type') == 'location':
-            location = entry.get('location', text.replace('Entered ', ''))
-            lines.append(f"{time_prefix}[{speaker} entered {location}]")
-            continue
-
-        # Handle broom mount/dismount entries
-        if entry.get('type') == 'broom':
-            lines.append(f"{time_prefix}[{text}]")
-            continue
-
-        # Handle collapsed spell entries
-        if entry.get('type') == 'spell':
-            count = entry.get('count', 1)
-            spell_text = text
-            if count > 1:
-                # Time range format for collapsed spells
-                first_time = entry.get('firstGameTime', '')
-                last_time = game_time
-                if first_time and last_time and first_time != last_time:
-                    time_str = f"[{first_time}-{last_time}]"
-                else:
-                    time_str = time_prefix.rstrip()
-                lines.append(f"{time_str} {speaker}: {spell_text} ({count}x)")
-            else:
-                lines.append(f"{time_prefix}{speaker}: {spell_text}")
-            continue
-
-        if is_player:
-            # Player message with target
-            if target:
-                lines.append(f"{time_prefix}{speaker} (to {target}): {text}")
-            else:
-                lines.append(f"{time_prefix}{speaker}: {text}")
-        elif is_ai:
-            # AI response with target
-            if target:
-                lines.append(f"{time_prefix}{speaker} (to {target}): {text}")
-            else:
-                lines.append(f"{time_prefix}{speaker}: {text}")
-        else:
-            # NPC ambient dialogue - prettify the name
-            raw_name = speaker if speaker and speaker != "Unknown" else voice_name
-            display_name = prettify_voice_name(raw_name)
-            # Show target if known (from game's dialogue tracking)
-            if target:
-                lines.append(f"{time_prefix}{display_name} (to {target}): {text}")
-            else:
-                lines.append(f"{time_prefix}{display_name}: {text}")
+        # Format the entry using shared helper
+        line = format_dialogue_entry(entry, include_time=True, mark_player=False)
+        if line:
+            lines.append(line)
 
     if not lines:
         return ""
 
-    return "Recent events and conversations:\n" + "\n".join(lines)
+    return "**Recent events and conversations:**\n" + "\n".join(lines)
