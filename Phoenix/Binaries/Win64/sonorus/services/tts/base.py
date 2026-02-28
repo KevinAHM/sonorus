@@ -9,21 +9,51 @@ import sys
 import time
 import threading
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Callable, Tuple, Any
+from typing import Dict, List, Optional, Callable, Tuple, Any, Iterable
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from constants import TTS_BUFFER_SECONDS
-from .voice_utils import find_voice_reference
+from .voice_utils import (
+    find_voice_reference,
+    compute_reference_hash,
+    load_voice_hashes,
+    save_voice_hash,
+    remove_voice_hash,
+    build_hashed_voice_name,
+)
+
+# Per-voice locking to prevent concurrent clone requests for same voice
+_clone_locks: Dict[str, threading.Lock] = {}
+_clone_locks_lock = threading.Lock()
+
+
+def _get_clone_lock(cache_key: str) -> threading.Lock:
+    """Get or create a lock for cloning a specific voice."""
+    with _clone_locks_lock:
+        if cache_key not in _clone_locks:
+            _clone_locks[cache_key] = threading.Lock()
+        return _clone_locks[cache_key]
 
 # Lip sync module (optional)
 try:
     from audio import lipsync
     LIPSYNC_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     LIPSYNC_AVAILABLE = False
-    print("[WARN] audio.lipsync module not available")
+    print(f"[WARN] audio.lipsync module not available: {e}")
+    import traceback
+    print(traceback.format_exc().rstrip())
+
+# End marker trimmer for clean audio cutoffs
+# DISABLED - alignment model timestamps too inaccurate for reliable trimming
+END_TRIMMER_ENABLED = False
+try:
+    from audio.end_trimmer import EndMarkerTrimmer, pad_text_with_end_marker
+    END_TRIMMER_AVAILABLE = END_TRIMMER_ENABLED
+except ImportError:
+    END_TRIMMER_AVAILABLE = False
 
 
 # ============================================
@@ -42,6 +72,7 @@ class VoiceCache(ABC):
         self._voices: Dict[str, Dict] = {}  # key -> voice dict
         self._by_id: Dict[str, Dict] = {}   # voiceId -> voice dict
         self._loaded: bool = False
+        self._duplicates_to_delete: List[Tuple[str, str]] = []  # (voiceId, displayName)
 
     @abstractmethod
     def _make_cache_key(self, name: str, lang: Optional[str] = None) -> str:
@@ -89,6 +120,14 @@ class VoiceCache(ABC):
         if voice_id:
             self._by_id[voice_id] = voice
 
+    def remove(self, name: str, lang: Optional[str] = None) -> Optional[Dict]:
+        """Remove a voice from the cache by name and language. Returns the removed voice or None."""
+        key = self._make_cache_key(name, lang)
+        voice = self._voices.pop(key, None)
+        if voice and voice.get("voiceId"):
+            self._by_id.pop(voice["voiceId"], None)
+        return voice
+
 
 # ============================================
 # Base TTS Provider
@@ -121,6 +160,63 @@ class BaseTTSProvider(ABC):
         """Get audio sample rate for this provider."""
         pass
 
+    def get_buffer_seconds(self) -> float:
+        """Seconds of audio to buffer before playback starts. Override per-provider."""
+        return TTS_BUFFER_SECONDS
+
+    # Provider name prefixes that should NOT be used with other providers
+    _MODEL_PREFIX_BLOCKLIST: Dict[str, List[str]] = {
+        'inworld': ['eleven_', 'eleven-'],
+        'elevenlabs': ['inworld-'],
+    }
+
+    def resolve_model_override(self, default_model: str, speaker_id: Optional[str] = None) -> str:
+        """
+        Resolve per-character TTS model override.
+
+        Checks player_voice_model (for player characters) and npc_model_overrides
+        (for NPCs). Validates that the override model doesn't belong to a different
+        provider based on known prefix patterns.
+
+        Args:
+            default_model: The provider's default model from config
+            speaker_id: Character name (e.g., "SebastianSallow", "PlayerMale")
+
+        Returns:
+            Model ID to use (override if valid, otherwise default)
+        """
+        if not speaker_id:
+            return default_model
+
+        from utils.settings import load_settings
+        settings = load_settings()
+
+        override = None
+
+        # Check player voice model override
+        if speaker_id.startswith('Player'):
+            override = settings.get('conversation', {}).get('player_voice_model', '')
+
+        # Check per-NPC model override (falls through if player override was empty)
+        if not override:
+            override = settings.get('tts', {}).get('npc_model_overrides', {}).get(speaker_id, '')
+
+        if not override:
+            return default_model
+
+        # Validate: reject models that clearly belong to a different provider
+        provider_name = self.name.lower()
+        blocked = self._MODEL_PREFIX_BLOCKLIST.get(provider_name, [])
+        override_lower = override.lower()
+        for prefix in blocked:
+            if override_lower.startswith(prefix):
+                print(f"[{self.name}] Ignoring model override '{override}' for {speaker_id} "
+                      f"— '{prefix}' prefix belongs to a different provider")
+                return default_model
+
+        print(f"[{self.name}] Using model override '{override}' for {speaker_id}")
+        return override
+
     @abstractmethod
     def get_voice_cache(self) -> VoiceCache:
         """Get provider's voice cache instance."""
@@ -134,7 +230,8 @@ class BaseTTSProvider(ABC):
 
     @abstractmethod
     def synthesize_stream(self, text: str, voice_id: str,
-                          on_chunk: Callable[[bytes, Optional[Dict]], None]) -> bool:
+                          on_chunk: Callable[[bytes, Optional[Dict]], None],
+                          speaker_id: Optional[str] = None) -> bool:
         """
         Stream TTS synthesis.
 
@@ -144,6 +241,7 @@ class BaseTTSProvider(ABC):
             on_chunk: Callback function(pcm_bytes, word_alignment)
                 - pcm_bytes: Raw PCM audio data
                 - word_alignment: Dict with word timing info or None
+            speaker_id: Optional speaker ID for per-NPC settings (e.g., temp modifier)
 
         Returns:
             True on success, False on error
@@ -153,6 +251,48 @@ class BaseTTSProvider(ABC):
     # ----------------------------------------
     # Optional Hooks (CAN override)
     # ----------------------------------------
+
+    def delete_voice(self, voice_id: str) -> bool:
+        """
+        Delete a voice from the provider (optional, for hash-based recloning).
+
+        Override this method to enable automatic deletion of old voices
+        when reference files change. Default implementation does nothing.
+
+        Args:
+            voice_id: Provider-specific voice ID to delete
+
+        Returns:
+            True if deleted successfully, False otherwise
+        """
+        return False
+
+    def cleanup_duplicate_voices(self) -> int:
+        """
+        Delete duplicate voices that were detected during cache load.
+
+        Returns:
+            Number of voices successfully deleted
+        """
+        cache = self.get_voice_cache()
+        duplicates = cache._duplicates_to_delete
+
+        if not duplicates:
+            return 0
+
+        print(f"[{self.name}] Cleaning up {len(duplicates)} duplicate voice(s)...")
+        deleted_count = 0
+
+        for voice_id, display_name in duplicates:
+            try:
+                if self.delete_voice(voice_id):
+                    deleted_count += 1
+            except Exception as e:
+                print(f"[{self.name}] Failed to delete {display_name}: {e}")
+
+        cache._duplicates_to_delete = []
+        print(f"[{self.name}] Cleanup complete: {deleted_count}/{len(duplicates)} deleted")
+        return deleted_count
 
     def on_voice_used(self, voice: Dict) -> None:
         """Called when a cloned voice is used. Override for usage tracking."""
@@ -172,9 +312,17 @@ class BaseTTSProvider(ABC):
         """
         Get a voice for a character, cloning it if necessary.
 
+        Implements hash-based voice tracking:
+        1. Find reference file and compute hash
+        2. Look up voice by character name in cache
+        3. If found, verify hash matches current reference file
+        4. If no stored hash (first run), adopt the voice and save hash
+        5. If hash mismatch, reclone with new hash-suffixed name
+        6. Delete old voice after successful reclone (best-effort)
+
         Args:
             character_name: Character name (e.g., "SebastianSallow")
-            lang: Language code. Uses provider default if None.
+            lang: Language code. Uses provider default or game language if None.
             lua_socket: Socket server for sending notifications
 
         Returns:
@@ -185,36 +333,127 @@ class BaseTTSProvider(ABC):
         """
         if lang is None:
             lang = self.get_default_language()
+            # If provider is multilingual (returns None), use game language
+            if lang is None:
+                from services.tts.voice_utils import get_game_language
+                lang = get_game_language()
 
-        # Check cache first
         cache = self.get_voice_cache()
         if not cache._loaded:
-            # load() raises specific exceptions on failure
             cache.load()
 
-        voice = cache.get(character_name, lang)
-        if voice:
-            print(f"[{self.name}] Voice found: {character_name}")
-            return voice
+        # Find reference file first (needed for hash computation)
+        ref_path = find_voice_reference(character_name, "15s", language=lang)
 
-        # Not in cache - try to clone
-        print(f"[{self.name}] Voice not found in {self.name}, attempting to clone: {character_name}")
+        # Build cache key for locking
+        legacy_cache_key = cache._make_cache_key(character_name, lang)
+        clone_lock = _get_clone_lock(legacy_cache_key)
 
-        ref_path = find_voice_reference(character_name, "15s")
-        if not ref_path:
-            print(f"[{self.name}] No reference file for: {character_name}")
-            raise Exception(f"Voice reference file not found for '{character_name}'. Ensure voice references are extracted.")
+        with clone_lock:
+            # Compute hash if reference exists
+            ref_hash = None
+            if ref_path:
+                ref_hash = compute_reference_hash(ref_path)
 
-        print(f"[{self.name}] Using reference: {os.path.basename(ref_path)}")
+            # Try to find voice by original name (cache key is always original name)
+            # The referenceHash is stored as a field in the voice dict, not in the cache key
+            voice = cache.get(character_name, lang)
 
-        # Notify player that we're cloning
-        if lua_socket:
-            lua_socket.send_notification("Cloning voice, please wait...")
+            if voice:
+                # Voice exists in cache - verify hash matches current reference
+                stored_hash = voice.get("referenceHash")
+                voice_hashes = load_voice_hashes()
+                legacy_key = f"{character_name}_{lang}" if lang else character_name
 
-        cloned = self.clone_voice(character_name, ref_path, lang)
-        if not cloned:
-            raise Exception(f"Voice cloning failed for '{character_name}'. Check the server logs for details.")
-        return cloned
+                if stored_hash is None:
+                    # Voice in cache has no hash - check persistent storage
+                    stored_hash = voice_hashes.get(legacy_key)
+
+                if stored_hash is None:
+                    # First run with this voice (no stored hash) - adopt it
+                    if ref_hash:
+                        print(f"[{self.name}] Adopting voice {character_name} with hash {ref_hash}")
+                        save_voice_hash(legacy_key, ref_hash)
+                        voice["referenceHash"] = ref_hash
+                    print(f"[{self.name}] Voice found: {character_name}")
+                    return voice
+
+                if stored_hash == ref_hash:
+                    # Hash matches - use existing voice
+                    print(f"[{self.name}] Voice found (hash valid): {character_name}")
+                    return voice
+
+                # Hash mismatch - reference file changed, need to reclone
+                print(f"[{self.name}] Reference changed for {character_name}: {stored_hash} -> {ref_hash}")
+
+                if not ref_path:
+                    print(f"[{self.name}] No reference file for recloning, using existing voice")
+                    return voice
+
+                # Remember old voice for deletion after successful clone
+                old_voice = voice
+                old_voice_id = old_voice.get("voiceId")
+
+                # Continue to cloning below with the new hash
+            else:
+                old_voice = None
+                old_voice_id = None
+
+            # Clone new voice (no existing voice, or hash mismatch)
+            if not ref_path:
+                print(f"[{self.name}] No reference file for: {character_name} (language: {lang})")
+                raise Exception(f"Voice reference file not found for '{character_name}' in language '{lang}'. Ensure voice references are extracted for this language.")
+
+            print(f"[{self.name}] Using reference: {os.path.basename(ref_path)}")
+
+            # Build clone name with hash
+            if ref_hash:
+                clone_name = build_hashed_voice_name(character_name, lang, ref_hash)
+            elif lang and lang != "EN_US":
+                clone_name = f"{character_name}_{lang}"
+            else:
+                clone_name = character_name
+
+            print(f"[{self.name}] Cloning voice: {clone_name}")
+
+            # Notify player that we're cloning
+            if lua_socket:
+                lua_socket.send_notification("Cloning voice, please wait...")
+
+            cloned = self.clone_voice(clone_name, ref_path, lang)
+            if not cloned:
+                raise Exception(f"Voice cloning failed for '{character_name}'. Check the server logs for details.")
+
+            # Store hash in voice dict
+            if ref_hash:
+                cloned["referenceHash"] = ref_hash
+
+            # Add to cache with ORIGINAL character_name so future lookups find it
+            cache_key = cache._make_cache_key(character_name, lang)
+            cache._voices[cache_key] = cloned
+            if cloned.get("voiceId"):
+                cache._by_id[cloned["voiceId"]] = cloned
+
+            # Delete old voice after successful clone (best-effort, don't block on failure)
+            if old_voice_id:
+                try:
+                    print(f"[{self.name}] Deleting old voice: {old_voice_id}")
+                    deleted = self.delete_voice(old_voice_id)
+                    if deleted:
+                        print(f"[{self.name}] Old voice deleted successfully")
+                        # Clean up hash tracking for old voice
+                        legacy_key = f"{character_name}_{lang}" if lang else character_name
+                        remove_voice_hash(legacy_key)
+                    else:
+                        print(f"[{self.name}] Old voice deletion not implemented or failed (non-critical)")
+                except Exception as e:
+                    # Don't fail the voice creation if deletion fails
+                    print(f"[{self.name}] Failed to delete old voice (non-critical): {e}")
+            elif old_voice:
+                # old_voice exists but has no voiceId - shouldn't happen normally
+                print(f"[{self.name}] WARNING: Old voice has no voiceId, cannot delete: {old_voice.get('displayName', 'unknown')}")
+
+            return cloned
 
     def speak(self, text: str, character_name: str,
               lang: Optional[str] = None,
@@ -224,7 +463,8 @@ class BaseTTSProvider(ABC):
               lua_socket: Any = None,
               initial_positions: Optional[Dict] = None,
               turn_id: Optional[str] = None,
-              abort_check: Optional[Callable[[], bool]] = None) -> Dict:
+              abort_check: Optional[Callable[[], bool]] = None,
+              profiler: Any = None) -> Dict:
         """
         Speak text as a character with 3D audio.
         Streams TTS and plays audio in real-time.
@@ -255,7 +495,7 @@ class BaseTTSProvider(ABC):
             return {"success": False, "word_timings": [], "error": "Aborted"}
 
         try:
-            from audio.spatial import create_tts_stream, get_player
+            from audio import create_tts_stream, get_player
         except ImportError as e:
             return {"success": False, "word_timings": [], "error": f"audio3d not available: {e}"}
 
@@ -290,7 +530,8 @@ class BaseTTSProvider(ABC):
         tts_error = [None]
 
         # Pre-buffer: wait for enough audio before starting playback
-        min_buffer_bytes = bytes_per_second * TTS_BUFFER_SECONDS
+        buffer_seconds = self.get_buffer_seconds()
+        min_buffer_bytes = bytes_per_second * buffer_seconds
 
         # Create turn for coordinator (accumulates visemes)
         # use_3d=False for player voice (when initial_positions is None)
@@ -298,8 +539,23 @@ class BaseTTSProvider(ABC):
             turn_id = f"speak_{int(time.time() * 1000)}"
         use_3d = initial_positions is not None
         turn = coordinator.create_turn(turn_id, speaker_id=character_name, use_3d=use_3d) if coordinator else None
+        if turn:
+            turn.original_text = text  # Store for interrupt trimming
+
+        first_chunk_received = [False]  # Track first chunk for profiling
+        first_visemes_received = [False]  # Track first visemes
+        chunk_count = [0]
 
         def on_chunk(pcm_bytes, word_timing):
+            chunk_count[0] += 1
+
+            # Profile first chunk arrival
+            if not first_chunk_received[0]:
+                first_chunk_received[0] = True
+                if profiler:
+                    profiler.mark("tts_first_chunk")
+                print(f"[Speak] PROFILE: First audio chunk received ({len(pcm_bytes)} bytes)")
+
             # Calculate base_time BEFORE adding this chunk's bytes
             chunk_start_bytes = total_bytes[0]
             base_time = chunk_start_bytes / bytes_per_second
@@ -309,32 +565,80 @@ class BaseTTSProvider(ABC):
 
             # Process word timing into visemes FIRST (before signaling buffer ready)
             if LIPSYNC_AVAILABLE:
-                visemes = lipsync.process_word_alignment(
-                    word_alignment=word_timing,
-                    lang=lang,
-                    auto_send=False,
-                    pcm_data=pcm_bytes,
-                    text=text,
-                    sample_rate=sample_rate,
-                    base_time=base_time
-                )
+                if word_timing:
+                    # Word-level alignment available (e.g. Inworld, ElevenLabs)
+                    visemes = lipsync.process_word_alignment(
+                        word_alignment=word_timing,
+                        lang=lang,
+                        auto_send=False,
+                        pcm_data=pcm_bytes,
+                        text=text,
+                        sample_rate=sample_rate,
+                        base_time=base_time
+                    )
+                else:
+                    # No alignment - generate amplitude visemes from PCM (Pocket TTS)
+                    visemes = lipsync.amplitude_visemes_for_audio(
+                        pcm_bytes, sample_rate
+                    )
+                    # Offset timestamps to chunk position in total audio
+                    for v in visemes:
+                        v['t'] += base_time
                 if turn and visemes:
                     turn.add_visemes(visemes)
+                    # Profile first visemes
+                    if not first_visemes_received[0] and len(turn.viseme_buffer) > 0:
+                        first_visemes_received[0] = True
+                        if profiler:
+                            profiler.mark("tts_first_visemes")
+                        print(f"[Speak] PROFILE: First visemes generated ({len(visemes)} visemes, chunk #{chunk_count[0]})")
 
             if word_timing:
                 word_timings.append(word_timing)
+                # Store in turn for interrupt trimming
+                if turn:
+                    turn.add_word_timing(word_timing)
 
             # THEN check if we have enough buffered to start playback
             if not buffer_ready.is_set():
-                if total_bytes[0] >= min_buffer_bytes:
+                viseme_count = len(turn.viseme_buffer) if turn else 0
+                has_enough_audio = total_bytes[0] >= min_buffer_bytes
+                has_visemes = viseme_count > 0
+
+                # Log buffer status periodically
+                if chunk_count[0] <= 5 or chunk_count[0] % 5 == 0:
                     buffer_secs = total_bytes[0] / bytes_per_second
-                    viseme_count = len(turn.viseme_buffer) if turn else 0
+                    print(f"[Speak] PROFILE: Chunk #{chunk_count[0]}: {buffer_secs:.2f}s audio, {viseme_count} visemes, ready={has_enough_audio and has_visemes}")
+
+                if has_enough_audio and has_visemes:
+                    buffer_secs = total_bytes[0] / bytes_per_second
                     print(f"[Speak] Buffer ready: {total_bytes[0]} bytes ({buffer_secs:.1f}s), {viseme_count} visemes")
+                    if profiler:
+                        profiler.mark("tts_buffer_ready")
                     buffer_ready.set()
 
         def run_tts():
             try:
-                success = self.synthesize_stream(text, voice_id, on_chunk)
+                if profiler:
+                    profiler.mark("tts_synthesis_start")
+                print(f"[Speak] PROFILE: TTS synthesis starting...")
+
+                # Use end marker trimmer for clean audio cutoffs
+                if END_TRIMMER_AVAILABLE:
+                    padded_text = pad_text_with_end_marker(text)
+                    trimmer = EndMarkerTrimmer(
+                        original_text=text,
+                        on_chunk=on_chunk,
+                        sample_rate=sample_rate,
+                        bytes_per_sample=2  # 16-bit PCM
+                    )
+                    success = self.synthesize_stream(padded_text, voice_id, trimmer.process_chunk, speaker_id=character_name)
+                    trimmer.flush()  # Flush any remaining buffered audio
+                else:
+                    success = self.synthesize_stream(text, voice_id, on_chunk, speaker_id=character_name)
+
+                if profiler:
+                    profiler.mark("synthesize_stream done")
                 # If we never hit the buffer threshold, signal ready anyway (short utterances)
                 if not buffer_ready.is_set():
                     buffer_secs = total_bytes[0] / bytes_per_second
@@ -351,14 +655,22 @@ class BaseTTSProvider(ABC):
                 tts_stream.finish()
                 tts_done.set()
 
+        # Helper to safely call profiler
+        def prof(label):
+            if profiler:
+                profiler.mark(label)
+
         # Start TTS thread
+        prof("TTS thread starting")
         tts_thread = threading.Thread(target=run_tts, daemon=True)
         tts_thread.start()
 
         # Wait for buffer to fill (or TTS to complete for short utterances)
-        print("[Speak] Pre-buffering (waiting for 2+ chunks or 2s of audio)...")
-        if not buffer_ready.wait(timeout=15.0):
+        print(f"[Speak] Pre-buffering (waiting for {buffer_seconds}s of audio)...")
+        prof("waiting for buffer_ready")
+        if not buffer_ready.wait(timeout=30.0):
             return {"success": False, "word_timings": [], "error": "Timeout waiting for TTS buffer"}
+        prof("buffer_ready signaled")
 
         # Check for abort after buffering
         if abort_check and abort_check():
@@ -372,6 +684,7 @@ class BaseTTSProvider(ABC):
         if on_start:
             on_start()
         print("[Speak] Playing...")
+        prof("audio playback starting")
 
         # Play audio (blocks until done)
         player = get_player()
@@ -394,10 +707,10 @@ class BaseTTSProvider(ABC):
         if coordinator and turn:
             turn.audio_stream = tts_stream
             print(f"[Speak] Starting with coordinator: {len(turn.viseme_buffer)} initial visemes")
-            success = coordinator.play_turn(turn_id, player, blocking=True)
+            success = coordinator.play_turn(turn_id, player, blocking=True, abort_check=abort_check)
         else:
             # Fallback: direct playback (no sync)
-            success = player.play_stream(tts_stream, use_3d=use_3d)
+            success = player.play_stream(tts_stream, use_3d=use_3d, abort_check=abort_check)
 
         # Signal playback ended
         if on_stop:
@@ -410,12 +723,413 @@ class BaseTTSProvider(ABC):
 
         return {"success": success, "word_timings": word_timings, "error": None}
 
+    @staticmethod
+    def _count_speech_words(text: str) -> int:
+        """Count spoken words, excluding bracket tags like [laugh]."""
+        import re
+        cleaned = re.sub(r'\[[^\]]*\]', '', text or '')
+        return len(cleaned.split())
+
+    def _update_sentence_boundaries_from_word_timing(
+        self,
+        sentence_boundaries: List[Dict],
+        word_timing: Optional[Dict],
+        timed_words_total: List[int],
+    ) -> None:
+        """Refine boundary start_time values using absolute word timing timestamps."""
+        if not word_timing or not sentence_boundaries:
+            return
+
+        new_words = word_timing.get("words", [])
+        new_starts = word_timing.get("wordStartTimeSeconds", [])
+        if not new_words or not new_starts:
+            return
+
+        prev_total = timed_words_total[0]
+        new_total = prev_total + len(new_words)
+
+        cumulative = 0
+        for si, boundary in enumerate(sentence_boundaries):
+            cumulative += self._count_speech_words(boundary.get('text', ''))
+            # Use confirmation state, not provisional start_time value.
+            # For async streaming providers, later sentences may be yielded after
+            # some bytes are already buffered, so start_time can be non-zero but
+            # still unconfirmed and in need of correction.
+            if si + 1 < len(sentence_boundaries) and not sentence_boundaries[si + 1].get('start_time_confirmed', False):
+                if prev_total <= cumulative < new_total:
+                    local_idx = cumulative - prev_total
+                    if local_idx < len(new_starts):
+                        sentence_boundaries[si + 1]['start_time'] = new_starts[local_idx]
+                        sentence_boundaries[si + 1]['start_time_confirmed'] = True
+            if cumulative >= new_total:
+                break
+
+        timed_words_total[0] = new_total
+
+    def _synthesize_sentence_stream(
+        self,
+        sentence_gen: Iterable,
+        voice_id: str,
+        on_chunk: Callable[[bytes, Optional[Dict]], None],
+        speaker_id: str,
+        total_bytes: List[int],
+        bytes_per_second: int,
+        sentence_boundaries: List[Dict],
+        original_sentences: Optional[List] = None,
+        narrator_voice_id: Optional[str] = None,
+        abort_check: Optional[Callable[[], bool]] = None,
+        log_prefix: str = "[SpeakStream]",
+    ) -> bool:
+        """
+        Shared sentence-stream synthesis path used by live streaming and pre-buffer.
+        """
+        if hasattr(self, 'synthesize_stream_sentences'):
+            def tracking_gen():
+                sent_idx = 0
+                for item in sentence_gen:
+                    if isinstance(item, tuple):
+                        sentence, is_narration = item
+                    else:
+                        sentence, is_narration = item, False
+
+                    if not sentence:
+                        continue
+
+                    start_time = total_bytes[0] / bytes_per_second if bytes_per_second > 0 else 0.0
+
+                    if original_sentences and sent_idx < len(original_sentences):
+                        orig = original_sentences[sent_idx]
+                        if isinstance(orig, tuple):
+                            clean_text, clean_is_narration = orig
+                            is_narration = bool(clean_is_narration)
+                        else:
+                            clean_text = orig
+                    else:
+                        clean_text = sentence
+
+                    sentence_boundaries.append({
+                        'text': clean_text,
+                        'start_time': start_time,
+                        'is_narration': is_narration,
+                        'start_bytes': 0 if sent_idx == 0 else None,
+                        'start_time_confirmed': (sent_idx == 0),
+                    })
+                    sent_idx += 1
+
+                    if narrator_voice_id and is_narration:
+                        yield (sentence, narrator_voice_id)
+                    elif narrator_voice_id:
+                        yield (sentence, voice_id)
+                    else:
+                        yield sentence
+
+            def on_voice_switch(byte_position: int, sentence_idx: int):
+                if sentence_idx < len(sentence_boundaries):
+                    sentence_boundaries[sentence_idx]['start_bytes'] = byte_position
+                    if bytes_per_second > 0:
+                        sentence_boundaries[sentence_idx]['start_time'] = byte_position / bytes_per_second
+                    sentence_boundaries[sentence_idx]['start_time_confirmed'] = True
+                    print(f"{log_prefix} Voice switch at sentence {sentence_idx}: "
+                          f"{byte_position} bytes = {byte_position / max(1, bytes_per_second):.2f}s")
+
+            return self.synthesize_stream_sentences(
+                tracking_gen(), voice_id, on_chunk,
+                speaker_id=speaker_id,
+                abort_check=abort_check,
+                on_voice_switch=on_voice_switch,
+            )
+
+        # Fallback for providers without sentence streaming support.
+        all_items = list(sentence_gen)
+        texts = [s[0] if isinstance(s, tuple) else s for s in all_items if s]
+        full = " ".join(texts)
+        if not full.strip():
+            return False
+        return self.synthesize_stream(full, voice_id, on_chunk, speaker_id=speaker_id)
+
+    def speak_streaming(self, sentence_gen, character_name: str,
+                         full_text_holder: dict,
+                         setup_event: threading.Event = None,
+                         setup_data: dict = None,
+                         lang: Optional[str] = None,
+                         on_start: Optional[Callable] = None,
+                         on_stop: Optional[Callable] = None,
+                         on_download_complete: Optional[Callable] = None,
+                         lua_socket: Any = None,
+                         turn_id: Optional[str] = None,
+                         abort_check: Optional[Callable[[], bool]] = None,
+                         profiler: Any = None) -> Dict:
+        """
+        Stream sentences through TTS and play audio in real-time.
+
+        Like speak(), but accepts a sentence generator instead of full text.
+        Sentences are synthesized via WebSocket pipelining as they arrive
+        from LLM streaming, so audio starts before LLM finishes.
+
+        The caller sets setup_event after play_turn completes (providing
+        positions). This method waits for setup_event before starting
+        audio playback, but TTS synthesis runs in parallel.
+
+        Args:
+            sentence_gen: Generator yielding sentence strings (blocks on LLM)
+            character_name: Character whose voice to use
+            full_text_holder: Mutable dict; key 'text' set to full response
+                              when generator exhausts. Key 'error' set on failure.
+            setup_event: Event caller signals after play_turn/position setup.
+                         If None, playback starts as soon as buffer is ready.
+            setup_data: Mutable dict; caller populates with 'positions' and
+                        'turn_id' before signaling setup_event.
+            lang: Language code
+            on_start: Callback when audio playback starts
+            on_stop: Callback when audio playback ends
+            on_download_complete: Callback when TTS synthesis finishes
+            lua_socket: Socket for real-time position updates
+            turn_id: Default turn ID (may be overridden by setup_data)
+            abort_check: Callable that returns True to abort
+            profiler: Profiler instance
+
+        Returns:
+            {"success": bool, "word_timings": list, "error": str or None}
+        """
+        if abort_check and abort_check():
+            return {"success": False, "word_timings": [], "error": "Aborted"}
+
+        try:
+            from audio import create_tts_stream, get_player
+        except ImportError as e:
+            return {"success": False, "word_timings": [], "error": f"audio3d not available: {e}"}
+
+        try:
+            from audio.playback import get_coordinator
+            coordinator = get_coordinator()
+        except ImportError:
+            coordinator = None
+
+        # Get or create voice
+        voice = self.get_or_create_voice(character_name, lang, lua_socket)
+        if not voice:
+            return {"success": False, "word_timings": [], "error": f"No voice for {character_name}"}
+
+        voice_id = voice.get("voiceId")
+        if not voice_id:
+            return {"success": False, "word_timings": [], "error": "Voice has no voiceId"}
+
+        self.on_voice_used(voice)
+
+        # Create TTS stream
+        sample_rate = self.get_sample_rate()
+        channels = 1
+        bytes_per_second = sample_rate * 2 * channels
+        tts_stream = create_tts_stream(sample_rate=sample_rate, channels=channels)
+        word_timings = []
+        total_bytes = [0]
+        buffer_ready = threading.Event()
+        tts_done = threading.Event()
+        tts_error = [None]
+
+        sentence_boundaries = []
+
+        buffer_seconds = self.get_buffer_seconds()
+        min_buffer_bytes = bytes_per_second * buffer_seconds
+
+        # Create turn (may be replaced after setup_event)
+        if not turn_id:
+            turn_id = f"stream_{int(time.time() * 1000)}"
+        turn = coordinator.create_turn(turn_id, speaker_id=character_name, use_3d=True) if coordinator else None
+
+        if turn:
+            turn._lang = lang
+            turn._pcm_sample_rate = sample_rate
+            turn.sentence_boundaries = sentence_boundaries
+
+        chunk_count = [0]
+        first_chunk_received = [False]
+        _timed_words_total = [0]  # Cumulative word count from word_timing data
+
+        def on_chunk(pcm_bytes, word_timing):
+            chunk_count[0] += 1
+            if pcm_bytes and not first_chunk_received[0]:
+                first_chunk_received[0] = True
+                if profiler:
+                    profiler.mark("tts_first_chunk")
+                print(f"[SpeakStream] First audio chunk received ({len(pcm_bytes)} bytes)")
+
+            # Feed audio to playback stream
+            if pcm_bytes:
+                tts_stream.feed(pcm_bytes)
+                total_bytes[0] += len(pcm_bytes)
+
+            # Store raw data in turn for on-demand viseme generation
+            if turn:
+                if pcm_bytes:
+                    turn.store_pcm(pcm_bytes, sample_rate, channels)
+                if word_timing:
+                    turn.store_word_alignment(word_timing)
+                    word_timings.append(word_timing)
+                    turn.add_word_timing(word_timing)
+                # Keep original_text synced for interrupt trimming
+                # (text accumulates in full_text_holder as LLM streams)
+                current_text = full_text_holder.get('text', '')
+                if current_text:
+                    turn.original_text = current_text
+
+            # Refine boundary times using absolute word timing data.
+            self._update_sentence_boundaries_from_word_timing(
+                sentence_boundaries, word_timing, _timed_words_total
+            )
+
+            # Check buffer threshold (audio only, visemes generated on-demand)
+            if pcm_bytes and not buffer_ready.is_set():
+                has_enough = total_bytes[0] >= min_buffer_bytes
+                if has_enough:
+                    buffer_secs = total_bytes[0] / bytes_per_second
+                    print(f"[SpeakStream] Buffer ready: {buffer_secs:.1f}s audio")
+                    buffer_ready.set()
+
+        def run_streaming_tts():
+            try:
+                if profiler:
+                    profiler.mark("tts_synthesis_start")
+
+                print(f"[SpeakStream] Starting sentence streaming synthesis for {character_name}")
+                original_sentences = setup_data.get('_original_sentences') if setup_data else None
+                narrator_voice_id = setup_data.get('_narrator_voice_id') if setup_data else None
+                success = self._synthesize_sentence_stream(
+                    sentence_gen=sentence_gen,
+                    voice_id=voice_id,
+                    on_chunk=on_chunk,
+                    speaker_id=character_name,
+                    total_bytes=total_bytes,
+                    bytes_per_second=bytes_per_second,
+                    sentence_boundaries=sentence_boundaries,
+                    original_sentences=original_sentences,
+                    narrator_voice_id=narrator_voice_id,
+                    abort_check=abort_check,
+                    log_prefix="[SpeakStream]",
+                )
+                print(f"[SpeakStream] Sentence streaming complete: success={success}, "
+                      f"{total_bytes[0]} bytes, {chunk_count[0]} chunks")
+
+                if not buffer_ready.is_set():
+                    buffer_secs = total_bytes[0] / bytes_per_second
+                    print(f"[SpeakStream] Short utterance ({buffer_secs:.1f}s) - starting playback")
+                    buffer_ready.set()
+
+                if on_download_complete:
+                    if success:
+                        print(f"[SpeakStream] Signaling download complete")
+                    else:
+                        print(f"[SpeakStream] Signaling download complete (aborted/failed)")
+                    on_download_complete()
+                if not success:
+                    tts_error[0] = "TTS synthesis failed"
+                    print(f"[SpeakStream] TTS synthesis failed")
+            except Exception as e:
+                tts_error[0] = str(e)
+                print(f"[SpeakStream] Exception in TTS thread: {e}")
+                import traceback
+                traceback.print_exc()
+            finally:
+                tts_stream.finish()
+                tts_done.set()
+                print(f"[SpeakStream] TTS thread finished")
+
+        # Start TTS thread (runs in parallel with LLM streaming)
+        tts_thread = threading.Thread(target=run_streaming_tts, daemon=True)
+        tts_thread.start()
+
+        # Wait for buffer to fill
+        # Use a long timeout to accommodate slow local LLMs (e.g. 30-60s to first sentence)
+        print(f"[SpeakStream] Pre-buffering (waiting for {buffer_seconds}s of audio)...")
+        if not buffer_ready.wait(timeout=120.0):
+            return {"success": False, "word_timings": [], "error": "Timeout waiting for TTS buffer"}
+
+        # Signal external buffer_ready for early play_turn (streaming latency optimization)
+        if setup_data and setup_data.get('_buffer_ready'):
+            setup_data['_buffer_ready'].set()
+
+        if abort_check and abort_check():
+            return {"success": False, "word_timings": [], "error": "Aborted"}
+
+        if tts_error[0]:
+            return {"success": False, "word_timings": [], "error": tts_error[0]}
+
+        # Wait for setup (play_turn + positions) from caller
+        if setup_event:
+            print("[SpeakStream] Waiting for play_turn setup...")
+            if not setup_event.wait(timeout=15.0):
+                return {"success": False, "word_timings": [], "error": "Timeout waiting for setup"}
+
+            if setup_data and setup_data.get('_abort'):
+                return {"success": False, "word_timings": [], "error": "Aborted by caller"}
+
+            if profiler:
+                profiler.mark("setup_received")
+
+            # Apply positions from setup_data
+            if setup_data:
+                positions = setup_data.get('positions')
+                new_turn_id = setup_data.get('turn_id')
+                if new_turn_id and turn and new_turn_id != turn_id:
+                    print(f"[SpeakStream] Re-keying turn: {turn_id} -> {new_turn_id}")
+                    # Re-key in coordinator's dict so play_turn can find it
+                    if coordinator and turn_id in coordinator.turns:
+                        del coordinator.turns[turn_id]
+                        coordinator.turns[new_turn_id] = turn
+                    turn.turn_id = new_turn_id
+                    turn_id = new_turn_id
+                print(f"[SpeakStream] Setup received: turn_id={turn_id}, has_positions={positions is not None}")
+
+                # Pass subtitle mode to turn for sync loop
+                if turn:
+                    turn._sentence_subtitles = setup_data.get('_sentence_subtitles', True)
+
+        if on_start:
+            on_start()
+        print("[SpeakStream] Playing...")
+
+        # Play audio
+        player = get_player()
+        if lua_socket:
+            player.position_reader.set_socket(lua_socket)
+
+        # Set 3D positions (from setup_data if available, else no positions)
+        positions = setup_data.get('positions') if setup_data else None
+        if positions and positions.get("npcX") is not None:
+            cam = (positions.get("camX", 0), positions.get("camY", 0), positions.get("camZ", 0))
+            npc = (positions.get("npcX", 0), positions.get("npcY", 0), positions.get("npcZ", 0))
+            yaw = positions.get("camYaw", 0)
+            player.position_reader.set_initial_positions(cam, yaw, npc)
+
+        if coordinator and turn:
+            turn.audio_stream = tts_stream
+            print(f"[SpeakStream] Starting with coordinator: {len(turn.viseme_buffer)} initial visemes")
+            success = coordinator.play_turn(turn.turn_id, player, blocking=True, abort_check=abort_check)
+        else:
+            success = player.play_stream(tts_stream, use_3d=True, abort_check=abort_check)
+
+        print(f"[SpeakStream] Playback finished: success={success}")
+        if on_stop:
+            on_stop()
+
+        print(f"[SpeakStream] Waiting for TTS thread to join...")
+        tts_thread.join(timeout=60.0)
+        print(f"[SpeakStream] TTS thread joined, total_bytes={total_bytes[0]}, chunks={chunk_count[0]}")
+
+        if tts_error[0]:
+            return {"success": False, "word_timings": word_timings, "error": tts_error[0]}
+
+        return {"success": success, "word_timings": word_timings, "error": None}
+
     def prepare_tts(self, text: str, character_name: str,
                     lang: Optional[str] = None,
                     on_chunk: Optional[Callable] = None,
                     abort_check: Optional[Callable[[], bool]] = None,
                     on_ready: Optional[Callable] = None,
-                    lua_socket: Any = None) -> Optional[Tuple]:
+                    lua_socket: Any = None,
+                    sentence_gen: Optional[Iterable] = None,
+                    original_sentences: Optional[List] = None,
+                    narrator_voice_id: Optional[str] = None) -> Optional[Tuple]:
         """
         Download TTS audio into buffer without playing.
         Used for pre-buffering the next response while current audio plays.
@@ -427,11 +1141,15 @@ class BaseTTSProvider(ABC):
             on_chunk: Optional callback for word timings (word_alignment dict)
             abort_check: Callable that returns True if we should abort
             on_ready: Callback when enough audio is buffered to start playing
-                      (called with tts_stream, word_timings, visemes)
+                      (called with tts_stream, word_timings, visemes, sentence_boundaries)
             lua_socket: Socket server for sending notifications
+            sentence_gen: Optional segmented sentence generator for narration/subtitles
+            original_sentences: Clean text list matching sentence_gen ordering
+            narrator_voice_id: Optional narrator voice id for narration segments
 
         Returns:
-            (tts_stream, word_timings, visemes) tuple on success, None if failed/aborted
+            (tts_stream, word_timings, visemes, sentence_boundaries) on success,
+            None if failed/aborted
         """
         voice = self.get_or_create_voice(character_name, lang, lua_socket)
         if not voice:
@@ -447,7 +1165,7 @@ class BaseTTSProvider(ABC):
         self.on_voice_used(voice)
 
         try:
-            from audio.spatial import create_tts_stream
+            from audio import create_tts_stream
         except ImportError as e:
             print(f"[PrepareTTS] audio3d not available: {e}")
             return None
@@ -458,11 +1176,32 @@ class BaseTTSProvider(ABC):
         tts_stream = create_tts_stream(sample_rate=sample_rate, channels=channels)
         word_timings = []
         all_visemes = []
+        sentence_boundaries = []
+        raw_pcm = bytearray()  # Fallback source if per-chunk viseme extraction misses
 
         # Pre-buffer: wait for enough audio before signaling ready
-        min_buffer_bytes = bytes_per_second * TTS_BUFFER_SECONDS
+        min_buffer_bytes = bytes_per_second * self.get_buffer_seconds()
         buffer_ready_signaled = [False]
         total_bytes = [0]
+        timed_words_total = [0]
+
+        def signal_ready():
+            if not on_ready:
+                return
+            import inspect
+
+            # Backward compatibility with existing 3-arg callbacks.
+            # Avoid broad try/except TypeError, which can mask callback bugs.
+            params = inspect.signature(on_ready).parameters.values()
+            has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
+            positional = [
+                p for p in params
+                if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            ]
+            if has_varargs or len(positional) >= 4:
+                on_ready(tts_stream, word_timings, all_visemes, sentence_boundaries)
+            else:
+                on_ready(tts_stream, word_timings, all_visemes)
 
         def chunk_handler(pcm_bytes, word_alignment):
             # Check abort before feeding
@@ -474,6 +1213,8 @@ class BaseTTSProvider(ABC):
             base_time = chunk_start_bytes / bytes_per_second
 
             tts_stream.feed(pcm_bytes)
+            if pcm_bytes:
+                raw_pcm.extend(pcm_bytes)
             total_bytes[0] += len(pcm_bytes)
 
             if word_alignment:
@@ -481,31 +1222,74 @@ class BaseTTSProvider(ABC):
                 if on_chunk:
                     on_chunk(word_alignment)
 
-            # Process visemes with gap filling
+            self._update_sentence_boundaries_from_word_timing(
+                sentence_boundaries, word_alignment, timed_words_total
+            )
+
+            # Process visemes
             if LIPSYNC_AVAILABLE:
-                visemes = lipsync.process_word_alignment(
-                    word_alignment=word_alignment,
-                    lang=lang,
-                    auto_send=False,
-                    pcm_data=pcm_bytes,
-                    text=text,
-                    sample_rate=sample_rate,
-                    base_time=base_time
-                )
+                if word_alignment:
+                    visemes = lipsync.process_word_alignment(
+                        word_alignment=word_alignment,
+                        lang=lang,
+                        auto_send=False,
+                        pcm_data=pcm_bytes,
+                        text=text,
+                        sample_rate=sample_rate,
+                        base_time=base_time
+                    )
+                else:
+                    visemes = lipsync.amplitude_visemes_for_audio(
+                        pcm_bytes, sample_rate
+                    )
+                    for v in visemes:
+                        v['t'] += base_time
                 if visemes:
                     all_visemes.extend(visemes)
 
-            # Signal ready early (after enough buffer, not at end!)
+            # Signal ready early (after enough buffer AND visemes available)
+            # We delay until visemes are ready to ensure lip sync works
             if on_ready and not buffer_ready_signaled[0]:
-                if total_bytes[0] >= min_buffer_bytes:
+                has_enough_audio = total_bytes[0] >= min_buffer_bytes
+                has_visemes = len(all_visemes) > 0
+
+                if has_enough_audio and has_visemes:
                     buffer_ready_signaled[0] = True
                     buffer_secs = total_bytes[0] / bytes_per_second
                     viseme_count = len(all_visemes)
                     print(f"[PrepareTTS] Buffer ready: {total_bytes[0]} bytes ({buffer_secs:.1f}s), {viseme_count} visemes")
-                    on_ready(tts_stream, word_timings, all_visemes)
+                    signal_ready()
 
         print(f"[PrepareTTS] Downloading TTS for {character_name}...")
-        success = self.synthesize_stream(text, voice_id, chunk_handler)
+
+        if sentence_gen is not None:
+            success = self._synthesize_sentence_stream(
+                sentence_gen=sentence_gen,
+                voice_id=voice_id,
+                on_chunk=chunk_handler,
+                speaker_id=character_name,
+                total_bytes=total_bytes,
+                bytes_per_second=bytes_per_second,
+                sentence_boundaries=sentence_boundaries,
+                original_sentences=original_sentences,
+                narrator_voice_id=narrator_voice_id,
+                abort_check=abort_check,
+                log_prefix="[PrepareTTS]",
+            )
+        else:
+            # Use end marker trimmer for clean audio cutoffs
+            if END_TRIMMER_AVAILABLE:
+                padded_text = pad_text_with_end_marker(text)
+                trimmer = EndMarkerTrimmer(
+                    original_text=text,
+                    on_chunk=chunk_handler,
+                    sample_rate=sample_rate,
+                    bytes_per_sample=2
+                )
+                success = self.synthesize_stream(padded_text, voice_id, trimmer.process_chunk, speaker_id=character_name)
+                trimmer.flush()
+            else:
+                success = self.synthesize_stream(text, voice_id, chunk_handler, speaker_id=character_name)
 
         # Check abort after download
         if abort_check and abort_check():
@@ -513,12 +1297,36 @@ class BaseTTSProvider(ABC):
             tts_stream.clean_up()
             return None
 
-        # If short utterance that didn't hit threshold, signal ready at end
+        # Defensive fallback: if chunk-level viseme extraction produced nothing
+        # (observed on some Pocket prebuffer paths), generate amplitude visemes
+        # from the fully buffered PCM so prebuffered turns still animate.
+        if not all_visemes and raw_pcm:
+            lipsync_mod = lipsync if LIPSYNC_AVAILABLE else None
+            if lipsync_mod is None:
+                try:
+                    from audio import lipsync as lipsync_mod
+                except ImportError:
+                    try:
+                        from sonorus.audio import lipsync as lipsync_mod
+                    except ImportError:
+                        lipsync_mod = None
+            if lipsync_mod is not None:
+                try:
+                    fallback_visemes = lipsync_mod.amplitude_visemes_for_audio(
+                        bytes(raw_pcm), sample_rate
+                    )
+                    if fallback_visemes:
+                        all_visemes.extend(fallback_visemes)
+                        print(f"[PrepareTTS] Fallback amplitude visemes: {len(fallback_visemes)}")
+                except Exception as e:
+                    print(f"[PrepareTTS] Fallback viseme generation error: {e}")
+
+        # If synthesis complete and never signaled ready (short utterance or late visemes), signal now
         if on_ready and not buffer_ready_signaled[0]:
             buffer_secs = total_bytes[0] / bytes_per_second
             viseme_count = len(all_visemes)
-            print(f"[PrepareTTS] Short utterance ({buffer_secs:.1f}s), {viseme_count} visemes - signaling ready")
-            on_ready(tts_stream, word_timings, all_visemes)
+            print(f"[PrepareTTS] Synthesis complete ({buffer_secs:.1f}s, {viseme_count} visemes) - signaling ready")
+            signal_ready()
 
         tts_stream.finish()
 
@@ -527,8 +1335,9 @@ class BaseTTSProvider(ABC):
             tts_stream.clean_up()
             return None
 
-        print(f"[PrepareTTS] Complete: {tts_stream._total_fed} bytes, {len(word_timings)} timing chunks, {len(all_visemes)} visemes")
-        return (tts_stream, word_timings, all_visemes)
+        print(f"[PrepareTTS] Complete: {tts_stream._total_fed} bytes, {len(word_timings)} timing chunks, "
+              f"{len(all_visemes)} visemes, {len(sentence_boundaries)} boundaries")
+        return (tts_stream, word_timings, all_visemes, sentence_boundaries)
 
     # ----------------------------------------
     # Convenience Wrappers

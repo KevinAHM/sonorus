@@ -71,7 +71,6 @@ def transcribe(audio_data: bytes, sample_rate: int = 16000) -> dict:
         response = client.audio.transcriptions.create(**params)
 
         text = response.text.strip()
-        print(f"[STT/Whisper] Transcribed: \"{text}\"")
 
         return {
             "success": True,

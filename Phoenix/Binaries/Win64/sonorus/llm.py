@@ -6,19 +6,13 @@ import base64
 import json
 import os
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
-# Load .env from script directory
-try:
-    from dotenv import load_dotenv
-    _env_path = Path(__file__).parent / ".env"
-    load_dotenv(_env_path)
-except ImportError:
-    pass
-
-from openai import OpenAI
+import httpx
+from openai import DefaultHttpxClient, OpenAI
 
 # Import log_llm for LLM logging (separate file to avoid circular import)
 from utils.llm_logging import log_llm
@@ -140,6 +134,9 @@ def _parse_llm_error(error: Exception) -> str:
 # Keep alias for backwards compatibility
 _parse_gemini_error = _parse_llm_error
 
+# Minimum max_tokens when reasoning is enabled (thinking needs room)
+MIN_REASONING_TOKENS = 8192
+
 # Module state
 from utils.settings import DATA_DIR
 SETTINGS_FILE = Path(DATA_DIR) / "settings.json"
@@ -159,6 +156,126 @@ def load_settings():
 # Shared model capabilities cache (from OpenRouter API, used by all providers)
 _model_capabilities = {}  # model_id -> {supports_reasoning: bool, full_data: dict}
 
+# --- Client connection pooling ---
+_client_lock = threading.Lock()
+_cached_client = None           # OpenAI() instance
+_cached_client_key = None       # (provider, api_key, base_url) for debug logging
+_last_request_time = 0.0        # For idle detection
+_keepalive_timer = None         # threading.Timer ref
+_KEEPALIVE_INTERVAL = 45        # Seconds between keep-alive pings
+
+
+def _get_client():
+    """Get a cached OpenAI client, creating one if needed.
+
+    Reuses the same client across calls to avoid TCP+TLS handshake overhead
+    (~100-300ms per new client). Thread-safe for concurrent requests.
+    """
+    global _cached_client, _cached_client_key, _last_request_time
+    with _client_lock:
+        if _cached_client is not None:
+            _last_request_time = time.time()
+            return _cached_client
+
+        # Create a new client using existing factory
+        client = _create_client()
+        if client is None:
+            return None
+
+        # Build cache key for debug logging
+        settings = load_settings()
+        llm_settings = settings.get('llm', {})
+        provider = llm_settings.get('provider', 'gemini')
+        _cached_client = client
+        _cached_client_key = provider
+        _last_request_time = time.time()
+
+        print(f"[LLM] Client cached for {provider}")
+        _start_keepalive()
+        return _cached_client
+
+
+def _start_keepalive():
+    """Start the keep-alive timer (call with _client_lock held)."""
+    global _keepalive_timer
+    _stop_keepalive_unlocked()
+    _keepalive_timer = threading.Timer(_KEEPALIVE_INTERVAL, _keepalive_tick)
+    _keepalive_timer.daemon = True
+    _keepalive_timer.start()
+
+
+def _stop_keepalive_unlocked():
+    """Stop the keep-alive timer (no lock needed)."""
+    global _keepalive_timer
+    if _keepalive_timer is not None:
+        _keepalive_timer.cancel()
+        _keepalive_timer = None
+
+
+def _keepalive_tick():
+    """Ping the cached client to keep TCP connections alive."""
+    global _keepalive_timer
+    _keepalive_timer = None  # Timer is one-shot
+
+    with _client_lock:
+        client = _cached_client
+        if client is None:
+            return
+
+    # Ping outside lock (client is thread-safe)
+    idle = time.time() - _last_request_time
+    if idle >= _KEEPALIVE_INTERVAL:
+        try:
+            # GET /key with auth — exercises TCP pool + auth/credit validation
+            client._client.get(str(client.base_url).rstrip('/') + '/key')
+        except Exception:
+            pass  # httpx will reconnect on next real request
+
+    # Reschedule if client still alive
+    with _client_lock:
+        if _cached_client is not None:
+            _start_keepalive()
+
+
+def invalidate_client():
+    """Invalidate the cached client. Call when LLM settings change."""
+    global _cached_client, _cached_client_key
+    with _client_lock:
+        old_client = _cached_client
+        _cached_client = None
+        _cached_client_key = None
+        _stop_keepalive_unlocked()
+
+    if old_client is not None:
+        print("[LLM] Client cache invalidated")
+        try:
+            old_client.close()
+        except Exception:
+            pass
+
+
+def prewarm_client():
+    """Pre-warm the LLM client connection in a background thread.
+
+    Non-blocking, failure is non-fatal. Called at startup and after settings changes.
+    """
+    settings = load_settings()
+    provider = settings.get('llm', {}).get('provider', 'gemini')
+    if provider == 'gemini':
+        return  # Gemini uses its own client library
+
+    def _warm():
+        try:
+            client = _get_client()
+            if client:
+                client._client.get(str(client.base_url).rstrip('/') + '/key')
+                print(f"[LLM] {_cached_client_key} connection pre-warmed")
+        except Exception as e:
+            print(f"[LLM] Pre-warm ping failed (non-fatal): {e}")
+
+    t = threading.Thread(target=_warm, daemon=True)
+    t.start()
+
 
 def fetch_model_capabilities():
     """Fetch OpenRouter model list and extract capabilities for all providers"""
@@ -168,12 +285,27 @@ def fetch_model_capabilities():
         resp = requests.get("https://openrouter.ai/api/v1/models", timeout=10)
         if resp.ok:
             for m in resp.json().get('data', []):
-                model_id = m['id']
+                full_id = m['id']
                 supported = m.get('supported_parameters', [])
-                _model_capabilities[model_id] = {
+
+                # Strip OpenRouter modifiers (e.g., "model:nitro" -> "model")
+                clean_id = full_id.split(':')[0]
+
+                # Strip provider prefix (e.g., "openai/gpt-5-nano" -> "gpt-5-nano")
+                base_name = clean_id.split('/', 1)[-1] if '/' in clean_id else clean_id
+
+                # If duplicate base name, prefer the one that supports reasoning
+                caps = {
                     'supports_reasoning': 'reasoning' in supported,
+                    'full_id': full_id,
                     'full_data': m
                 }
+                if base_name in _model_capabilities:
+                    if caps['supports_reasoning'] and not _model_capabilities[base_name]['supports_reasoning']:
+                        _model_capabilities[base_name] = caps
+                else:
+                    _model_capabilities[base_name] = caps
+
             print(f"[LLM] Cached capabilities for {len(_model_capabilities)} models")
         else:
             print(f"[LLM] Failed to fetch model capabilities: {resp.status_code}")
@@ -182,16 +314,34 @@ def fetch_model_capabilities():
 
 
 def supports_reasoning(model_id: str) -> bool:
-    """Check if model supports reasoning (works for any provider)"""
-    # Direct lookup
-    if model_id in _model_capabilities:
-        return _model_capabilities[model_id]['supports_reasoning']
-    # Try with common prefixes for native provider models
-    for prefix in ['google/', 'openai/', 'anthropic/']:
-        prefixed = prefix + model_id
-        if prefixed in _model_capabilities:
-            return _model_capabilities[prefixed]['supports_reasoning']
+    """Check if model supports reasoning (works for any provider)
+    Strips OpenRouter modifiers and provider prefixes."""
+    # Strip OpenRouter modifiers (e.g., "model:nitro" -> "model")
+    clean_id = model_id.split(':')[0] if ':' in model_id else model_id
+
+    # Strip provider prefix (e.g., "openai/gpt-5-nano" -> "gpt-5-nano")
+    base_name = clean_id.split('/', 1)[-1] if '/' in clean_id else clean_id
+
+    # Lookup by base name
+    if base_name in _model_capabilities:
+        return _model_capabilities[base_name]['supports_reasoning']
     return False
+
+
+def get_model_capabilities_for_frontend() -> dict:
+    """
+    Return model capabilities for frontend use.
+    Keys are already base model names (provider prefix stripped at fetch time).
+
+    Returns dict like: {"gpt-4o": {"supports_reasoning": false, "full_id": "openai/gpt-4o"}, ...}
+    """
+    return {
+        base_name: {
+            'supports_reasoning': caps['supports_reasoning'],
+            'full_id': caps.get('full_id', base_name)
+        }
+        for base_name, caps in _model_capabilities.items()
+    }
 
 
 def _get_provider():
@@ -201,7 +351,13 @@ def _get_provider():
 
 
 def _get_api_key(provider: str) -> str:
-    """Get API key for the specified provider, with fallback to legacy key"""
+    """Get API key for the selected provider.
+
+    Order:
+    1. Provider-specific key
+    2. Legacy shared key (only if no provider-specific keys exist at all)
+    3. Provider-specific environment variable
+    """
     settings = load_settings()
     llm_settings = settings.get('llm', {})
 
@@ -213,7 +369,14 @@ def _get_api_key(provider: str) -> str:
     # Fallback to legacy shared key
     legacy_key = llm_settings.get('api_key', '')
     if legacy_key:
-        return legacy_key
+        # Only use legacy key when no provider-specific keys are configured.
+        # This avoids accidentally reusing (for example) a Gemini key for OpenRouter.
+        has_provider_specific_keys = any(
+            llm_settings.get(p, {}).get('api_key', '')
+            for p in ('gemini', 'openrouter', 'openai')
+        )
+        if not has_provider_specific_keys:
+            return legacy_key
 
     # Fallback to environment variables
     env_vars = {
@@ -245,26 +408,59 @@ def _create_client():
     llm_settings = settings.get('llm', {})
     provider = llm_settings.get('provider', 'gemini')
 
+    api_url = llm_settings.get('openai', {}).get('api_url', '').strip() or "https://api.openai.com/v1"
+
     # Get provider-specific API key
     api_key = _get_api_key(provider)
 
     if not api_key:
-        print(f"[LLM] Warning: No API key configured for {provider}")
-        return None
+        if provider == 'openai' and api_url != "https://api.openai.com/v1":
+            api_key = "lm-studio"
+        else:
+            print(f"[LLM] Warning: No API key configured for {provider}")
+            return None
+
+    # Extend httpx keepalive so idle connections survive between turns.
+    # SDK default is 5s which defeats connection pooling entirely.
+    # Expiry must be >> ping interval (45s) so connections aren't dropped
+    # before our keepalive timer can exercise them.
+    # DefaultHttpxClient preserves SDK defaults (600s timeout, 1000 max conn, etc.)
+    http_client = DefaultHttpxClient(
+        limits=httpx.Limits(
+            max_connections=1000,
+            max_keepalive_connections=100,
+            keepalive_expiry=300,
+        )
+    )
 
     # Configure client based on provider
     if provider == 'openai':
-        # Use OpenAI API (with optional custom endpoint)
-        api_url = llm_settings.get('openai', {}).get('api_url', '').strip()
-        if not api_url:
-            api_url = "https://api.openai.com/v1"
-        return OpenAI(api_key=api_key, base_url=api_url)
+        return OpenAI(api_key=api_key, base_url=api_url, http_client=http_client)
     else:
         # Default to OpenRouter
         return OpenAI(
             api_key=api_key,
-            base_url="https://openrouter.ai/api/v1"
+            base_url="https://openrouter.ai/api/v1",
+            http_client=http_client,
         )
+
+
+def _use_responses_api() -> bool:
+    """Check if the OpenAI Responses API should be used.
+
+    Returns True for default OpenAI endpoint, or when explicitly enabled for custom endpoints.
+    Custom non-OpenAI endpoints default to Chat Completions API (responses_api=False).
+    """
+    settings = load_settings()
+    openai_settings = settings.get('llm', {}).get('openai', {})
+    api_url = (openai_settings.get('api_url', '') or '').strip()
+
+    # Default OpenAI endpoint always uses responses API
+    if not api_url or 'openai.com' in api_url.lower():
+        return True
+
+    # Custom endpoint: check the toggle
+    return openai_settings.get('responses_api', True)
 
 
 def _get_openai_extra_params(model: str) -> Dict[str, Any]:
@@ -289,9 +485,15 @@ def _format_reasoning_openrouter(model: str, max_tokens: int, enabled: bool) -> 
     """Format reasoning params for OpenRouter API"""
     model_lower = model.lower()
 
-    # grok/ and openai/ use effort-based (must always send)
+    # x-ai/ models: can disable reasoning entirely via enabled: false
+    if model_lower.startswith('x-ai/'):
+        if enabled:
+            return {"reasoning": {"effort": "medium", "enabled": True}}
+        return {"reasoning": {"enabled": False}}
+
+    # openai/ use effort-based (must always send)
     # Note: "none" not universally supported, use "minimal" for OFF
-    if model_lower.startswith(('grok/', 'openai/')):
+    if model_lower.startswith('openai/'):
         effort = "medium" if enabled else "minimal"
         return {"reasoning": {"effort": effort}}
 
@@ -332,7 +534,7 @@ def _format_reasoning_gemini(model: str, max_tokens: int, enabled: bool) -> Dict
 
 
 def _format_reasoning_openai(model: str, max_tokens: int, enabled: bool) -> Dict[str, Any]:
-    """Format reasoning params for native OpenAI API
+    """Format reasoning params for native OpenAI API (responses.create)
 
     Reasoning models use reasoning={"effort": "..."} parameter.
     - "low": minimal reasoning, faster responses
@@ -342,20 +544,54 @@ def _format_reasoning_openai(model: str, max_tokens: int, enabled: bool) -> Dict
     if enabled:
         return {"reasoning": {"effort": "medium"}}
     else:
+        # Explicitly set low effort to minimize reasoning when disabled
         return {"reasoning": {"effort": "low"}}
 
 
-def get_reasoning_params(provider: str, model: str, max_tokens: int) -> Dict[str, Any]:
-    """Get reasoning params for any provider (unified router)"""
-    # Check if model supports reasoning
+def get_reasoning_params(provider: str, model: str, max_tokens: int, context: str = "chat") -> Dict[str, Any]:
+    """Get reasoning params for any provider (unified router)
+
+    Always returns proper reasoning params (enabled or disabled format).
+    The format functions return appropriate "off" values like {"effort": "minimal"}.
+
+    Checks both master toggle and per-model toggle:
+    - Master OFF → reasoning disabled
+    - Master ON + per-model OFF → reasoning disabled
+    - Master ON + per-model ON + model supports → reasoning enabled
+
+    Args:
+        provider: LLM provider (gemini, openrouter, openai)
+        model: Model ID
+        max_tokens: Max tokens for response
+        context: Usage context - maps to per-model reasoning setting (see REASONING_CONTEXT_SETTINGS)
+    """
+    from utils.settings import REASONING_CONTEXT_SETTINGS
+
+    # Check if model supports reasoning at all
     if not supports_reasoning(model):
         return {}
 
-    # Get provider's reasoning setting
-    settings = load_settings()
-    enabled = settings.get('llm', {}).get(provider, {}).get('reasoning_enabled', False)
+    # OpenAI without Responses API cannot use reasoning params
+    if provider == 'openai' and not _use_responses_api():
+        return {}
 
-    # Route to provider-specific formatter
+    settings = load_settings()
+
+    # Determine if reasoning should be enabled
+    # 1. Check master toggle (provider-level reasoning_enabled)
+    master_enabled = settings.get('llm', {}).get(provider, {}).get('reasoning_enabled', True)
+
+    # 2. Check per-model setting (see REASONING_CONTEXT_SETTINGS in utils/settings.py)
+    per_model_enabled = False
+    if context in REASONING_CONTEXT_SETTINGS:
+        section, key = REASONING_CONTEXT_SETTINGS[context]
+        per_model_enabled = settings.get(section, {}).get(key, False)
+    # Unknown contexts don't get reasoning (must be explicitly configured)
+
+    # Final enabled state: both master AND per-model must be on
+    enabled = master_enabled and per_model_enabled
+
+    # Always call format functions - they return proper "off" values when disabled
     result = {}
     if provider == 'openrouter':
         result = _format_reasoning_openrouter(model, max_tokens, enabled)
@@ -365,9 +601,49 @@ def get_reasoning_params(provider: str, model: str, max_tokens: int) -> Dict[str
         result = _format_reasoning_openai(model, max_tokens, enabled)
 
     if result:
-        print(f"[LLM] Reasoning params for {model}: {result} (enabled={enabled})")
+        status = "enabled" if enabled else "disabled"
+        print(f"[LLM] Reasoning {status} for {model} ({context}): {result}")
 
     return result
+
+
+def is_reasoning_enabled(model: str, context: str) -> bool:
+    """Check if reasoning will be enabled for a model/context combo.
+
+    Used to adjust max_tokens before making LLM calls.
+    """
+    from utils.settings import REASONING_CONTEXT_SETTINGS
+
+    # Must support reasoning
+    if not supports_reasoning(model):
+        return False
+
+    settings = load_settings()
+    provider = _get_provider()
+
+    # Check master toggle
+    master_enabled = settings.get('llm', {}).get(provider, {}).get('reasoning_enabled', True)
+    if not master_enabled:
+        return False
+
+    # Check per-model setting
+    if context in REASONING_CONTEXT_SETTINGS:
+        section, key = REASONING_CONTEXT_SETTINGS[context]
+        return settings.get(section, {}).get(key, False)
+
+    return False
+
+
+def adjust_max_tokens_for_reasoning(model: str, context: str, max_tokens: int) -> int:
+    """Adjust max_tokens if reasoning is enabled for this model/context.
+
+    Returns max_tokens bumped up to MIN_REASONING_TOKENS if reasoning is on
+    and current value is lower.
+    """
+    if is_reasoning_enabled(model, context) and max_tokens < MIN_REASONING_TOKENS:
+        print(f"[LLM] Reasoning enabled, adjusting max_tokens {max_tokens} -> {MIN_REASONING_TOKENS}")
+        return MIN_REASONING_TOKENS
+    return max_tokens
 
 
 def _chat_gemini(messages: List[Dict[str, Any]],
@@ -399,8 +675,8 @@ def _chat_gemini(messages: List[Dict[str, Any]],
             else:  # user
                 contents.append(types.Content(role='user', parts=[types.Part.from_text(text=content)]))
 
-        # Get reasoning config for Gemini
-        reasoning_params = get_reasoning_params('gemini', model, max_tokens)
+        # Get reasoning config for Gemini (pass context for per-model settings)
+        reasoning_params = get_reasoning_params('gemini', model, max_tokens, context)
 
         # Build thinking config if reasoning params exist
         thinking_config = None
@@ -422,7 +698,7 @@ def _chat_gemini(messages: List[Dict[str, Any]],
         )
         duration_ms = (time.time() - start_time) * 1000
 
-        result_text = response.text.strip()
+        result_text = (response.text or "").strip()
 
         # Log to file
         payload = {"model": model, "temperature": temperature, "max_tokens": max_tokens, "messages": messages}
@@ -445,6 +721,121 @@ def _chat_gemini(messages: List[Dict[str, Any]],
 
     except Exception as e:
         print(f"[LLM] Gemini error: {e}")
+        friendly_error = _parse_llm_error(e)
+        _set_last_error(friendly_error)
+        payload = {"model": model, "temperature": temperature, "max_tokens": max_tokens, "messages": messages}
+        log_llm(payload, error=str(e))
+        el = _get_event_logger()
+        if el:
+            el.log_llm_event(model=model, context=context, status="error", error=friendly_error)
+        return None
+
+
+def _chat_openai(messages: List[Dict[str, Any]],
+                 model: str,
+                 temperature: float,
+                 max_tokens: int,
+                 context: str) -> Optional[str]:
+    """Send chat request using OpenAI API (responses or chat completions)"""
+    client = _get_client()
+    if not client:
+        return None
+
+    use_responses = _use_responses_api()
+
+    try:
+        start_time = time.time()
+        api_mode = "responses" if use_responses else "chat.completions"
+        print(f"[LLM] Request: {model} ({context}), {api_mode} API, max_tokens={max_tokens}")
+
+        if use_responses:
+            # --- Responses API path ---
+            input_messages = []
+            for msg in messages:
+                role = msg.get('role', 'user')
+                content = msg.get('content', '')
+                if role == 'system':
+                    input_messages.append({"role": "developer", "content": content})
+                else:
+                    input_messages.append({"role": role, "content": content})
+
+            request_params = {
+                "model": model,
+                "input": input_messages,
+                "max_output_tokens": max_tokens,
+            }
+
+            reasoning_params = get_reasoning_params('openai', model, max_tokens, context)
+            if reasoning_params:
+                request_params.update(reasoning_params)
+
+            response = client.responses.create(**request_params)
+            duration_ms = (time.time() - start_time) * 1000
+
+            if getattr(response, 'status', None) == 'incomplete':
+                details = getattr(response, 'incomplete_details', None)
+                reason = getattr(details, 'reason', 'unknown') if details else 'unknown'
+                print(f"[LLM] Response incomplete: {reason}")
+
+            result_text = (response.output_text or "").strip()
+
+            usage = getattr(response, 'usage', None)
+            input_tokens = usage.input_tokens if usage else None
+            output_tokens = usage.output_tokens if usage else None
+            total_tokens = (usage.input_tokens + usage.output_tokens) if usage else None
+
+        else:
+            # --- Chat Completions API path (standard OpenAI-compatible) ---
+            request_params = {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+
+            response = client.chat.completions.create(**request_params)
+            duration_ms = (time.time() - start_time) * 1000
+
+            content = None
+            if response.choices and response.choices[0].message:
+                content = response.choices[0].message.content
+            result_text = (content or "").strip()
+
+            usage = response.usage if hasattr(response, 'usage') else None
+            input_tokens = usage.prompt_tokens if usage else None
+            output_tokens = usage.completion_tokens if usage else None
+            total_tokens = usage.total_tokens if usage else None
+
+        # --- Common: handle empty response, logging ---
+        if not result_text:
+            error_detail = f"Empty response from {api_mode} API"
+            print(f"[LLM] {error_detail} from {model}")
+            payload = {"model": model, "temperature": temperature, "max_tokens": max_tokens, "messages": messages}
+            log_llm(payload, error=error_detail)
+            el = _get_event_logger()
+            if el:
+                el.log_llm_event(model=model, context=context, status="error", error=error_detail)
+            return None
+
+        payload = {"model": model, "temperature": temperature, "max_tokens": max_tokens, "messages": messages}
+        log_llm(payload, response=result_text)
+
+        el = _get_event_logger()
+        if el:
+            el.log_llm_event(
+                model=model,
+                context=context,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
+                duration_ms=duration_ms
+            )
+
+        print(f"[LLM] Response: {model} ({len(result_text)} chars, {duration_ms:.0f}ms)")
+        return result_text
+
+    except Exception as e:
+        print(f"[LLM] Error from {model}: {e}")
         friendly_error = _parse_llm_error(e)
         _set_last_error(friendly_error)
         payload = {"model": model, "temperature": temperature, "max_tokens": max_tokens, "messages": messages}
@@ -480,47 +871,59 @@ def chat(messages: List[Dict[str, Any]],
     # Model should always be provided by caller, but default to the chat model
     model = model or settings.get('conversation', {}).get('chat_model', 'gemini-3-flash-preview')
 
-    # Route to Gemini if that's the provider
+    # Adjust max_tokens if reasoning is enabled (thinking needs more tokens)
+    max_tokens = adjust_max_tokens_for_reasoning(model, context, max_tokens)
+
+    # Route to provider-specific implementations
     if provider == 'gemini':
         return _chat_gemini(messages, model, temperature, max_tokens, context)
 
-    # OpenRouter / OpenAI path
-    client = _create_client()
+    if provider == 'openai':
+        return _chat_openai(messages, model, temperature, max_tokens, context)
+
+    # OpenRouter path (uses chat.completions API with extra_body for reasoning)
+    t_entry = time.perf_counter()
+    client = _get_client()
     if not client:
         return None
+    t_client = time.perf_counter()
 
     try:
-        start_time = time.time()
-        print(f"[LLM] Request: {model} ({context})")
+        # Handle nitro model - use fast providers and strip suffix
+        extra_body = {}
+        request_model = model
+        if model == 'meta-llama/llama-3.1-8b-instruct:nitro':
+            request_model = 'meta-llama/llama-3.1-8b-instruct'
+            extra_body['provider'] = {
+                'order': ['Friendli', 'Cerebras', 'SambaNova', 'DeepInfra']
+            }
+            print(f"[LLM] Request: {model} -> {request_model} with nitro providers ({context})")
+        else:
+            print(f"[LLM] Request: {model} ({context})")
 
         # Build request parameters
         request_params = {
-            "model": model,
+            "model": request_model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
             "extra_headers": {
-                "HTTP-Referer": "https://hogwarts-legacy-mod",
-                "X-Title": "Hogwarts AI NPC"
+                "HTTP-Referer": "https://sonorus.github.io/",
+                "X-Title": "Sonorus (Hogwarts Legacy Mod)"
             }
         }
 
-        # Add OpenAI-specific params (non-reasoning)
-        extra_params = _get_openai_extra_params(model)
-        request_params.update(extra_params)
-
-        # Add reasoning params (provider-aware)
-        reasoning_params = get_reasoning_params(provider, model, max_tokens)
+        # Add reasoning params for OpenRouter (uses extra_body)
+        reasoning_params = get_reasoning_params('openrouter', request_model, max_tokens, context)
         if reasoning_params:
-            if provider == 'openrouter':
-                # OpenRouter uses extra_body for non-standard params
-                request_params['extra_body'] = reasoning_params
-            else:
-                # Native OpenAI supports reasoning param directly
-                request_params.update(reasoning_params)
+            extra_body.update(reasoning_params)
 
+        if extra_body:
+            request_params['extra_body'] = extra_body
+
+        t_pre = time.perf_counter()
         response = client.chat.completions.create(**request_params)
-        duration_ms = (time.time() - start_time) * 1000
+        t_post = time.perf_counter()
 
         # Check for empty response
         content = None
@@ -559,6 +962,7 @@ def chat(messages: List[Dict[str, Any]],
         log_llm(payload, response=result_text)
 
         # Log event with token counts and latency
+        duration_ms = (t_post - t_pre) * 1000
         el = _get_event_logger()
         if el:
             usage = response.usage
@@ -571,7 +975,29 @@ def chat(messages: List[Dict[str, Any]],
                 duration_ms=duration_ms
             )
 
-        print(f"[LLM] Response: {model} ({len(result_text)} chars, {duration_ms:.0f}ms)")
+        # Profiling: break down where time went
+        client_ms = (t_client - t_entry) * 1000
+        build_ms = (t_pre - t_client) * 1000
+        net_ms = (t_post - t_pre) * 1000
+        or_latency = or_gen = or_tokens = None
+        if hasattr(response, 'usage') and response.usage:
+            u = response.usage
+            or_tokens = u.completion_tokens
+            # OpenRouter extended fields (may not exist on all responses)
+            or_latency = getattr(u, 'latency_ms', None)
+            or_gen = getattr(u, 'generation_time', None)
+            if or_latency is None and hasattr(response, '_raw_response'):
+                # Try response headers
+                try:
+                    headers = response._raw_response.headers
+                    or_latency = headers.get('x-latency-ms')
+                except Exception:
+                    pass
+
+        profile = f"client={client_ms:.0f}ms build={build_ms:.0f}ms net={net_ms:.0f}ms"
+        if or_latency or or_gen:
+            profile += f" (OR: latency={or_latency}ms gen={or_gen}ms)"
+        print(f"[LLM] Response: {model} ({len(result_text)} chars, {net_ms:.0f}ms) [{profile}]")
         return result_text
 
     except Exception as e:
@@ -585,6 +1011,245 @@ def chat(messages: List[Dict[str, Any]],
         if el:
             el.log_llm_event(model=model, context=context, status="error", error=friendly_error)
         return None
+
+
+def chat_stream(messages: List[Dict[str, Any]],
+                model: str = None,
+                temperature: float = 0.8,
+                max_tokens: int = 8192,
+                context: str = "chat"):
+    """
+    Stream a chat completion, yielding text chunks as they arrive.
+
+    Supports OpenRouter, OpenAI, and Gemini providers with streaming.
+    The full accumulated response is logged after streaming completes.
+
+    Args:
+        messages: List of message dicts with role/content
+        model: Model ID (default from settings)
+        temperature: Sampling temperature
+        max_tokens: Max response tokens
+        context: Context for logging
+
+    Yields:
+        str: Text chunks as they arrive from the LLM
+
+    Note:
+        If streaming fails or isn't supported, falls back to non-streaming
+        and yields the complete response as a single chunk.
+    """
+    _set_last_error(None)
+    settings = load_settings()
+    provider = _get_provider()
+    model = model or settings.get('conversation', {}).get('chat_model', 'google/gemini-3-flash-preview:nitro')
+    max_tokens = adjust_max_tokens_for_reasoning(model, context, max_tokens)
+
+    print(f"[LLM] Request (streaming): {model} ({context})")
+
+    try:
+        if provider == 'gemini':
+            yield from _chat_stream_gemini(messages, model, temperature, max_tokens, context)
+        elif provider == 'openai':
+            yield from _chat_stream_openai(messages, model, temperature, max_tokens, context)
+        else:
+            # OpenRouter - uses OpenAI-compatible streaming
+            yield from _chat_stream_openrouter(messages, model, temperature, max_tokens, context)
+    except Exception as e:
+        print(f"[LLM] Streaming error, falling back to non-streaming: {e}")
+        # Fallback: use non-streaming and yield complete response
+        result = chat(messages, model=model, temperature=temperature,
+                      max_tokens=max_tokens, context=context)
+        if result:
+            yield result
+
+
+def _chat_stream_openrouter(messages, model, temperature, max_tokens, context):
+    """Stream via OpenRouter (OpenAI-compatible API)."""
+    client = _get_client()
+    if not client:
+        return
+
+    start_time = time.time()
+    extra_body = {}
+    request_model = model
+
+    # Handle nitro model
+    if model == 'meta-llama/llama-3.1-8b-instruct:nitro':
+        request_model = 'meta-llama/llama-3.1-8b-instruct'
+        extra_body['provider'] = {
+            'order': ['Friendli', 'Cerebras', 'SambaNova', 'DeepInfra']
+        }
+
+    # Handle nitro suffix for other models
+    if ':nitro' in model and request_model == model:
+        request_model = model  # OpenRouter handles :nitro suffix
+
+    request_params = {
+        "model": request_model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": True,
+        "extra_headers": {
+            "HTTP-Referer": "https://sonorus.github.io/",
+            "X-Title": "Sonorus (Hogwarts Legacy Mod)"
+        }
+    }
+
+    reasoning_params = get_reasoning_params('openrouter', request_model, max_tokens, context)
+    if reasoning_params:
+        extra_body.update(reasoning_params)
+    if extra_body:
+        request_params['extra_body'] = extra_body
+
+    accumulated = []
+    try:
+        stream = client.chat.completions.create(**request_params)
+        for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                text = chunk.choices[0].delta.content
+                accumulated.append(text)
+                yield text
+
+        duration_ms = (time.time() - start_time) * 1000
+        full_response = "".join(accumulated)
+
+        if full_response:
+            payload = {"model": model, "temperature": temperature, "max_tokens": max_tokens, "messages": messages}
+            log_llm(payload, response=full_response)
+            print(f"[LLM] Response (streamed): {model} ({len(full_response)} chars, {duration_ms:.0f}ms)")
+
+            el = _get_event_logger()
+            if el:
+                el.log_llm_event(model=model, context=context, duration_ms=duration_ms)
+        else:
+            print(f"[LLM] Empty streaming response from {model}")
+
+    except Exception as e:
+        print(f"[LLM] OpenRouter streaming error: {e}")
+        friendly_error = _parse_llm_error(e)
+        _set_last_error(friendly_error)
+        el = _get_event_logger()
+        if el:
+            el.log_llm_event(model=model, context=context, status="error", error=friendly_error)
+
+
+def _chat_stream_gemini(messages, model, temperature, max_tokens, context):
+    """Stream via Google Gemini API."""
+    if not GEMINI_AVAILABLE:
+        # Fallback to non-streaming
+        result = _chat_gemini(messages, model, temperature, max_tokens, context)
+        if result:
+            yield result
+        return
+
+    client = _create_gemini_client()
+    if not client:
+        return
+
+    start_time = time.time()
+
+    # Convert messages to Gemini format
+    system_instruction = None
+    contents = []
+    for msg in messages:
+        role = msg.get('role', 'user')
+        content = msg.get('content', '')
+        if role == 'system':
+            system_instruction = content
+        elif role == 'assistant':
+            contents.append(types.Content(role='model', parts=[types.Part.from_text(text=content)]))
+        else:
+            contents.append(types.Content(role='user', parts=[types.Part.from_text(text=content)]))
+
+    reasoning_params = get_reasoning_params('gemini', model, max_tokens, context)
+    thinking_config = types.ThinkingConfig(**reasoning_params) if reasoning_params else None
+
+    config = types.GenerateContentConfig(
+        temperature=temperature,
+        max_output_tokens=max_tokens,
+        system_instruction=system_instruction,
+        thinking_config=thinking_config
+    )
+
+    accumulated = []
+    try:
+        stream = client.models.generate_content_stream(
+            model=model,
+            contents=contents,
+            config=config
+        )
+        for chunk in stream:
+            if chunk.text:
+                accumulated.append(chunk.text)
+                yield chunk.text
+
+        duration_ms = (time.time() - start_time) * 1000
+        full_response = "".join(accumulated)
+
+        if full_response:
+            payload = {"model": model, "temperature": temperature, "max_tokens": max_tokens, "messages": messages}
+            log_llm(payload, response=full_response)
+            print(f"[LLM] Response (streamed): {model} ({len(full_response)} chars, {duration_ms:.0f}ms)")
+
+            el = _get_event_logger()
+            if el:
+                usage = None
+                el.log_llm_event(model=model, context=context, duration_ms=duration_ms)
+
+    except Exception as e:
+        print(f"[LLM] Gemini streaming error: {e}")
+        friendly_error = _parse_llm_error(e)
+        _set_last_error(friendly_error)
+        el = _get_event_logger()
+        if el:
+            el.log_llm_event(model=model, context=context, status="error", error=friendly_error)
+
+
+def _chat_stream_openai(messages, model, temperature, max_tokens, context):
+    """Stream via OpenAI API (chat completions)."""
+    client = _get_client()
+    if not client:
+        return
+
+    start_time = time.time()
+
+    request_params = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": True,
+    }
+
+    accumulated = []
+    try:
+        stream = client.chat.completions.create(**request_params)
+        for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                text = chunk.choices[0].delta.content
+                accumulated.append(text)
+                yield text
+
+        duration_ms = (time.time() - start_time) * 1000
+        full_response = "".join(accumulated)
+
+        if full_response:
+            payload = {"model": model, "temperature": temperature, "max_tokens": max_tokens, "messages": messages}
+            log_llm(payload, response=full_response)
+            print(f"[LLM] Response (streamed): {model} ({len(full_response)} chars, {duration_ms:.0f}ms)")
+
+            el = _get_event_logger()
+            if el:
+                el.log_llm_event(model=model, context=context, duration_ms=duration_ms)
+
+    except Exception as e:
+        print(f"[LLM] OpenAI streaming error: {e}")
+        friendly_error = _parse_llm_error(e)
+        _set_last_error(friendly_error)
+        el = _get_event_logger()
+        if el:
+            el.log_llm_event(model=model, context=context, status="error", error=friendly_error)
 
 
 def chat_simple(prompt: str, system: str = None,
@@ -637,8 +1302,8 @@ def _chat_with_vision_gemini(prompt: str, image_b64: str,
             )
         ]
 
-        # Get reasoning config for Gemini
-        reasoning_params = get_reasoning_params('gemini', model, max_tokens)
+        # Get reasoning config for Gemini (vision context for per-model settings)
+        reasoning_params = get_reasoning_params('gemini', model, max_tokens, 'vision')
 
         # Build thinking config if reasoning params exist
         thinking_config = None
@@ -658,7 +1323,7 @@ def _chat_with_vision_gemini(prompt: str, image_b64: str,
         )
         duration_ms = (time.time() - start_time) * 1000
 
-        result_text = response.text.strip()
+        result_text = (response.text or "").strip()
 
         # Log to file (vision prompt as user message, note image was included)
         messages = [{"role": "user", "content": f"[Vision request with image]\n\n{prompt}"}]
@@ -693,6 +1358,126 @@ def _chat_with_vision_gemini(prompt: str, image_b64: str,
         return None
 
 
+def _chat_with_vision_openai(prompt: str, image_b64: str,
+                              model: str, temperature: float,
+                              max_tokens: int) -> Optional[str]:
+    """Vision chat using OpenAI API (responses or chat completions)"""
+    client = _get_client()
+    if not client:
+        return None
+
+    use_responses = _use_responses_api()
+
+    try:
+        start_time = time.time()
+        api_mode = "responses" if use_responses else "chat.completions"
+        print(f"[LLM] Vision request: {model} ({api_mode} API)")
+
+        if use_responses:
+            # --- Responses API path ---
+            input_content = [
+                {"type": "input_text", "text": prompt},
+                {"type": "input_image", "image_url": f"data:image/jpeg;base64,{image_b64}"}
+            ]
+
+            request_params = {
+                "model": model,
+                "input": [{"role": "user", "content": input_content}],
+                "max_output_tokens": max_tokens,
+            }
+
+            reasoning_params = get_reasoning_params('openai', model, max_tokens, 'vision')
+            if reasoning_params:
+                request_params.update(reasoning_params)
+
+            response = client.responses.create(**request_params)
+            duration_ms = (time.time() - start_time) * 1000
+
+            if getattr(response, 'status', None) == 'incomplete':
+                details = getattr(response, 'incomplete_details', None)
+                reason = getattr(details, 'reason', 'unknown') if details else 'unknown'
+                print(f"[LLM] Vision response incomplete: {reason}")
+
+            result_text = (response.output_text or "").strip()
+
+            usage = getattr(response, 'usage', None)
+            input_tokens = usage.input_tokens if usage else None
+            output_tokens = usage.output_tokens if usage else None
+            total_tokens = (usage.input_tokens + usage.output_tokens) if usage else None
+
+        else:
+            # --- Chat Completions API path (standard vision format) ---
+            vision_messages = [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
+                ]
+            }]
+
+            request_params = {
+                "model": model,
+                "messages": vision_messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+
+            response = client.chat.completions.create(**request_params)
+            duration_ms = (time.time() - start_time) * 1000
+
+            content = None
+            if response.choices and response.choices[0].message:
+                content = response.choices[0].message.content
+            result_text = (content or "").strip()
+
+            usage = response.usage if hasattr(response, 'usage') else None
+            input_tokens = usage.prompt_tokens if usage else None
+            output_tokens = usage.completion_tokens if usage else None
+            total_tokens = usage.total_tokens if usage else None
+
+        # --- Common: handle empty response, logging ---
+        if not result_text:
+            error_detail = f"Empty vision response from {api_mode} API"
+            print(f"[LLM] {error_detail} from {model}")
+            log_messages = [{"role": "user", "content": f"[Vision request with image]\n\n{prompt}"}]
+            payload = {"model": model, "temperature": temperature, "max_tokens": max_tokens, "messages": log_messages}
+            log_llm(payload, error=error_detail)
+            el = _get_event_logger()
+            if el:
+                el.log_llm_event(model=model, context="vision", status="error", error=error_detail)
+            return None
+
+        log_messages = [{"role": "user", "content": f"[Vision request with image]\n\n{prompt}"}]
+        payload = {"model": model, "temperature": temperature, "max_tokens": max_tokens, "messages": log_messages}
+        log_llm(payload, response=result_text)
+
+        el = _get_event_logger()
+        if el:
+            el.log_llm_event(
+                model=model,
+                context="vision",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
+                duration_ms=duration_ms
+            )
+
+        print(f"[LLM] Vision response: {model} ({len(result_text)} chars, {duration_ms:.0f}ms)")
+        return result_text
+
+    except Exception as e:
+        print(f"[LLM] OpenAI vision error: {e}")
+        friendly_error = _parse_llm_error(e)
+        _set_last_error(friendly_error)
+        log_messages = [{"role": "user", "content": f"[Vision request with image]\n\n{prompt}"}]
+        payload = {"model": model, "temperature": temperature, "max_tokens": max_tokens, "messages": log_messages}
+        log_llm(payload, error=str(e))
+        el = _get_event_logger()
+        if el:
+            el.log_llm_event(model=model, context="vision", status="error", error=friendly_error)
+        return None
+
+
 def chat_with_vision(prompt: str, image_b64: str,
                      model: str = None, temperature: float = 0.7,
                      max_tokens: int = 8192) -> Optional[str]:
@@ -713,12 +1498,18 @@ def chat_with_vision(prompt: str, image_b64: str,
     provider = _get_provider()
     model = model or settings.get('agents', {}).get('vision', {}).get('llm', {}).get('model', 'gemini-2.5-flash-lite')
 
-    # Route to Gemini if that's the provider
+    # Adjust max_tokens if reasoning is enabled (thinking needs more tokens)
+    max_tokens = adjust_max_tokens_for_reasoning(model, 'vision', max_tokens)
+
+    # Route to provider-specific implementations
     if provider == 'gemini':
         return _chat_with_vision_gemini(prompt, image_b64, model, temperature, max_tokens)
 
-    # OpenRouter / OpenAI path
-    client = _create_client()
+    if provider == 'openai':
+        return _chat_with_vision_openai(prompt, image_b64, model, temperature, max_tokens)
+
+    # OpenRouter path (uses chat.completions API)
+    client = _get_client()
     if not client:
         return None
 
@@ -740,24 +1531,15 @@ def chat_with_vision(prompt: str, image_b64: str,
             "temperature": temperature,
             "max_tokens": max_tokens,
             "extra_headers": {
-                "HTTP-Referer": "https://hogwarts-legacy-mod",
-                "X-Title": "Hogwarts AI Vision"
+                "HTTP-Referer": "https://sonorus.github.io/",
+                "X-Title": "Sonorus (Hogwarts Legacy Mod)"
             }
         }
 
-        # Add OpenAI-specific params (non-reasoning)
-        extra_params = _get_openai_extra_params(model)
-        request_params.update(extra_params)
-
-        # Add reasoning params (provider-aware)
-        reasoning_params = get_reasoning_params(provider, model, max_tokens)
+        # Add reasoning params for OpenRouter (uses extra_body)
+        reasoning_params = get_reasoning_params('openrouter', model, max_tokens, 'vision')
         if reasoning_params:
-            if provider == 'openrouter':
-                # OpenRouter uses extra_body for non-standard params
-                request_params['extra_body'] = reasoning_params
-            else:
-                # Native OpenAI supports reasoning param directly
-                request_params.update(reasoning_params)
+            request_params['extra_body'] = reasoning_params
 
         response = client.chat.completions.create(**request_params)
         duration_ms = (time.time() - start_time) * 1000

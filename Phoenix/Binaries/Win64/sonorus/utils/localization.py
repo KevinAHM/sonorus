@@ -1,35 +1,120 @@
 """
 Localization utilities for Sonorus.
 Handles ID to display name mapping and reverse lookups.
+Supports language-specific localization files.
 """
 
 import os
 import json
 import re
+import threading
 
-from .settings import DATA_DIR
+from .settings import DATA_DIR, load_settings
 
-MAIN_LOCALIZATION_FILE = os.path.join(DATA_DIR, "main_localization.json")
 
-# Module-level caches
-_localization_cache = None
-_reverse_localization_cache = None  # display_name.lower() -> id
+class _LocalizationCache:
+    """Singleton cache that persists across reloads."""
+    _instance = None
+    _lock = threading.Lock()  # Protects cache initialization
+
+    def __init__(self):
+        self.localization = None
+        self.reverse_localization = None
+        self.lowercase_map = None  # lowercase ID -> canonical ID mapping
+        self.cached_language = None
+
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+
+# Global reference that survives auto-reload
+_cache = _LocalizationCache.get_instance()
+
+
+def get_localization_path(language=None):
+    """
+    Get path to main_localization.json for specified language.
+
+    Args:
+        language: Language code like "EN_US", "DE_DE". If None, reads from settings.
+
+    Returns:
+        Path to localization file. English uses base filename, others use suffix.
+        e.g., "main_localization.json" (EN) or "main_localization_de_de.json" (DE)
+    """
+    if language is None:
+        settings = load_settings()
+        language = settings.get('setup', {}).get('language', 'EN_US')
+
+    if language == 'EN_US':
+        return os.path.join(DATA_DIR, "main_localization.json")
+    else:
+        suffix = f"_{language.lower()}"
+        return os.path.join(DATA_DIR, f"main_localization{suffix}.json")
+
+
+def get_subtitles_path(language=None):
+    """
+    Get path to subtitles.json for specified language.
+
+    Args:
+        language: Language code like "EN_US", "DE_DE". If None, reads from settings.
+
+    Returns:
+        Path to subtitles file. English uses base filename, others use suffix.
+        e.g., "subtitles.json" (EN) or "subtitles_de_de.json" (DE)
+    """
+    if language is None:
+        settings = load_settings()
+        language = settings.get('setup', {}).get('language', 'EN_US')
+
+    if language == 'EN_US':
+        return os.path.join(DATA_DIR, "subtitles.json")
+    else:
+        suffix = f"_{language.lower()}"
+        return os.path.join(DATA_DIR, f"subtitles{suffix}.json")
+
+
+def invalidate_cache():
+    """Clear localization caches. Call when language changes."""
+    _cache.localization = None
+    _cache.reverse_localization = None
+    _cache.cached_language = None
 
 
 def load_localization():
-    """Load main_localization.json with caching"""
-    global _localization_cache
-    if _localization_cache is None:
-        try:
-            if os.path.exists(MAIN_LOCALIZATION_FILE):
-                with open(MAIN_LOCALIZATION_FILE, 'r', encoding='utf-8') as f:
-                    _localization_cache = json.load(f)
-            else:
-                _localization_cache = {}
-        except Exception as e:
-            print(f"[Localization] Error loading: {e}")
-            _localization_cache = {}
-    return _localization_cache
+    """Load main_localization.json with caching. Automatically reloads if language changed."""
+    # Get current language setting
+    settings = load_settings()
+    current_language = settings.get('setup', {}).get('language', 'EN_US')
+
+    # Invalidate cache if language changed
+    if _cache.cached_language is not None and _cache.cached_language != current_language:
+        print(f"[Localization] Language changed from {_cache.cached_language} to {current_language}, reloading")
+        invalidate_cache()
+
+    if _cache.localization is None:
+        # Lock to prevent race condition on first load with threaded Flask
+        with _LocalizationCache._lock:
+            # Double-check after acquiring lock
+            if _cache.localization is None:
+                loc_path = get_localization_path(current_language)
+                try:
+                    if os.path.exists(loc_path):
+                        with open(loc_path, 'r', encoding='utf-8') as f:
+                            _cache.localization = json.load(f)
+                        _cache.cached_language = current_language
+                        print(f"[Localization] Loaded {len(_cache.localization)} entries from {os.path.basename(loc_path)}")
+                    else:
+                        print(f"[Localization] File not found: {loc_path}")
+                        _cache.localization = {}
+                except Exception as e:
+                    print(f"[Localization] Error loading: {e}")
+                    _cache.localization = {}
+    return _cache.localization
 
 
 def get_display_name(npc_id):
@@ -57,15 +142,36 @@ def get_display_name(npc_id):
 
 def get_reverse_localization():
     """Build reverse lookup: display_name.lower() -> id"""
-    global _reverse_localization_cache
-    if _reverse_localization_cache is None:
-        loc = load_localization()
-        _reverse_localization_cache = {}
-        for slug, display_name in loc.items():
-            if display_name and isinstance(display_name, str):
-                # Store lowercase for case-insensitive lookup
-                _reverse_localization_cache[display_name.lower()] = slug
-    return _reverse_localization_cache
+    if _cache.reverse_localization is None:
+        with _LocalizationCache._lock:
+            if _cache.reverse_localization is None:
+                loc = load_localization()
+                reverse = {}
+                for slug, display_name in loc.items():
+                    if display_name and isinstance(display_name, str):
+                        # Store lowercase for case-insensitive lookup
+                        reverse[display_name.lower()] = slug
+                _cache.reverse_localization = reverse
+    return _cache.reverse_localization
+
+
+def get_lowercase_map():
+    """Load lowercase_map.json for IDs that the game provides in lowercase."""
+    if _cache.lowercase_map is None:
+        with _LocalizationCache._lock:
+            if _cache.lowercase_map is None:
+                map_path = os.path.join(DATA_DIR, "lowercase_map.json")
+                try:
+                    if os.path.exists(map_path):
+                        with open(map_path, 'r', encoding='utf-8') as f:
+                            _cache.lowercase_map = json.load(f)
+                    else:
+                        print(f"[Localization] File not found: {map_path}")
+                        _cache.lowercase_map = {}
+                except Exception as e:
+                    print(f"[Localization] Error loading: {e}")
+                    _cache.lowercase_map = {}
+    return _cache.lowercase_map
 
 
 def id_from_name(name, nearby_npcs=None):
@@ -84,6 +190,7 @@ def id_from_name(name, nearby_npcs=None):
 
     name_lower = name.lower().replace(" ", "")
     name_lower_spaces = name.lower()
+    name_no_spaces = name.replace(" ", "")
 
     # 1. Check nearby NPCs first (exact match on slug)
     if nearby_npcs:
@@ -91,6 +198,14 @@ def id_from_name(name, nearby_npcs=None):
             npc_id = npc.get('name', '')
             if npc_id.lower() == name_lower:
                 return npc_id
+
+    # 2. Check lowercase_map.json for IDs that are given by game in lowercase
+    lowercase_map = get_lowercase_map()
+    # e.g. NeridaRoberts or Nerida Roberts -> neridaroberts
+    if name in lowercase_map:
+        return lowercase_map[name]
+    if name_no_spaces in lowercase_map:
+        return lowercase_map[name_no_spaces]
 
     # 2. Check localization for exact display name match
     reverse_loc = get_reverse_localization()
@@ -143,4 +258,5 @@ def find_npc_id_by_name(display_name, nearby_npcs):
     Returns:
         NPC ID (slug) if found, otherwise the input with spaces removed
     """
-    return id_from_name(display_name, nearby_npcs)
+    npc_id = id_from_name(display_name, nearby_npcs)
+    return npc_id

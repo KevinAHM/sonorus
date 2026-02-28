@@ -10,6 +10,7 @@ import ctypes
 import time
 import pyperclip
 from pynput import keyboard
+from .voice import can_activate_hotkey, is_game_window_active
 
 user32 = ctypes.windll.user32
 
@@ -21,6 +22,18 @@ WM_SYSKEYUP = 0x0105
 
 # VK codes
 VK_RETURN = 0x0D
+VK_F1 = 0x70
+VK_F2 = 0x71
+VK_F3 = 0x72
+VK_F4 = 0x73
+VK_F5 = 0x74
+VK_F6 = 0x75
+VK_F7 = 0x76
+VK_F8 = 0x77
+VK_F9 = 0x78
+VK_F10 = 0x79
+VK_F11 = 0x7A
+VK_F12 = 0x7B
 VK_ESCAPE = 0x1B
 VK_BACK = 0x08
 VK_SPACE = 0x20
@@ -40,25 +53,6 @@ VK_RMENU = 0xA5  # Right Alt
 VK_MODIFIERS = {VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN,
                 VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU}
 
-
-def get_active_window_title():
-    try:
-        hwnd = user32.GetForegroundWindow()
-        if not hwnd:
-            return ""
-        length = user32.GetWindowTextLengthW(hwnd)
-        if length == 0:
-            return ""
-        buffer = ctypes.create_unicode_buffer(length + 1)
-        user32.GetWindowTextW(hwnd, buffer, length + 1)
-        return buffer.value
-    except:
-        return ""
-
-
-def is_game_window_active():
-    title = get_active_window_title().lower().strip()
-    return title == "hogwarts legacy"
 
 def is_key_pressed(vk):
     """Check if a key is currently pressed using GetAsyncKeyState."""
@@ -116,16 +110,29 @@ class ChatInputCapture:
         self.listener = None
         self._deactivate_time = 0  # Timestamp of last deactivation (to prevent key repeat issues)
 
+        # Director mode: Hold hotkey 500ms+ for "Prompt:" mode vs tap for "You:" mode
+        self._hotkey_down_time = None  # When hotkey was pressed down
+        self._hotkey_held = False  # True while hotkey is physically held (KEYDOWN to KEYUP)
+        self._prompt_mode = False  # True = director prompt mode, False = normal chat mode
+        self._hold_timer = None  # Timer for hold detection (cancelled on keyup)
+
+    # Hotkey name to VK code mapping (must match config.html dropdown options)
+    HOTKEY_VK_MAP = {
+        'enter': VK_RETURN,
+        'f1': VK_F1, 'f2': VK_F2, 'f3': VK_F3, 'f4': VK_F4, 'f5': VK_F5,
+        'f6': VK_F6, 'f7': VK_F7, 'f8': VK_F8, 'f9': VK_F9, 'f10': VK_F10,
+        'f11': VK_F11, 'f12': VK_F12,
+    }
+
     def _parse_hotkey_vk(self, hotkey):
         """Convert hotkey name to VK code."""
         hotkey = hotkey.lower()
-        if hotkey == 'enter':
-            return VK_RETURN
-        elif hotkey == 'tab':
-            return VK_TAB
+        if hotkey in self.HOTKEY_VK_MAP:
+            return self.HOTKEY_VK_MAP[hotkey]
         elif len(hotkey) == 1:
             # For single characters, get VK code
             return user32.VkKeyScanW(ord(hotkey)) & 0xFF
+        print(f"[InputCapture] Unknown hotkey '{hotkey}', defaulting to Enter")
         return VK_RETURN
 
     def start(self):
@@ -138,17 +145,55 @@ class ChatInputCapture:
         self.listener.start()
         print(f"[InputCapture] Started - hotkey: {self.hotkey_name}")
 
+    def _open_chat_with_mode(self, mode):
+        """Open chat input with specified mode. Called from timer or keyup.
+
+        Returns True if chat was opened, False if already open.
+        Thread-safe: all checks and modifications under lock.
+        """
+        with self._lock:
+            if self.active:
+                return False  # Already open
+
+            self.active = True
+            self.text_buffer = ""
+            self._prompt_mode = (mode == "prompt")
+            # Clear timer state since we're opening chat
+            self._hold_timer = None
+
+        # Trigger vision capture for fresh context (outside lock)
+        try:
+            from vision_agent import get_agent
+            agent = get_agent()
+            if agent:
+                agent.capture_now()
+        except Exception:
+            pass  # Vision capture is optional
+
+        print(f"[InputCapture] Chat ACTIVE ({mode} mode)")
+        self._send_update()
+        return True
+
+    def _hold_timer_callback(self):
+        """Called after 500ms if hotkey is still held - open in prompt mode."""
+        # Check if hotkey is still being held (down_time not cleared by keyup)
+        # Note: _open_chat_with_mode handles the lock and active check
+        if self._hotkey_down_time is not None:
+            if self._open_chat_with_mode("prompt"):
+                # Successfully opened - clear down_time so keyup doesn't log confusion
+                self._hotkey_down_time = None
+
     def _win32_filter(self, msg, data):
         """
         Handle ALL key processing here.
         - Capture keys for chat buffer
         - Call suppress_event() to block from game
         - Return value controls whether on_press/on_release is called (we don't use those)
-        """
-        # Only handle key down events
-        if msg not in (WM_KEYDOWN, WM_SYSKEYDOWN):
-            return
 
+        Director Mode (hold-to-prompt):
+        - Tap (< 500ms): Opens chat with "You: " on release
+        - Hold (>= 500ms): Opens chat with "Prompt: " after 500ms (no need to release)
+        """
         vk = data.vkCode
 
         # Always let modifier keys through untouched
@@ -164,42 +209,62 @@ class ChatInputCapture:
         if alt_pressed or win_pressed:
             return
 
+        # === HANDLE KEYUP ===
+        if msg in (WM_KEYUP, WM_SYSKEYUP):
+            if vk == self.hotkey_vk and self._hotkey_held:
+                self._hotkey_held = False
+                held_duration = time.time() - self._hotkey_down_time if self._hotkey_down_time else 0
+                self._hotkey_down_time = None
+
+                # Cancel the hold timer (prevents stale timer from firing later)
+                if self._hold_timer is not None:
+                    self._hold_timer.cancel()
+                    self._hold_timer = None
+
+                # If chat not open yet (quick tap), open in chat mode
+                if not self.active:
+                    if self._open_chat_with_mode("chat"):
+                        print(f"[InputCapture] Quick tap ({held_duration*1000:.0f}ms) -> chat mode")
+
+                self.listener.suppress_event()
+            return
+
+        # Only handle key down events from here
+        if msg not in (WM_KEYDOWN, WM_SYSKEYDOWN):
+            return
+
         # === NOT IN CHAT MODE ===
         if not self.active:
             # Prevent immediate reactivation due to key repeat
             if time.time() - self._deactivate_time < 0.15:
                 return
 
-            # Check for hotkey to open chat (only when game window is active)
+            # Check for hotkey press
             if vk == self.hotkey_vk:
-                game_active = is_game_window_active()
-                if not game_active:
-                    print(f"[InputCapture] Hotkey blocked: game window not active (window: '{get_active_window_title()}')")
+                # Ignore key repeat (hotkey already down)
+                if self._hotkey_down_time is not None:
+                    self.listener.suppress_event()
                     return
 
-                # Check if game is paused
-                if self.check_pause:
-                    is_paused = self.check_pause()
-                    if is_paused:
-                        print("[InputCapture] Hotkey blocked: check_pause() returned True")
-                        return
+                # Shared guard - game must be active and not paused
+                if not can_activate_hotkey(self.check_pause):
+                    return
 
-                with self._lock:
-                    self.active = True
-                    self.text_buffer = ""
+                # Cancel any existing timer (debounce)
+                if self._hold_timer is not None:
+                    self._hold_timer.cancel()
+                    self._hold_timer = None
 
-                # Trigger vision capture for fresh context
-                try:
-                    from vision_agent import get_agent
-                    agent = get_agent()
-                    if agent:
-                        agent.capture_now()
-                except Exception:
-                    pass  # Vision capture is optional
+                # Record press time and start timer for hold detection
+                self._hotkey_down_time = time.time()
+                self._hotkey_held = True
+                print("[InputCapture] Hotkey pressed - tap for chat, hold for prompt")
 
-                print("[InputCapture] Chat ACTIVE")
-                self._send_update()
-                # Suppress the hotkey so game doesn't see it
+                # Start timer - if still held after 500ms, open in prompt mode
+                self._hold_timer = threading.Timer(0.5, self._hold_timer_callback)
+                self._hold_timer.daemon = True
+                self._hold_timer.start()
+
                 self.listener.suppress_event()
             return
 
@@ -216,6 +281,10 @@ class ChatInputCapture:
             return  # Let key through to other applications
 
         with self._lock:
+            # Ignore Enter while hotkey is physically held (prevents key repeat from submitting)
+            if vk == VK_RETURN and self._hotkey_held:
+                self.listener.suppress_event()
+                return
             if vk == VK_RETURN:
                 self._submit()
             elif vk == VK_ESCAPE:
@@ -248,8 +317,13 @@ class ChatInputCapture:
             if text:
                 text = text.replace('\r\n', ' ').replace('\n', ' ')
                 text = ''.join(c for c in text if c.isprintable())
-                self.text_buffer += text
-                self._send_update()
+                # Truncate to prevent lag from large pastes
+                max_len = 500
+                remaining = max_len - len(self.text_buffer)
+                if remaining > 0:
+                    text = text[:remaining]
+                    self.text_buffer += text
+                    self._send_update()
         except Exception as e:
             print(f"[InputCapture] Paste error: {e}")
 
@@ -258,16 +332,26 @@ class ChatInputCapture:
         self.active = False
         self._deactivate_time = time.time()
         if text:
-            print(f"[InputCapture] Submit: {text}")
+            mode_name = "prompt" if self._prompt_mode else "chat"
+            print(f"[InputCapture] Submit ({mode_name}): {text}")
             self._send_message("chat_submit", text)
-        else:
-            self._send_message("chat_input", "", active=False)
+        # Always send chat_input with active=False to clear the Lua subtitle display
+        self._send_message("chat_input", "", active=False)
         self.text_buffer = ""
+        # Reset mode after submit (will be set again on next hotkey release)
+        self._prompt_mode = False
+        self._hotkey_down_time = None
 
     def _cancel(self):
         self.active = False
         self._deactivate_time = time.time()
         self.text_buffer = ""
+        self._prompt_mode = False
+        self._hotkey_down_time = None
+        self._hotkey_held = False
+        if self._hold_timer is not None:
+            self._hold_timer.cancel()
+            self._hold_timer = None
         print("[InputCapture] Cancelled")
         self._send_update()
 
@@ -277,6 +361,12 @@ class ChatInputCapture:
                 self.active = False
                 self._deactivate_time = time.time()
                 self.text_buffer = ""
+                self._prompt_mode = False
+                self._hotkey_down_time = None
+                self._hotkey_held = False
+                if self._hold_timer is not None:
+                    self._hold_timer.cancel()
+                    self._hold_timer = None
             print(f"[InputCapture] Force closed: {reason}")
             self._send_update()
 
@@ -286,7 +376,9 @@ class ChatInputCapture:
     def _send_message(self, msg_type, text, active=None):
         if active is None:
             active = self.active
-        msg = {"type": msg_type, "text": text, "active": active}
+        # Include mode: "prompt" for director mode, "chat" for normal mode
+        mode = "prompt" if self._prompt_mode else "chat"
+        msg = {"type": msg_type, "text": text, "active": active, "mode": mode}
         try:
             self.send(msg)
         except Exception as e:

@@ -112,12 +112,31 @@ local function encode_number(val)
 end
 
 
+-- Handle userdata (UE4SS UObjects) by converting to string representation
+local function encode_userdata(val)
+  -- Try to get a useful string representation
+  local ok, str = pcall(function()
+    if val.GetFullName then
+      return '"[UObject: ' .. tostring(val:GetFullName()) .. ']"'
+    elseif val.ToString then
+      return '"' .. tostring(val:ToString()) .. '"'
+    else
+      return '"[userdata]"'
+    end
+  end)
+  if ok and str then
+    return str
+  end
+  return '"[userdata]"'
+end
+
 local type_func_map = {
   [ "nil"     ] = encode_nil,
   [ "table"   ] = encode_table,
   [ "string"  ] = encode_string,
   [ "number"  ] = encode_number,
   [ "boolean" ] = tostring,
+  [ "userdata"] = encode_userdata,  -- Safety: handle UE4SS UObjects
 }
 
 

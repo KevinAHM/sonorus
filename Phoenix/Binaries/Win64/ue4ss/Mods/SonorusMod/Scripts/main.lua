@@ -20,15 +20,23 @@ end
 _G.SonorusModLoaded = true
 
 -- ============================================
--- Developer Mode (set to true to enable debug prints and F7/F11)
+-- Developer Mode (synced from settings.json via Python server)
 -- ============================================
-_G.SonorusDevMode = false
+_G.SonorusDevMode = false  -- Default off, synced when Python connects
 
 function _G.DevPrint(...)
     if _G.SonorusDevMode then
         print(...)
     end
 end
+
+-- ============================================
+-- Console Commands
+-- ============================================
+RegisterConsoleCommandHandler("sonorus_test", function(FullCommand, Parameters, Ar)
+    print("[Sonorus] sonorus_test command fired")
+    return true
+end)
 
 -- ============================================
 -- Global State (shared with logic.lua)
@@ -70,12 +78,28 @@ end
 -- Loading screen detection - fires when entering/exiting game
 -- (note: "Loadingcreen" is the actual class name, not a typo)
 NotifyOnNewObject("/Script/Phoenix.Loadingcreen", function(Context)
-    print("[Sonorus] Loading screen detected - player leaving game world")
-    -- _G.SonorusState.playerLoaded = false  -- Player leaving game world - may not be reliably firing before ClientRestart?
+    print("[Sonorus] Loading screen detected - player entering or leaving game world")
+    _G.SonorusState.playerLoaded = true  -- Fallback: if ClientRestart didn't fire, fast travel proves player is loaded
     -- Clear all caches - objects will be invalid after load
     Cache.ClearObjects()
     Cache.ClearAllEntities()  -- NPCs will be invalid after load - force re-FindAllOf
     Cache.InvalidateStatic()
+    -- Release all locked NPCs (including preview locks) - they become invalid after load
+    if ReleaseAllNPCs then pcall(ReleaseAllNPCs) end
+    -- Restore normal input mode (in case chat was open during load)
+    if SetInputModeGameOnly then pcall(SetInputModeGameOnly) end
+    -- Reset chat input state (prevents stale preview lock on new world)
+    if _G.ChatInputState then
+        _G.ChatInputState.active = false
+        _G.ChatInputState.text = ""
+    end
+    _G.ChatPreviewLock = nil
+    _G.STTPreviewLock = nil
+    -- Invalidate time cache and permanent statics so next tick does a full refresh
+    if _G._TimeCache then _G._TimeCache.initialized = false end
+    if _G._PermanentStatics then _G._PermanentStatics.initialized = false end
+    -- Mark active commitments as dirty for re-apply after load
+    if _G.CommitmentManager then pcall(_G.CommitmentManager.MarkAllDirty) end
     print("[Sonorus] Caches cleared for loading")
 end)
 
@@ -87,16 +111,71 @@ RegisterHook("/Script/Engine.PlayerController:ClientRestart", function(Context, 
     Cache.ClearObjects()
     Cache.ClearAllEntities()  -- NPCs changed - force fresh FindAllOf
     Cache.InvalidateStatic()
+    -- Release all locked NPCs (including preview locks) - they become invalid after load
+    if ReleaseAllNPCs then pcall(ReleaseAllNPCs) end
+    -- Restore normal input mode (in case chat was open)
+    if SetInputModeGameOnly then pcall(SetInputModeGameOnly) end
+    -- Reset chat input state (prevents stale preview lock on new world)
+    if _G.ChatInputState then
+        _G.ChatInputState.active = false
+        _G.ChatInputState.text = ""
+    end
+    _G.ChatPreviewLock = nil
+    _G.STTPreviewLock = nil
+    -- Fresh time cache after load (delay to ensure scheduler is ready)
+    ExecuteInGameThreadWithDelay(500, function()
+        if RefreshTimeCache then pcall(RefreshTimeCache, true) end
+        if TimeDilation and TimeDilation.IsActive() then
+            TimeDilation.UpdateRate(true) -- Force update after load
+        end
+    end)
     -- Delay slightly to ensure UIManager is ready (runs on game thread)
     ExecuteInGameThreadWithDelay(1000, UpdatePlayerInfo)
+    -- Refresh house points after 2s (new save may have different standings)
+    ExecuteInGameThreadWithDelay(2000, function()
+        if RefreshHousePoints then RefreshHousePoints() end
+    end)
+    -- Commitment re-apply handled by timeUpdated event (CommitmentManager listens)
+    -- Reapply companion follow distance after 5s (CompanionManager config resets on load)
+    ExecuteInGameThreadWithDelay(5000, function()
+        if CompanionFollow then pcall(CompanionFollow.applySettings) end
+    end)
 end)
 
 -- Hook on fast travel completion - NPCs change after fast travel
 RegisterHook("/Script/Phoenix.FastTravelManager:FinishWait", function(Context)
     print("[Sonorus] Fast travel finished - clearing caches")
+    _G.SonorusState.playerLoaded = true  -- Fallback: if ClientRestart didn't fire, fast travel proves player is loaded
     Cache.ClearObjects()
     Cache.ClearAllEntities()  -- NPCs changed - force fresh FindAllOf
     Cache.InvalidateStatic()
+    -- Release all locked NPCs (including preview locks) - NPCs change after fast travel
+    if ReleaseAllNPCs then pcall(ReleaseAllNPCs) end
+    -- Restore normal input mode (in case chat was open)
+    if SetInputModeGameOnly then pcall(SetInputModeGameOnly) end
+    -- Reset chat input state
+    if _G.ChatInputState then
+        _G.ChatInputState.active = false
+        _G.ChatInputState.text = ""
+    end
+    _G.ChatPreviewLock = nil
+    _G.STTPreviewLock = nil
+    -- Fresh time cache + time dilation after fast travel (delay to ensure scheduler is ready)
+    ExecuteInGameThreadWithDelay(500, function()
+        if RefreshTimeCache then pcall(RefreshTimeCache, true) end
+        if TimeDilation and TimeDilation.IsActive() then
+            TimeDilation.UpdateRate(true) -- Force update after fast travel
+        end
+    end)
+    -- Refresh house points after 2s (in case time passed during travel)
+    ExecuteInGameThreadWithDelay(2000, function()
+        if RefreshHousePoints then RefreshHousePoints() end
+    end)
+    -- Commitment re-apply handled by timeUpdated event (CommitmentManager listens)
+    -- Reapply companion follow distance after 5s (CompanionManager config resets on fast travel)
+    ExecuteInGameThreadWithDelay(5000, function()
+        if CompanionFollow then pcall(CompanionFollow.applySettings) end
+    end)
 end)
 
 -- ============================================
@@ -133,10 +212,8 @@ modActorSearchHandle = LoopInGameThreadWithDelay(2000, function()
     local modactors = FindAllOf("ModActor_C")
     if modactors then
         for _, actor in ipairs(modactors) do
-            -- Wrap IsValid in pcall - corrupted references can crash
-            local isValid = false
-            pcall(function() isValid = actor:IsValid() end)
-            if isValid then
+            -- Use SafeIsValid - corrupted references can crash
+            if Utils.SafeIsValid(actor) then
                 -- Use class path to identify which mod the actor belongs to
                 pcall(function()
                     local class = actor:GetClass()
@@ -222,76 +299,57 @@ function SetupDialogueBlocker()
 end
 
 -- ============================================
--- Dialogue Tracker Hooks
+-- Dialogue Tracker Hook
 -- ============================================
-local dialogueTrackerSetup = false
-
-local function setupDialogueTracker()
-    if dialogueTrackerSetup then return end
-    dialogueTrackerSetup = true
-    print("[Sonorus] Setting up dialogue tracker...")
-
-    -- Hook InitAudioDialogueLineData
-    pcall(function()
-        RegisterHook("/Script/Phoenix.SubtitleElement:InitAudioDialogueLineData",
-            function(Context, AudioDialogueLineData)
-                if ProcessInitDialogueData then
-                    ProcessInitDialogueData(Context, AudioDialogueLineData)
-                end
-            end
-        )
-        print("[Sonorus] Hooked: InitAudioDialogueLineData")
-    end)
-
-    -- NOTE: BPAddSubtitleEvent is DEPRECATED - does not fire in practice
-    -- All dialogue (including player spells) is captured via InitAudioDialogueLineData
-    -- See CLAUDE.md for details
-
-    print("[Sonorus] Dialogue tracker ready")
-end
-
--- ============================================
--- Auto-setup dialogue tracker after delay
--- (Dialogue blocker is set up on first conversation)
--- ============================================
-ExecuteInGameThreadWithDelay(3000, function()
-    pcall(setupDialogueTracker)
-end)
+RegisterHook("/Script/Phoenix.SubtitleElement:InitAudioDialogueLineData",
+    function(Context, AudioDialogueLineData)
+        if ProcessInitDialogueData then
+            ProcessInitDialogueData(Context, AudioDialogueLineData)
+        end
+    end
+)
 
 -- ============================================
 -- Spell Tracking Hook
 -- ============================================
-local spellTrackerSetup = false
+RegisterHook("/Script/Phoenix.SpellTool:Start",
+    function(Context, loc, muzzleloc)
+        if OnSpellToolStart then
+            OnSpellToolStart(Context)
+        end
+    end
+)
 
-local function setupSpellTracker()
-    if spellTrackerSetup then return end
-    spellTrackerSetup = true
-    print("[Sonorus] Setting up spell tracker...")
+-- ============================================
+-- Death & Damage Tracking Hooks
+-- ============================================
 
-    pcall(function()
-        RegisterHook("/Script/Phoenix.SpellTool:Start",
-            function(Context, loc, muzzleloc)
-                -- Get the spell class name
-                local spellClass = nil
-                pcall(function()
-                    spellClass = Context:get():GetClass():GetFullName()
-                end)
+-- NPC death event
+RegisterHook("/Script/Phoenix.NPC_Character:CharacterDiedEvent",
+    function(Context)
+        if OnNPCDied then
+            OnNPCDied(Context)
+        end
+    end
+)
 
-                if spellClass and RecordSpellCast then
-                    RecordSpellCast(spellClass)
-                end
-            end
-        )
-        print("[Sonorus] Hooked: SpellTool:Start")
-    end)
+-- Companion damaged (has damage amount and instigator)
+RegisterHook("/Script/Phoenix.CompanionManager:OnCompanionDamaged",
+    function(Context, InActor, InInstigator, InDamage, InHit)
+        if OnCompanionDamaged then
+            OnCompanionDamaged(Context, InActor, InInstigator, InDamage, InHit)
+        end
+    end
+)
 
-    print("[Sonorus] Spell tracker ready")
-end
-
--- Setup spell tracker after a delay (alongside dialogue tracker)
-ExecuteInGameThreadWithDelay(3000, function()
-    pcall(setupSpellTracker)
-end)
+-- Register EnemyAIComponent:OnActorDamaged hook
+RegisterHook("/Script/Phoenix.EnemyAIComponent:OnActorDamaged",
+    function(Context, InActor, InInstigator, InDamage, InHit)
+        if OnEnemyDamaged then
+            OnEnemyDamaged(Context, InActor, InInstigator, InDamage, InHit)
+        end
+    end
+)
 
 -- ============================================
 -- Broom State (polling in logic.lua unified loop)

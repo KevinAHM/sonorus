@@ -7,8 +7,21 @@ print("[Sonorus] logic.lua starting...")
 -- Clear module caches so they reload with logic.lua (F11)
 -- Note: Cache.lua uses _G.CacheStore for data persistence, so clearing
 -- the module only reloads code, not cached data
+-- NOTE: package.loaded clearing alone is NOT sufficient - UE4SS caches file
+-- contents at a lower level. Modules that need reliable hot reload use dofile().
 package.loaded["Utils.Utils"] = nil
 package.loaded["Utils.Cache"] = nil
+package.loaded["Utils.Events"] = nil
+package.loaded["Utils.FileIO"] = nil
+package.loaded["Utils.BlueprintHelpers"] = nil
+package.loaded["Utils.AudioMute"] = nil
+package.loaded["Utils.NPCFacial"] = nil
+package.loaded["Utils.AudioZone"] = nil
+package.loaded["Utils.LipSync"] = nil
+package.loaded["Utils.NPCLock"] = nil
+package.loaded["Utils.PlayerGear"] = nil
+package.loaded["Utils.Combat"] = nil
+package.loaded["Utils.TimeDilation"] = nil
 
 -- Lipsync enabled (was disabled for lag diagnosis)
 _G.DisableLipsync = false
@@ -23,8 +36,10 @@ if _G.SocketClient then
     print("[Sonorus] Socket closed for reconnect")
 end
 
--- Clear require cache for socket_client so it can be hot-reloaded
+-- Force fresh file read for socket_client (UE4SS caches file contents)
+-- Clear all possible caches
 package.loaded["socket_client"] = nil
+package.preload["socket_client"] = nil
 
 -- JSON library (rxi/json)
 local json = require "json"
@@ -35,14 +50,79 @@ local Cache = require "Utils.Cache"
 -- Utils module
 local Utils = require "Utils.Utils"
 
+-- Event system
+local Events = require "Utils.Events"
+_G.Events = Events  -- Expose globally for other modules
+
+-- File I/O helpers
+local FileIO = require "Utils.FileIO"
+
+-- Blueprint helpers
+local BlueprintHelpers = require "Utils.BlueprintHelpers"
+
+-- Audio muting helpers
+local AudioMute = require "Utils.AudioMute"
+
+-- NPC facial component helpers
+local NPCFacial = require "Utils.NPCFacial"
+
+-- Audio zone/reverb detection
+local AudioZone = require "Utils.AudioZone"
+
+-- Lip sync system
+local LipSync = require "Utils.LipSync"
+
+-- NPC attention lock system (dofile forces fresh file read on F11 - require uses stale cache)
+local NPCLock = dofile(_G.SonorusScriptsPath .. "Utils/NPCLock.lua")
+local CompanionFollow = dofile(_G.SonorusScriptsPath .. "Utils/CompanionFollow.lua")
+
+-- Player gear system
+local PlayerGear = require "Utils.PlayerGear"
+
+-- Combat tracking system
+local Combat = require "Utils.Combat"
+
+-- UE Helpers
+local UEHelpers = require("UEHelpers")
+
+-- Time dilation system
+local TimeDilation = require "Utils.TimeDilation"
+
+-- Helper to expose all module functions as globals
+local function expose(...)
+    for _, module in ipairs({...}) do
+        for name, func in pairs(module) do
+            -- Only expose functions, skip private/internal names starting with _
+            if type(func) == "function" and not name:match("^_") then
+                _G[name] = func
+            end
+        end
+    end
+end
+
+-- Auto-expose module functions as globals (import *)
+expose(BlueprintHelpers, AudioZone, PlayerGear, NPCLock, NPCFacial, FileIO, AudioMute, LipSync, TimeDilation)
+
+-- Safe IsValid check (from BlueprintHelpers)
+local SafeIsValid = BlueprintHelpers.SafeIsValid
+
+-- Clear event listeners on reload (states persist, handlers re-register below)
+Events.clear()
+
 -- Socket client for Python server communication (lipsync, visemes)
 -- NOTE: socket_client.lua sets _G.SocketClient, use that directly (no local shadow)
-require "socket_client"
+-- Use dofile instead of require to force fresh file read on hot reload
+dofile(_G.SonorusScriptsPath .. "socket_client.lua")
 
 -- On reload: immediately try to reconnect (don't wait for unified loop tick)
 -- This ensures chat works right away after F11
-_G.SocketClient.connect()
+ExecuteInGameThread(function()
+    _G.SocketClient.connect()
+end)
 print("[Sonorus] Socket reconnect triggered")
+
+-- Commitment manager for NPC schedule overrides (dofile for hot reload)
+_G.CommitmentManager = dofile(_G.SonorusScriptsPath .. "CommitmentManager.lua")
 
 -- ============================================
 -- Access global state from main.lua
@@ -58,6 +138,15 @@ _G.SonorusServerState = _G.SonorusServerState or {
     startupTime = 0,            -- When startup began (for timeout)
 }
 
+-- House Points cache (persisted across F11 reloads)
+-- Only refreshed at specific trigger points, not every context update
+_G.CachedHousePoints = _G.CachedHousePoints or {
+    data = nil,        -- { Gryffindor = {season, month, week, day}, ... }
+    lastRefresh = 0,   -- os.clock() timestamp
+}
+
+-- Combat tracking state is now initialized in Utils/Combat.lua
+
 -- ============================================
 -- File paths
 -- ============================================
@@ -66,12 +155,159 @@ local FILES = {
     subtitles = "sonorus\\data\\subtitles.json",
     locations = "sonorus\\data\\locations.json",
     localization = "sonorus\\data\\main_localization.json",
+    voiceManifest = "sonorus\\data\\voice_manifest.json",
     spellMappings = "sonorus\\data\\spell_mappings.json",
 }
 
+-- Get language-specific file path for localization files
+-- EN_US uses base filename, others use suffix (e.g., subtitles_de_de.json)
+local function GetLocalizedPath(baseName, extension)
+    local lang = _G.SonorusLanguage or "EN_US"
+    if lang == "EN_US" then
+        return "sonorus\\data\\" .. baseName .. extension
+    else
+        -- Convert EN_US -> en_us for filename suffix
+        local suffix = "_" .. lang:lower()
+        return "sonorus\\data\\" .. baseName .. suffix .. extension
+    end
+end
+
 -- ============================================
--- Debug: F7 Debug Function (hot-reloadable)
+-- Static Cache Functions (used throughout file)
 -- ============================================
+-- These must be defined early as they're used by many functions below
+
+-- Permanent statics: class/default objects that never change. Fetched once.
+_G._PermanentStatics = _G._PermanentStatics or {}
+
+local function EnsurePermanentStatics(data)
+    local ps = _G._PermanentStatics
+    if not ps.initialized then
+        ps.bpLibrary = StaticFindObject("/Script/Phoenix.Default__PhoenixBPLibrary")
+        ps.gearScreen = StaticFindObject("/Script/Phoenix.Default__GearScreen")
+        ps.npcComponentClass = StaticFindObject("/Script/Phoenix.NPC_Component")
+        ps.audioStatics = StaticFindObject("/Script/Phoenix.Default__AvaAudioGameplayStatics")
+        ps.akComponentClass = StaticFindObject("/Script/AkAudio.AkComponent")
+        ps.facialComponentClass = StaticFindObject("/Script/AvaAnimation.FacialComponent")
+        ps.kismetSystem = UEHelpers.GetKismetSystemLibrary()
+        ps.kismetMath = UEHelpers.GetKismetMathLibrary()
+        ps.initialized = true
+    end
+    data.bpLibrary = ps.bpLibrary
+    data.gearScreen = ps.gearScreen
+    data.npcComponentClass = ps.npcComponentClass
+    data.audioStatics = ps.audioStatics
+    data.akComponentClass = ps.akComponentClass
+    data.facialComponentClass = ps.facialComponentClass
+    data.kismetSystem = ps.kismetSystem
+    data.kismetMath = ps.kismetMath
+end
+
+-- Dynamic refresh: only objects that change on load/fast travel
+local function RefreshStaticData(data)
+    -- Permanent statics (fetched once, then just copied)
+    EnsurePermanentStatics(data)
+
+    -- Dynamic singletons (change on load/fast travel)
+    data.playerController = FindFirstOf("PlayerController")
+    if data.playerController then
+        local valid = false
+        pcall(function() valid = data.playerController:IsValid() end)
+        if valid then
+            pcall(function() data.cameraManager = data.playerController.PlayerCameraManager end)
+        end
+    end
+
+    data.player = FindFirstOf("Biped_Player")
+    if data.player then
+        local valid = false
+        pcall(function() valid = data.player:IsValid() end)
+        if valid then
+            pcall(function() data.playerFullName = data.player:GetFullName() end)
+        end
+    end
+
+    data.companionManager = FindFirstOf("CompanionManager")
+    data.gearManager = FindFirstOf("GearManager")
+    data.populationManager = FindFirstOf("PopulationManager")
+
+    -- Mark primary object for validity checks
+    data._primary = data.playerController
+end
+
+-- Get cached NPCs (initializes on first call, cleans periodically)
+local function GetCachedNPCs()
+    -- Initialize if needed (one-time FindAllOf)
+    if not Cache.IsEntityCacheReady("NPC") then
+        Cache.InitEntities("NPC", "NPC_Character")
+        -- Safety: clear stale mute state when NPC cache is rebuilt (AkComponents may be invalid)
+        if _G.PlaybackState and _G.PlaybackState.serverState == "idle" then
+            UnmuteAllSpeakers()
+        end
+    end
+
+    -- Cleanup invalid entries periodically (every 5s)
+    Cache.CleanEntities("NPC", 5)
+
+    local npcs = Cache.GetEntities("NPC")
+
+    -- Fallback: If cache is empty but was initialized, try re-initializing once
+    -- This handles cases where all NPCs became invalid (area transition, etc.)
+    if #npcs == 0 and Cache.IsEntityCacheReady("NPC") then
+        print("[GetCachedNPCs] Cache empty after cleanup - reinitializing")
+        Cache.ResetEntityCache("NPC")  -- Clear initialized flag
+        Cache.InitEntities("NPC", "NPC_Character")  -- Re-scan
+        -- Safety: clear stale mute state when NPC cache is rebuilt
+        if _G.PlaybackState and _G.PlaybackState.serverState == "idle" then
+            UnmuteAllSpeakers()
+        end
+        npcs = Cache.GetEntities("NPC")
+    end
+
+    return npcs
+end
+
+-- Get static cache (refreshes every 30s or when invalid)
+local function GetStaticCache()
+    return Cache.GetStatic(RefreshStaticData, 30)
+end
+
+-- Initialize NPCLock module with static cache getter
+NPCLock.init(GetStaticCache)
+
+-- Initialize CompanionFollow module (exposed as global for main.lua hooks)
+CompanionFollow.init(GetStaticCache)
+CompanionFollow.start()
+_G.CompanionFollow = CompanionFollow
+
+-- Initialize LipSync module
+LipSync.init()
+
+-- Export GetStaticCache globally (needed by LipSync and other modules)
+_G.GetStaticCache = GetStaticCache
+
+--- Check if companion is on broom via CharacterMovementComponent
+--- @param companionPawn UObject The companion pawn actor
+--- @param staticData table Cached static data (unused, kept for API compatibility)
+--- @return boolean True if companion is on broom
+local function IsCompanionOnBroom(companionPawn, staticData)
+    if not companionPawn then return false end
+
+    local isFlying = false
+    pcall(function()
+        local movementComp = companionPawn.CharacterMovement
+        if movementComp and movementComp:IsValid() then
+            -- MovementMode: 0=Flying/Broom, 1=Walking
+            local mode = movementComp.MovementMode
+            if mode == 0 then
+                isFlying = true
+            end
+        end
+    end)
+
+    return isFlying
+end
+
 -- ============================================
 -- NPC Facial Component Access
 -- ============================================
@@ -98,54 +334,6 @@ local FILES = {
 --   StationComponent (ObjectProperty) - controls NPC behavior at station
 --   MissionID (StructProperty) - which mission this station belongs to
 --   MissionUID (IntProperty) - unique mission ID
-
---- Get FacialComponent from an NPC actor
---- @param npc userdata The NPC actor
---- @return userdata|nil The FacialComponent, or nil if not found
-function GetNPCFacialComponent(npc)
-    if not npc then return nil end
-
-    local staticData = Cache.GetStaticData()
-    local facialClass = staticData and staticData.facialComponentClass
-    if not facialClass then return nil end
-
-    local facialComp = nil
-    local ok = pcall(function()
-        facialComp = npc:GetComponentByClass(facialClass)
-    end)
-
-    return ok and facialComp or nil
-end
-
---- Stop ambient dialogue lip sync on an NPC
---- @param npc userdata The NPC actor
---- @return boolean success Whether the cancel succeeded
-function StopNPCDialogueLipSync(npc)
-    local facialComp = GetNPCFacialComponent(npc)
-    if not facialComp then return false end
-
-    local result = false
-    local ok = pcall(function()
-        result = facialComp:EditorCancelPlayingCurrentDialogueLine()
-    end)
-
-    return ok and result
-end
-
---- Check if NPC is currently playing dialogue lip sync
---- @param npc userdata The NPC actor
---- @return boolean isPlaying
-function IsNPCPlayingDialogueLipSync(npc)
-    local facialComp = GetNPCFacialComponent(npc)
-    if not facialComp then return false end
-
-    local isPlaying = false
-    pcall(function()
-        isPlaying = facialComp:IsPlayingDialogueLine()
-    end)
-
-    return isPlaying
-end
 
 -- ============================================
 -- NPC Animation System (Blueprint-based)
@@ -181,420 +369,6 @@ function PlayNPCEmote(actor, emoteName)
 end
 
 -- ============================================
--- NPC Attention Lock System
--- ============================================
--- Makes NPCs walk towards target and lock in place for conversations
-
--- Persisted state for locked NPCs
-_G.LockedNPCs = _G.LockedNPCs or {}
-_G.LockedNPCNames = _G.LockedNPCNames or {}  -- lockId -> normalized name (for thread-safe lookup)
-local lockIdCounter = 0
-
--- Static NPCs - can't or shouldn't move to face you, use no-op lock
--- Check is by NPC name. Station-based checks (e.g., desks) are handled separately.
-local STATIC_NPCS = {
-    -- Portraits
-    ["FerdinandOctaviusPratt"] = true,
-    ["FatLady"] = true,
-    ["MaryDunne"] = true,
-    ["LethiaBurbley"] = true,
-    ["SirCadogan"] = true,
-    ["MusicConductor"] = true,
-    ["SylviaPembroke"] = true,
-    ["OgleThePortrait"] = true,
-    -- Ghosts (animation overrides rotation)
-    ["CuthbertBinns"] = true,
-}
-
---- Check if player is in a state where NPC locking should be disabled
---- @return boolean canLock, string|nil reason
-local function CanLockNPCs()
-    -- Check broom
-    if _G.BroomState and _G.BroomState.mounted then
-        return false, "on broom"
-    end
-
-    -- Check combat
-    local staticData = Cache.GetStaticData()
-    local player = staticData and staticData.player
-    if player then
-        local inCombat = false
-        pcall(function() inCombat = player.bInCombatMode or false end)
-        if inCombat then
-            return false, "in combat"
-        end
-    end
-
-    return true, nil
-end
-
---- Check if an NPC is the player's current companion
---- @param npc userdata The NPC actor to check
---- @return boolean isCompanion, userdata|nil companionManager
-local function IsCompanion(npc)
-    if not npc then return false, nil end
-
-    local success, isComp, mgr = pcall(function()
-        local staticData = Cache.GetStaticData()
-        local companionMgr = staticData and staticData.companionManager
-        if not companionMgr then return false, nil end
-
-        local companionPawn = companionMgr:GetPrimaryCompanionPawn()
-        if not companionPawn then return false, companionMgr end
-
-        -- Compare by full name (UObject == doesn't work reliably in Lua)
-        local npcName = npc:GetFullName()
-        local compName = companionPawn:GetFullName()
-
-        if npcName == compName then
-            print("[NPCLock] Detected companion: " .. tostring(npcName):sub(1,60))
-            return true, companionMgr
-        end
-        return false, companionMgr
-    end)
-
-    if success then return isComp, mgr end
-    return false, nil
-end
-
---- Release all currently locked NPCs
-function ReleaseAllNPCs()
-    local count = 0
-    for lockId, _ in pairs(_G.LockedNPCs) do
-        ReleaseNPC(lockId)
-        count = count + 1
-    end
-    -- Safety clear of name cache
-    _G.LockedNPCNames = {}
-    if count > 0 then
-        print("[NPCLock] Released all " .. count .. " locked NPCs")
-    end
-end
-
---- Find existing lock for an NPC (if already locked)
---- @param npc userdata The NPC actor to check
---- @return number|nil lockId if found, nil otherwise
-local function FindExistingLock(npc)
-    for lockId, data in pairs(_G.LockedNPCs) do
-        if data.npc == npc then
-            return lockId
-        end
-    end
-    return nil
-end
-
---- Check if an NPC (by name) is currently in an AI conversation (locked)
---- Uses cached names for thread-safe lookup (no UObject access)
---- @param name string The NPC name (voiceName or speakerName) to check
---- @return boolean isInConversation true if NPC is locked in a conversation
-function IsNPCInConversation(name)
-    if not name or name == "" or name == "Unknown" then
-        return false
-    end
-
-    -- Normalize for comparison (remove spaces, lowercase)
-    local nameNormalized = name:gsub(" ", ""):lower()
-
-    -- Check against cached names (thread-safe, no UObject access)
-    for _, cachedName in pairs(_G.LockedNPCNames) do
-        if cachedName == nameNormalized then
-            return true
-        end
-    end
-
-    return false
-end
-
---- Lock an NPC to face a target actor
---- If NPC is already locked, updates their target and re-locks
---- @param npc userdata The NPC actor to lock
---- @param targetActor userdata The actor to face (usually player)
---- @param onLocked function|nil Optional callback when NPC is locked in place
---- @return number|nil lockId ID to use with ReleaseNPC, or nil on failure
-function LockNPCToTarget(npc, targetActor, onLocked)
-    if not npc or not targetActor then
-        print("[NPCLock] Missing npc or targetActor")
-        return nil
-    end
-
-    -- Check if locking is allowed
-    local canLock, reason = CanLockNPCs()
-    if not canLock then
-        print("[NPCLock] Cannot lock NPC: " .. tostring(reason))
-        return nil
-    end
-
-    -- Check if NPC is already locked - if so, release first (new target)
-    local existingLock = FindExistingLock(npc)
-    if existingLock then
-        print("[NPCLock] NPC already locked (id=" .. existingLock .. "), updating target")
-        ReleaseNPC(existingLock)
-    end
-
-    -- Get PopulationManager from cache
-    local staticData = Cache.GetStatic(RefreshStaticData, 30)
-    local popManager = staticData and staticData.populationManager
-    if not popManager then
-        print("[NPCLock] PopulationManager not found")
-        return nil
-    end
-
-    -- Get ScheduledEntity
-    local scheduledEntity = nil
-    pcall(function()
-        scheduledEntity = popManager:GetScheduledEntityFromActor(npc, false)
-    end)
-    if not scheduledEntity then
-        print("[NPCLock] No ScheduledEntity for this NPC")
-        return nil
-    end
-
-    -- Generate lock ID
-    lockIdCounter = lockIdCounter + 1
-    local lockId = lockIdCounter
-
-    -- Get NPC name for checks and caching
-    local npcName = nil
-    pcall(function()
-        local lib = staticData and staticData.bpLibrary
-        if lib then
-            local nameResult = lib:GetActorName(npc)
-            if nameResult then
-                npcName = nameResult:ToString()
-            end
-        end
-    end)
-
-    -- Check if NPC should be static (no-op lock) - by name or station type
-    local isStatic = false
-    local staticReason = nil
-
-    -- Check by NPC name (portraits, ghosts, etc.)
-    if npcName and STATIC_NPCS[npcName:gsub(" ", "")] then
-        isStatic = true
-        staticReason = "static NPC"
-    end
-
-    -- Check by station type (desks, etc.)
-    if not isStatic then
-        pcall(function()
-            local station = scheduledEntity:GetActiveStation()
-            if station then
-                local owner = station:GetOwner()
-                if owner then
-                    local ownerName = nil
-                    pcall(function() ownerName = owner:GetFullName() end)
-                    if ownerName and ownerName:find("Desk") then
-                        isStatic = true
-                        staticReason = "at desk"
-                    end
-                end
-            end
-        end)
-    end
-
-    -- Create no-op lock for static NPCs
-    if isStatic then
-        if npcName then
-            _G.LockedNPCNames[lockId] = npcName:gsub(" ", ""):lower()
-        end
-        _G.LockedNPCs[lockId] = {
-            npc = npc,
-            targetActor = targetActor,
-            scheduledEntity = nil,
-            locked = true,
-            isStaticLock = true
-        }
-        print("[NPCLock] Static lock (" .. staticReason .. "): " .. tostring(npcName))
-        return lockId
-    end
-
-    -- Cache NPC name for thread-safe lookup (used by IsNPCInConversation)
-    if npcName and npcName ~= "" then
-        _G.LockedNPCNames[lockId] = npcName:gsub(" ", ""):lower()
-    end
-
-    -- Check if this is the companion - use simpler lock (just StopMovement)
-    local isCompanion, companionMgr = IsCompanion(npc)
-    if isCompanion and companionMgr then
-        -- For companions: ONLY use StopMovement, don't touch ScheduledEntity
-        pcall(function() companionMgr:StopMovement(true) end)
-        _G.LockedNPCs[lockId] = {
-            npc = npc,
-            targetActor = targetActor,
-            scheduledEntity = nil,  -- Don't use ScheduledEntity for companions
-            locked = true,
-            isCompanionLock = true  -- Flag for special release
-        }
-        print("[NPCLock] Companion locked via StopMovement (id=" .. lockId .. ")")
-        return lockId
-    end
-
-    -- Normal NPC lock path (non-companions)
-    -- Store state (including target for angle checking)
-    _G.LockedNPCs[lockId] = {
-        npc = npc,
-        targetActor = targetActor,
-        scheduledEntity = scheduledEntity,
-        locked = false
-    }
-
-    -- Step 1: AbandonStations
-    pcall(function() scheduledEntity:AbandonStations(0) end)
-
-    -- Step 2: Calculate angle to target to decide if we need to turn
-    local needsTurn = false
-    local targetPos = nil
-    pcall(function()
-        local tgtLoc = targetActor:K2_GetActorLocation()
-        local npcLoc = npc:K2_GetActorLocation()
-        local npcRot = npc:K2_GetActorRotation()
-
-        local dirX = tgtLoc.X - npcLoc.X
-        local dirY = tgtLoc.Y - npcLoc.Y
-        local dist = math.sqrt(dirX * dirX + dirY * dirY)
-
-        if dist > 1 then
-            dirX = dirX / dist
-            dirY = dirY / dist
-
-            -- Calculate angle to target
-            local angleToTarget = math.atan(dirY / dirX) * 180 / math.pi
-            if dirX < 0 then
-                angleToTarget = angleToTarget + 180
-            end
-
-            -- NPC's current yaw
-            local npcYaw = npcRot.Yaw or 0
-
-            -- Angle difference (normalize to -180 to 180)
-            local diff = angleToTarget - npcYaw
-            while diff > 180 do diff = diff - 360 end
-            while diff < -180 do diff = diff + 360 end
-
-            -- If angle > 45 degrees, need animated turn
-            needsTurn = math.abs(diff) > 45
-
-            -- Target position for move task
-            targetPos = {
-                X = npcLoc.X + dirX * 1,
-                Y = npcLoc.Y + dirY * 1,
-                Z = npcLoc.Z
-            }
-        else
-            targetPos = {X = npcLoc.X, Y = npcLoc.Y, Z = npcLoc.Z}
-        end
-    end)
-
-    if not targetPos then
-        print("[NPCLock] Failed to calculate target position")
-        _G.LockedNPCs[lockId] = nil
-        _G.LockedNPCNames[lockId] = nil
-        return nil
-    end
-
-    -- Always: Enable scheduling, issue move task
-    -- NOTE: We MUST issue a task before disabling scheduling. Disabling scheduling
-    -- alone doesn't stop the NPC - they need an active task assigned first, THEN
-    -- disabling scheduling freezes them mid-task. Without a task, they just continue
-    -- their normal station behavior.
-    pcall(function() scheduledEntity:EnableScheduling(true, false, true) end)
-    pcall(function()
-        scheduledEntity:PerformTask_MoveToLocation(targetPos, 150, 30, false, 0, nil)
-    end)
-
-    if needsTurn then
-        -- Angle > 45: Wait 500ms for turn animation, then disable
-        -- Store lockId in global for delayed callback (avoids closure capture issues)
-        _G._PendingLockId = lockId
-        _G._PendingOnLocked = onLocked
-        ExecuteInGameThreadWithDelay(500, function()
-            if _G.DevPrint then _G.DevPrint("[DEBUG] LockNPC delay callback START") end
-            local capturedLockId = _G._PendingLockId
-            local capturedOnLocked = _G._PendingOnLocked
-            local ok, err = pcall(function()
-                local data = _G.LockedNPCs[capturedLockId]
-                if not data then return end
-
-                pcall(function()
-                    data.scheduledEntity:EnableScheduling(false, true, true)
-                end)
-                data.locked = true
-                print("[NPCLock] NPC locked after turn (id=" .. capturedLockId .. ")")
-
-                if capturedOnLocked then
-                    pcall(capturedOnLocked)
-                end
-            end)
-            if not ok and _G.DevPrint then _G.DevPrint("[DEBUG] LockNPC error: " .. tostring(err)) end
-            if _G.DevPrint then _G.DevPrint("[DEBUG] LockNPC delay callback END") end
-        end)
-    else
-        -- Angle < 45: Immediately disable (no movement needed)
-        pcall(function()
-            scheduledEntity:EnableScheduling(false, true, true)
-        end)
-        _G.LockedNPCs[lockId].locked = true
-        print("[NPCLock] NPC locked immediately (id=" .. lockId .. ")")
-
-        if onLocked then
-            pcall(onLocked)
-        end
-    end
-
-    print("[NPCLock] Started lock sequence (id=" .. lockId .. ")")
-    return lockId
-end
-
---- Release a locked NPC
---- @param lockId number The ID returned by LockNPCToTarget
-function ReleaseNPC(lockId)
-    local data = _G.LockedNPCs[lockId]
-    if not data then
-        print("[NPCLock] No lock found for id=" .. tostring(lockId))
-        return
-    end
-
-    -- Companion lock: just restore movement
-    if data.isCompanionLock then
-        pcall(function()
-            local staticData = Cache.GetStaticData()
-            local companionMgr = staticData and staticData.companionManager
-            if companionMgr then
-                companionMgr:StopMovement(false)
-            end
-        end)
-        _G.LockedNPCs[lockId] = nil
-        _G.LockedNPCNames[lockId] = nil
-        print("[NPCLock] Companion released (id=" .. lockId .. ")")
-        return
-    end
-
-    -- Static lock: nothing to restore (no-op lock for portraits, desk NPCs, etc.)
-    if data.isStaticLock then
-        _G.LockedNPCs[lockId] = nil
-        _G.LockedNPCNames[lockId] = nil
-        print("[NPCLock] Static NPC released (id=" .. lockId .. ")")
-        return
-    end
-
-    -- Normal NPC: clear task and re-enable scheduling
-    pcall(function()
-        data.scheduledEntity:PerformTask_RemoveActivePerformTask()
-    end)
-    pcall(function()
-        data.scheduledEntity:EnableScheduling(true, false, true)
-    end)
-
-    _G.LockedNPCs[lockId] = nil
-    _G.LockedNPCNames[lockId] = nil
-    print("[NPCLock] NPC released (id=" .. lockId .. ")")
-end
-
--- Test lock ID for F7 toggle testing
-_G.TestLockId = nil
-
--- ============================================
 -- Player Voice ID Detection
 -- ============================================
 -- Returns "PlayerMale" or "PlayerFemale" based on character gender
@@ -617,318 +391,1235 @@ function GetPlayerVoiceId()
     return voiceId
 end
 
--- Gear Slot ID Enum
-local EGearSlotID = {
-    HEAD = 0,
-    OUTFIT = 1,
-    BACK = 2,
-    NECK = 3,
-    HAND = 4,
-    FACE = 5,
+-- PropTypeIDs enum -> NPC-friendly description
+-- From /Script/Phoenix.PropTypeIDs in UE4SS object dump
+local PROP_TYPE_LABELS = {
+    [0]  = "bed",
+    [1]  = "bench",
+    [2]  = "bench",
+    [3]  = "bespoke",
+    [4]  = "bookshelf",
+    [5]  = "browsing shelf",
+    [6]  = "candy display",
+    [7]  = "chair",
+    [8]  = "chair",
+    [9]  = "chest",
+    [10] = "cleaning shelves",
+    [11] = "couch",
+    [12] = "couch",
+    [13] = "couch",
+    [14] = "couch",
+    [15] = "desk",
+    [16] = "desk",
+    [17] = "dresser",
+    [18] = "drinking tea",
+    [19] = "fireside",
+    [20] = "fireside bench",
+    [21] = "fluid",
+    [22] = "globe",
+    [23] = "great hall table",
+    [24] = "great hall table",
+    [25] = "great hall table",
+    [26] = "sitting on ground",
+    [27] = "guard post",
+    [28] = "herbology station",
+    [29] = "investigating",
+    [30] = "job station",
+    [31] = "lounge chair",
+    [32] = "mail interaction",
+    [33] = "mission interaction",
+    [34] = nil, -- NONE (area/zone marker, not a real station)
+    [35] = "occupation",
+    [36] = "office desk",
+    [37] = "patrol",
+    [38] = "potion station",
+    [39] = "railing lean",
+    [40] = "railing lean",
+    [41] = "shop register",
+    [42] = "service counter",
+    [43] = "stairs",
+    [44] = "sitting on stairs",
+    [45] = "sitting on stairs",
+    [46] = "standing",
+    [47] = "standing",
+    [48] = "standing",
+    [49] = "standing",
+    [50] = "standing",
+    [51] = "standing",
+    [52] = "standing in queue",
+    [53] = "tall stool",
+    [54] = "study desk",
+    [55] = "table",
+    [56] = "table",
+    [57] = "table",
+    [58] = "table",
+    [59] = "table",
+    [60] = "taking notes",
+    [61] = "teacher's chair",
+    [62] = "drinking tea",
+    [63] = "telescope",
+    [64] = "vendor stall",
+    [65] = "wall lean",
+    [66] = "wall sit",
+    [67] = "wardrobe",
+    [68] = "window shopping",
 }
 
-local GearSlotNames = {
-    [0] = "HEAD",
-    [1] = "OUTFIT",
-    [2] = "BACK",
-    [3] = "NECK",
-    [4] = "HAND",
-    [5] = "FACE",
-}
+-- Clean up stale gaze state from previous session (survives F11 reload)
+if _G.DebugGazeLoop then
+    pcall(function() CancelDelayedAction(_G.DebugGazeLoop) end)
+    _G.DebugGazeLoop = nil
+end
+_G.DebugGazeTarget = nil
+_G.DebugFaceTarget = nil
+-- Test counter: cycles through tests one at a time (persists across F11)
+_G.DebugGazeTestIdx = _G.DebugGazeTestIdx or 0
+
+-- Clean up stale blendshape debug state from previous session
+if _G.DebugBlendshapeLoop then
+    pcall(function() CancelDelayedAction(_G.DebugBlendshapeLoop) end)
+    _G.DebugBlendshapeLoop = nil
+end
+if _G._OrigGetCurrentSpeakerActor then
+    _G.GetCurrentSpeakerActor = _G._OrigGetCurrentSpeakerActor
+    _G._OrigGetCurrentSpeakerActor = nil
+end
+_G.DebugBlendshapeTestIdx = _G.DebugBlendshapeTestIdx or 0
+_G.DebugBlendshapeActor = nil
 
 -- ============================================
--- Get Player Gear (structured table)
+-- F7 Debug Function - Blendshape/Morph Target Tuning
+-- Press F7 to cycle through each morph target at max and mapped amplitude
+-- Look at an NPC before pressing F7 to select them as the target
 -- ============================================
--- Returns table with all equipped gear info:
--- {
---   HEAD = { name = "Display Name", id = "Head_068_Legendary", transmogged = true, appearance = "Other Item Name" },
---   OUTFIT = { name = "Display Name", id = "Outfit_089_Legendary", transmogged = false },
---   ...
---   WAND = { equipped = true },
---   HOOD = { up = false }
--- }
-function GetPlayerGear()
-    local gear = {}
 
-    -- Slot names (defined locally to avoid scope issues)
-    local slotNames = {
-        [0] = "HEAD",
-        [1] = "OUTFIT",
-        [2] = "BACK",
-        [3] = "NECK",
-        [4] = "HAND",
-        [5] = "FACE",
-    }
+-- Morph target names for the 6 new direct targets
+local MORPH_NAMES = {"mouth_press", "upr_lip_up_l", "upr_lip_up_r", "ee", "o", "shh"}
 
-    -- Get player and GearManager from cache
-    local staticData = Cache.GetStaticData()
-    local player = staticData and staticData.player
-    if not player then return nil end
-
-    local gearManager = staticData.gearManager
-    if not gearManager then return nil end
-
-    -- Get player's ActorId for appearance lookups
-    local playerActorId = nil
+-- Helper: reset all morph targets on an actor (both Blueprint and direct)
+local function ResetAllMorphTargets(actor)
+    BlueprintHelpers.CallSetBlendshapes(actor, 0, 0, 0, 0, 0, 0, 0, 0, 0)
     pcall(function()
-        local staticData = Cache.GetStaticData()
-        local bpLib = staticData and staticData.bpLibrary
-        if bpLib then
-            local outTable = {}
-            bpLib:GetActorId(player, outTable)
-            if outTable.OutActorId then
-                playerActorId = outTable.OutActorId:ToString()
+        local mesh = actor.Mesh
+        if mesh then
+            for _, name in ipairs(MORPH_NAMES) do
+                mesh:SetMorphTarget(FName(name), 0, false)
             end
         end
     end)
+end
 
-    -- Get each gear slot
-    for slotId = 0, 5 do
-        local slotName = slotNames[slotId]
-        local slotData = { equipped = false }
+-- Helper: apply a blendshape test configuration
+-- config = { jaw=0, smile=0, funnel=0, press=0, lip_up=0, ee=0, o=0, shh=0 }
+local function ApplyBlendshapeConfig(actor, config)
+    local jaw = config.jaw or 0
+    local smile = config.smile or 0
+    local funnel = config.funnel or 0
 
-        pcall(function()
-            local gearItemId = gearManager:GetActorEquippedGearItemID(player, slotId)
-            if gearItemId and gearItemId.IsEquipped then
-                slotData.equipped = true
+    -- Apply Blueprint-driven shapes
+    BlueprintHelpers.CallSetBlendshapes(
+        actor,
+        jaw,                -- jaw_drop
+        smile,              -- smile_l
+        smile,              -- smile_r
+        funnel,             -- lwr_lip_funl_l
+        funnel,             -- lwr_lip_funl_r
+        funnel * 0.7,       -- upr_lip_funl_l
+        funnel * 0.7,       -- upr_lip_funl_r
+        jaw * 0.3,          -- lwr_lip_dn_l
+        jaw * 0.3           -- lwr_lip_dn_r
+    )
 
-                -- Get GearID (stats item)
-                local gearId = nil
-                pcall(function()
-                    local fname = gearItemId.GearID
-                    if fname then pcall(function() gearId = fname:ToString() end) end
-                end)
-                slotData.id = gearId
-                slotData.name = GetDisplayName(gearId)
-
-                -- Check for transmog
-                local hasOverride = false
-                pcall(function()
-                    hasOverride = gearManager:DoesGearHaveAppearanceOverride(gearItemId)
-                end)
-
-                if hasOverride and playerActorId then
-                    slotData.transmogged = true
-                    -- Get the appearance override
-                    pcall(function()
-                        local result = gearManager:GetEquippedGearAppearanceOverrideID(playerActorId, slotId)
-                        if result then
-                            local appearanceId = nil
-                            pcall(function() appearanceId = result:ToString() end)
-                            if appearanceId and appearanceId ~= "" and appearanceId ~= "None" then
-                                slotData.appearanceId = appearanceId
-                                slotData.appearance = GetDisplayName(appearanceId)
-                            end
-                        end
-                    end)
-                else
-                    slotData.transmogged = false
-                end
-            end
-        end)
-
-        gear[slotName] = slotData
-    end
-
-    -- Hood status
+    -- Apply direct morph targets
     pcall(function()
-        gear.HOOD = { up = gearManager:IsHoodUp(player) }
-    end)
-
-    -- Wand status
-    pcall(function()
-        gear.WAND = { equipped = player:IsWandEquipped() }
-    end)
-
-    return gear
-end
-
--- Extract rarity from GearID (e.g., "Head_068_Legendary" -> "Legendary")
-local function GetRarityFromId(gearId)
-    if not gearId then return nil end
-    local rarity = gearId:match("_(%a+)$")
-    if rarity and (rarity == "Common" or rarity == "Uncommon" or rarity == "Rare"
-                   or rarity == "Epic" or rarity == "Legendary") then
-        return rarity
-    end
-    return nil
-end
-
--- Get description from localization (item_desc key)
-local function GetItemDescription(itemId)
-    if not itemId or itemId == "" then return nil end
-    if not _G.LocalizationLoaded then LoadLocalization() end
-    if not _G.Localization then return nil end
-    return _G.Localization[itemId .. "_desc"]
-end
-
--- Format gear for LLM context (human-readable string)
--- Pass existing gear table to avoid redundant GetPlayerGear() call
-function FormatPlayerGearForContext(gear)
-    gear = gear or GetPlayerGear()
-    if not gear then return "Unable to get player gear." end
-
-    local lines = {}
-    local slotOrder = {"HEAD", "FACE", "NECK", "OUTFIT", "BACK", "HAND"}
-
-    for _, slot in ipairs(slotOrder) do
-        local data = gear[slot]
-        if data and data.equipped and data.name then
-            local rarity = GetRarityFromId(data.id)
-            local rarityStr = rarity and (" [" .. rarity .. "]") or ""
-
-            -- Get description: prefer appearance description if transmogged, else base item
-            local description = nil
-            if data.transmogged and data.appearanceId then
-                description = GetItemDescription(data.appearanceId)
-            end
-            if not description then
-                description = GetItemDescription(data.id)
-            end
-
-            if data.transmogged and data.appearance then
-                -- Transmogged: show what it looks like, note the stats source with rarity
-                table.insert(lines, string.format("%s: %s (transmogged, stats from %s%s)",
-                    slot, data.appearance, data.name, rarityStr))
-            else
-                table.insert(lines, string.format("%s: %s%s", slot, data.name, rarityStr))
-            end
-
-            -- Add description on next line
-            if description then
-                table.insert(lines, string.format("  - %s", description))
-            end
+        local mesh = actor.Mesh
+        if mesh then
+            mesh:SetMorphTarget(FName("mouth_press"), config.press or 0, false)
+            mesh:SetMorphTarget(FName("upr_lip_up_l"), config.lip_up or 0, false)
+            mesh:SetMorphTarget(FName("upr_lip_up_r"), config.lip_up or 0, false)
+            mesh:SetMorphTarget(FName("ee"), config.ee or 0, false)
+            mesh:SetMorphTarget(FName("o"), config.o or 0, false)
+            mesh:SetMorphTarget(FName("shh"), config.shh or 0, false)
         end
-    end
-
-    -- Accessories
-    if gear.HOOD and gear.HOOD.up then
-        table.insert(lines, "HOOD: Up")
-    end
-    if gear.WAND and gear.WAND.equipped then
-        table.insert(lines, "WAND: Equipped")
-    end
-
-    return table.concat(lines, "\n")
+    end)
 end
 
--- F7 Debug Function - Toggle lock/unlock on NPC player is looking at
-function DebugF7()
+-- ============================================================
+-- Schedule Override Probe (F7 toggle) - Hardcoded to GladwinMoon
+-- All references fetched fresh each time (safe across fast travel)
+-- First press: override schedule to Three Broomsticks
+-- Second press: undo override, restore normal schedule
+-- ============================================================
+_G._ScheduleOverrideState = _G._ScheduleOverrideState or nil
+
+function DebugF7_ScheduleOverride()
     ExecuteInGameThread(function()
-        print("[DebugF7] === Toggle NPC Lock ===")
+        local TAG = "[SchedProbe]"
+        local ENTITY_NAME = "GladwinMoon"
 
-        -- Get NPC player is looking at
-        local npc, npcName, npcDist = GetLookedAtNPC(0.7, 2000)
-        if not npc then
-            print("[DebugF7] No NPC in line of sight")
-            return
+        -- Helper: get fresh references every time (safe after fast travel)
+        local function GetFreshRefs()
+            local refs = {}
+            local staticData = GetStaticCache()
+            if not staticData then print(TAG .. " No static cache") return nil end
+            refs.staticData = staticData
+
+            refs.popManager = staticData.populationManager
+            if not refs.popManager or not SafeIsValid(refs.popManager) then
+                print(TAG .. " No PopulationManager")
+                return nil
+            end
+
+            -- Get ScheduledEntity by name (works even when not in flesh)
+            pcall(function() refs.se = refs.popManager:GetScheduledEntityFromName(ENTITY_NAME) end)
+            if not refs.se then
+                print(TAG .. " Could not get ScheduledEntity for " .. ENTITY_NAME)
+                return nil
+            end
+            local seValid = false
+            pcall(function() seValid = refs.se:IsValid() end)
+            if not seValid then
+                print(TAG .. " ScheduledEntity not valid")
+                return nil
+            end
+
+            -- Provider: mod actor or player controller
+            pcall(function() refs.provider = _G.SonorusState and _G.SonorusState.sonorusModActor end)
+            if not refs.provider or not SafeIsValid(refs.provider) then
+                refs.provider = staticData.playerController
+            end
+
+            -- WorldEventActor (fresh find)
+            pcall(function() refs.weActor = FindFirstOf("WorldEventActor") end)
+
+            return refs
         end
 
-        print("[DebugF7] NPC: " .. tostring(npcName) .. " (dist: " .. math.floor(npcDist) .. ")")
+        -- Helper: print current schedule
+        local function PrintSchedule(refs, label)
+            local info = Utils.GetNPCScheduleInfo(ENTITY_NAME, refs.staticData)
+            if info then
+                print(string.format("%s %s: location=%s, activity=%s, type=%s, inFlesh=%s, inTransit=%s",
+                    TAG, label, tostring(info.locationName), tostring(info.activity),
+                    tostring(info.activityType), tostring(info.inFlesh), tostring(info.isInTransit)))
+            else
+                print(string.format("%s %s: GetNPCScheduleInfo returned nil", TAG, label))
+            end
 
-        -- Check if NPC is already locked
-        local existingLock = FindExistingLock(npc)
-        if existingLock then
-            -- NPC is locked, release them
-            ReleaseNPC(existingLock)
-            print("[DebugF7] UNLOCKED " .. tostring(npcName))
-        else
-            -- NPC is not locked, lock them to face the player
-            local staticData = Cache.GetStatic(RefreshStaticData, 30)
-            local player = staticData and staticData.player
-            if not player then
-                print("[DebugF7] Player not found")
+            -- Also read raw activity data
+            pcall(function()
+                local out, out2 = {}, {}
+                refs.se:GetCurrentActivity(out, out2)
+                local activity = out.Activity
+                pcall(function() activity = out.Activity:ToString() end)
+                local locKey = out.LocationKey
+                pcall(function() locKey = out.LocationKey:ToString() end)
+                print(string.format("%s %s (raw): activity=%s, locKey=%s, start=%s, end=%s",
+                    TAG, label, tostring(activity), tostring(locKey),
+                    tostring(out.StartTime), tostring(out.EndTime)))
+            end)
+
+            -- Check flesh/transit state
+            pcall(function()
+                print(string.format("%s %s: inFlesh=%s, isInTransit=%s, isEnabled=%s",
+                    TAG, label, tostring(refs.se:CurrentlyInFlesh()),
+                    tostring(refs.se:IsInTransit()), tostring(refs.se:IsEnabled())))
+            end)
+        end
+
+        -- ============================================================
+        -- RELEASE PATH
+        -- ============================================================
+        if _G._ScheduleOverrideState then
+            print(string.format("%s === RELEASING %s ===", TAG, ENTITY_NAME))
+            local refs = GetFreshRefs()
+            if not refs then
+                print(TAG .. " Can't get fresh refs - clearing state anyway")
+                _G._ScheduleOverrideState = nil
                 return
             end
 
-            local lockId = LockNPCToTarget(npc, player, nil)
-            if lockId then
-                print("[DebugF7] LOCKED " .. tostring(npcName) .. " (id=" .. lockId .. ")")
+            PrintSchedule(refs, "PRE-RELEASE")
+
+            -- RemoveDynamicActivityFromSE (fresh WorldEventActor)
+            if refs.weActor and SafeIsValid(refs.weActor) and _G._ScheduleOverrideState.injectedActivity then
+                local ok, err = pcall(function()
+                    local result = refs.weActor:RemoveDynamicActivityFromSE(refs.se, _G._ScheduleOverrideState.injectedActivity)
+                    print(string.format("%s RemoveDynamicActivityFromSE: %s", TAG, tostring(result)))
+                end)
+                if not ok then print(string.format("%s RemoveDynamic FAILED: %s", TAG, tostring(err))) end
             else
-                print("[DebugF7] Failed to lock " .. tostring(npcName))
+                print(TAG .. " No WorldEventActor for RemoveDynamic (or no activity to remove)")
             end
+
+            -- FinishSchedulingOverride (fresh provider)
+            local ok2, err2 = pcall(function()
+                local result = refs.se:FinishSchedulingOverride(4, refs.provider, true, false, true)
+                print(string.format("%s FinishSchedulingOverride(priority=4): %s", TAG, tostring(result)))
+            end)
+            if not ok2 then print(string.format("%s FinishOverride FAILED: %s", TAG, tostring(err2))) end
+
+            -- Re-enable scheduling
+            pcall(function() refs.se:EnableScheduling(true, false, true) end)
+            print(TAG .. " EnableScheduling(true) called")
+
+            -- Print after release (with delay for scheduler to process)
+            ExecuteInGameThreadWithDelay(1000, function()
+                local refs2 = GetFreshRefs()
+                if refs2 then PrintSchedule(refs2, "POST-RELEASE (1s)") end
+            end)
+
+            _G._ScheduleOverrideState = nil
+            print(string.format("%s === RELEASE COMPLETE ===", TAG))
+            return
         end
 
-        print("[DebugF7] === END ===")
+        -- ============================================================
+        -- OVERRIDE PATH
+        -- ============================================================
+        print(string.format("%s === SCHEDULE OVERRIDE: %s -> Three Broomsticks ===", TAG, ENTITY_NAME))
+        local refs = GetFreshRefs()
+        if not refs then return end
+
+        PrintSchedule(refs, "BEFORE")
+
+        local state = { injectedActivity = nil }
+
+        -- NOTE: FinishSchedulingOverride always returns true regardless of existing overrides.
+        -- It's an action, not a query. Cannot be used to detect existing overrides.
+
+        -- Step 1: StartSchedulingOverride
+        local overrideResult = false
+        local ok1, err1 = pcall(function()
+            overrideResult = refs.se:StartSchedulingOverride(true, 4, refs.provider, true, true, true)
+            print(string.format("%s StartSchedulingOverride(priority=4): %s", TAG, tostring(overrideResult)))
+        end)
+        if not ok1 then print(string.format("%s StartSchedulingOverride FAILED: %s", TAG, tostring(err1))) end
+
+        -- Print current game time for time window testing
+        pcall(function()
+            local timeData = GetTimeOfDay and GetTimeOfDay()
+            if timeData then
+                print(string.format("%s Current game time: %02d:%02d (minute of day: %d)",
+                    TAG, timeData.hour or 0, timeData.minute or 0, timeData.minuteOfDay or 0))
+            end
+        end)
+
+        -- Step 2: InsertDynamicActivityOnSE
+        -- Testing TWO activities: one all-day (0-2400) and one restricted (600-2130)
+        if refs.weActor and SafeIsValid(refs.weActor) then
+            -- Test A: Restricted window activity (600-2130)
+            local okA, errA = pcall(function()
+                local result = refs.weActor:InsertDynamicActivityOnSE(refs.se, "ThreeBroomsticksHours", "HM_ThreeBroomsticks")
+                print(string.format("%s InsertDynamic('ThreeBroomsticksHours' [600-2130]): %s", TAG, tostring(result)))
+                if result then state.injectedActivity = "ThreeBroomsticksHours" end
+            end)
+            if not okA then print(string.format("%s InsertDynamic(restricted) FAILED: %s", TAG, tostring(errA))) end
+
+            -- Test B: All-day activity (0-2400) - only if restricted one failed
+            if not state.injectedActivity then
+                local okB, errB = pcall(function()
+                    local result = refs.weActor:InsertDynamicActivityOnSE(refs.se, "HM_ThreeBroomsticksHours", "HM_ThreeBroomsticks")
+                    print(string.format("%s InsertDynamic('HM_ThreeBroomsticksHours' [0-2400]) FALLBACK: %s", TAG, tostring(result)))
+                    if result then state.injectedActivity = "HM_ThreeBroomsticksHours" end
+                end)
+                if not okB then print(string.format("%s InsertDynamic(allday) FAILED: %s", TAG, tostring(errB))) end
+            end
+        else
+            print(TAG .. " No WorldEventActor available")
+        end
+
+        -- Print after override (with delay)
+        ExecuteInGameThreadWithDelay(1000, function()
+            local refs2 = GetFreshRefs()
+            if refs2 then PrintSchedule(refs2, "AFTER (1s)") end
+        end)
+
+        _G._ScheduleOverrideState = state
+        print(string.format("%s === OVERRIDE APPLIED (press F7 again to release) ===", TAG))
     end)
 end
 
--- ============================================
--- Get Blueprint Mod Actors
--- ============================================
-function GetSonorusModActor()
-    -- Use unified Cache module with validity check
-    return Cache.Get("SonorusModActor", function()
-        -- Search for Sonorus mod actor
-        local modactors = FindAllOf("ModActor_C")
-        if modactors then
-            for _, actor in ipairs(modactors) do
-                local ok, valid = pcall(function() return actor:IsValid() end)
-                if ok and valid then
-                    local classOk, className = pcall(function()
-                        return actor:GetClass():GetFullName()
+-- ============================================================
+-- F7 Debug: Floo Companion Dismiss Test
+-- Finds BP_Student_Mod_C, sets DismissedCompanion, fires CompanionChanged
+-- ============================================================
+-- Persistent state for TurnInPlace test toggle
+_G._TurnInPlaceState = _G._TurnInPlaceState or nil
+
+function DebugF7()
+    ExecuteInGameThread(function()
+        local TAG = "[NpcDebug]"
+        print(TAG .. " === NPC STATUS CHECK ===")
+
+        local staticData = _G.GetStaticCache and _G.GetStaticCache()
+        if not staticData or not staticData.populationManager then
+            print(TAG .. " No PopulationManager")
+            return
+        end
+        local popManager = staticData.populationManager
+
+        -- Check active commitments
+        local commitments = _G.ActiveCommitments or {}
+        local npcList = {}
+        for npcId, entry in pairs(commitments) do
+            table.insert(npcList, {id = npcId, commitment = entry})
+        end
+
+        -- If no active commitments, check a hardcoded list for debugging
+        if #npcList == 0 then
+            print(TAG .. " No active commitments. Checking common NPCs...")
+            for _, name in ipairs({"DuncanEverette", "SebastianSallow", "NatsaiOnai", "PoppySweeting", "GladwinMoon"}) do
+                table.insert(npcList, {id = name, commitment = nil})
+            end
+        end
+
+        for _, entry in ipairs(npcList) do
+            local npcId = entry.id
+            print(string.format("%s --- %s ---", TAG, npcId))
+
+            -- Show commitment state if any
+            if entry.commitment then
+                local c = entry.commitment
+                print(string.format("%s   Commitment: %s -> %s (applied=%s dirty=%s)",
+                    TAG, c.activity_id or "?", c.location_id or "?",
+                    tostring(c.applied), tostring(c.dirty)))
+            end
+
+            -- Get ScheduledEntity
+            local se = nil
+            pcall(function() se = popManager:GetScheduledEntityFromName(npcId) end)
+            if not se then
+                print(string.format("%s   ScheduledEntity: NOT FOUND", TAG))
+            else
+                local seValid = false
+                pcall(function() seValid = se:IsValid() end)
+                if not seValid then
+                    print(string.format("%s   ScheduledEntity: INVALID", TAG))
+                else
+                    -- In flesh?
+                    local inFlesh = false
+                    pcall(function() inFlesh = se:CurrentlyInFlesh() end)
+                    print(string.format("%s   InFlesh: %s", TAG, tostring(inFlesh)))
+
+                    -- Location
+                    pcall(function()
+                        local loc = se:GetLocation()
+                        if loc then
+                            print(string.format("%s   Location: %.0f, %.0f, %.0f", TAG, loc.X or 0, loc.Y or 0, loc.Z or 0))
+                        end
                     end)
-                    if classOk and className and className:find("sonorusblueprintmod") then
-                        local nameOk, name = pcall(function() return actor:GetName() end)
-                        print("[Cache] Found SonorusModActor: " .. (nameOk and name or "unknown"))
-                        return actor
+
+                    -- Is enabled / in transit
+                    pcall(function()
+                        local enabled = se:IsEnabled()
+                        local transit = se:IsInTransit()
+                        print(string.format("%s   Enabled: %s  InTransit: %s", TAG, tostring(enabled), tostring(transit)))
+                    end)
+
+                    -- Current activity
+                    local out1, out2 = {}, {}
+                    pcall(function() se:GetCurrentActivity(out1, out2) end)
+                    if out1.ActivityIsValid then
+                        local actId = "?"
+                        pcall(function() actId = out1.Activity:ToString() end)
+                        local actType = "?"
+                        pcall(function() actType = out1.ActivityType:ToString() end)
+                        local locKey = "?"
+                        pcall(function() locKey = out1.LocationKey:ToString() end)
+                        print(string.format("%s   Activity: %s (%s) at %s  [%s-%s]",
+                            TAG, actId, actType, locKey,
+                            tostring(out1.StartTime), tostring(out1.EndTime)))
+                    else
+                        print(string.format("%s   Activity: none/invalid", TAG))
+                    end
+
+                    -- Upcoming activity
+                    local up1, up2 = {}, {}
+                    pcall(function() se:GetUpcomingActivity(up1, up2) end)
+                    if up1.ActivityIsValid then
+                        local actId = "?"
+                        pcall(function() actId = up1.Activity:ToString() end)
+                        local locKey = "?"
+                        pcall(function() locKey = up1.LocationKey:ToString() end)
+                        print(string.format("%s   Upcoming: %s at %s [%s-%s]",
+                            TAG, actId, locKey,
+                            tostring(up1.StartTime), tostring(up1.EndTime)))
+                    end
+
+                    -- Active station
+                    pcall(function()
+                        local stationComp = se:GetActiveStation()
+                        if stationComp then
+                            local owner = nil
+                            pcall(function() owner = stationComp:GetOwner() end)
+                            if owner then
+                                local ownerName = "?"
+                                pcall(function() ownerName = owner:GetFullName() end)
+                                print(string.format("%s   Station: %s", TAG, ownerName))
+                            end
+                        else
+                            print(string.format("%s   Station: none", TAG))
+                        end
+                    end)
+
+                    -- Player distance
+                    pcall(function()
+                        local player = staticData.player
+                        if player and inFlesh then
+                            local flesh = se:GetFlesh()
+                            if flesh then
+                                local npcLoc = flesh:K2_GetActorLocation()
+                                local playerLoc = player:K2_GetActorLocation()
+                                local dx = npcLoc.X - playerLoc.X
+                                local dy = npcLoc.Y - playerLoc.Y
+                                local dz = npcLoc.Z - playerLoc.Z
+                                local dist = math.sqrt(dx*dx + dy*dy + dz*dz) / 100
+                                print(string.format("%s   Distance: %.0fm", TAG, dist))
+                            end
+                        end
+                    end)
+                end
+            end
+        end
+
+        -- Force-flesh + hobo clear for committed NPCs not in flesh
+        for _, entry in ipairs(npcList) do
+            if entry.commitment and entry.commitment.applied then
+                local se = nil
+                pcall(function() se = popManager:GetScheduledEntityFromName(entry.id) end)
+                if se then
+                    local inFlesh = false
+                    pcall(function() inFlesh = se:CurrentlyInFlesh() end)
+                    if not inFlesh then
+                        print(string.format("%s   Force-fleshing %s...", TAG, entry.id))
+                        pcall(function()
+                            se:StartPrecachingFlesh(5, nil, 50000.0, true, 0, 0)
+                        end)
+                        pcall(function()
+                            local player = staticData.player
+                            local playerLoc = player:K2_GetActorLocation()
+                            local transform = {
+                                Translation = { X = playerLoc.X + 200, Y = playerLoc.Y + 200, Z = playerLoc.Z },
+                                Rotation = { X = 0, Y = 0, Z = 0, W = 1 },
+                                Scale3D = { X = 1, Y = 1, Z = 1 }
+                            }
+                            popManager:PlaceScheduledEntityBP(entry.id, transform)
+                            print(string.format("%s   PlaceScheduledEntityBP called for %s", TAG, entry.id))
+                        end)
+                    end
+                end
+                -- Clear hobos
+                if _G.CommitmentManager then
+                    pcall(_G.CommitmentManager.ClearNearbyHobos, entry.id)
+                end
+            end
+        end
+
+        print(TAG .. " === CHECK COMPLETE ===")
+    end)
+end
+
+function DebugF7_TurnInPlace()
+    ExecuteInGameThread(function()
+        local TAG = "[TurnInPlace]"
+
+        -- ============================================================
+        -- RELEASE PATH (second press)
+        -- ============================================================
+        if _G._TurnInPlaceState then
+            print(TAG .. " === RELEASING ===")
+            local st = _G._TurnInPlaceState
+            local npcId = st.npcName
+
+            local staticData = GetStaticCache()
+            if not staticData then
+                print(TAG .. " No static cache - clearing state")
+                _G._TurnInPlaceState = nil
+                return
+            end
+
+            local popManager = staticData.populationManager
+            if popManager and SafeIsValid(popManager) then
+                local se = nil
+                pcall(function() se = popManager:GetScheduledEntityFromName(npcId) end)
+                if se then
+                    -- Clear AI focus
+                    local flesh = nil
+                    pcall(function() flesh = se:GetFlesh() end)
+                    if flesh and SafeIsValid(flesh) then
+                        local ctrl = nil
+                        pcall(function() ctrl = flesh.Controller end)
+                        if ctrl and SafeIsValid(ctrl) then
+                            pcall(function() ctrl:K2_ClearFocus() end)
+                            print(TAG .. " K2_ClearFocus OK")
+                        end
+                    end
+
+                    -- Re-enable scheduling (was disabled to freeze NPC)
+                    pcall(function() se:EnableScheduling(true, false, true) end)
+                    print(TAG .. " Scheduling re-enabled")
+                end
+            end
+
+            _G._TurnInPlaceState = nil
+            print(TAG .. " === RELEASED (press F7 again to test) ===")
+            return
+        end
+
+        -- ============================================================
+        -- APPLY PATH (first press)
+        -- ============================================================
+        print(TAG .. " === NPC SetTargetLocationTurnInPlace TEST ===")
+
+        local staticData = GetStaticCache()
+        if not staticData then print(TAG .. " No static cache") return end
+
+        local player = staticData.player
+        if not player or not SafeIsValid(player) then print(TAG .. " No player") return end
+
+        local playerLoc = player:K2_GetActorLocation()
+        print(string.format("%s Player at (%.0f, %.0f, %.0f)", TAG, playerLoc.X, playerLoc.Y, playerLoc.Z))
+
+        -- Find nearest NPC
+        local nearestNpc = nil
+        local nearestDist = math.huge
+        local nearestName = nil
+        local playerFullName = staticData.playerFullName or ""
+
+        local npcResult = nil
+        pcall(function() npcResult = GetNearbyNPCs(2000, 0.9) end)
+
+        if not npcResult or not npcResult.nearbyList or #npcResult.nearbyList == 0 then
+            print(TAG .. " No nearby NPCs found")
+            return
+        end
+
+        for _, entry in ipairs(npcResult.nearbyList) do
+            if entry.actor and SafeIsValid(entry.actor) then
+                local entryFullName = entry.actor:GetFullName()
+                if entryFullName ~= playerFullName then
+                    local npcLoc = entry.actor:K2_GetActorLocation()
+                    local dx = npcLoc.X - playerLoc.X
+                    local dy = npcLoc.Y - playerLoc.Y
+                    local dist = math.sqrt(dx * dx + dy * dy)
+                    if dist < nearestDist then
+                        nearestDist = dist
+                        nearestNpc = entry.actor
+                        nearestName = entry.name or "?"
                     end
                 end
             end
         end
-        return nil
+
+        if not nearestNpc then
+            print(TAG .. " No valid NPC found")
+            return
+        end
+
+        local npcLoc = nearestNpc:K2_GetActorLocation()
+        local npcRot = nearestNpc:K2_GetActorRotation()
+        print(string.format("%s Nearest NPC: %s (dist=%.0f, yaw=%.1f)", TAG, nearestName, nearestDist, npcRot.Yaw or 0))
+
+        -- Get ScheduledEntity + PopulationManager
+        local popManager = staticData.populationManager
+        if not popManager or not SafeIsValid(popManager) then
+            print(TAG .. " No PopulationManager")
+            return
+        end
+
+        local se = nil
+        pcall(function() se = popManager:GetScheduledEntityFromActor(nearestNpc, false) end)
+        if not se then
+            print(TAG .. " No ScheduledEntity for this NPC")
+            return
+        end
+
+        -- NPCLock-style: brief enable window for animated turn, then freeze
+
+        -- Step 1: Break from station
+        pcall(function() se:AbandonStations(0) end)
+        print(TAG .. " AbandonStations(0)")
+
+        -- Step 2: Enable scheduling (allows turn animation to play)
+        pcall(function() se:EnableScheduling(true, false, true) end)
+        print(TAG .. " EnableScheduling(true)")
+
+        -- Step 3: Get NPC_Component and call SetTargetLocationTurnInPlace
+        local npcComp = nil
+        pcall(function()
+            local npcCompClass = staticData.npcComponentClass
+            if npcCompClass then
+                npcComp = nearestNpc:GetComponentByClass(npcCompClass)
+            end
+        end)
+
+        if not npcComp then
+            print(TAG .. " Could not get NPC_Component")
+            return
+        end
+
+        local ok2, err2 = pcall(function()
+            npcComp:SetTargetLocationTurnInPlace(playerLoc)
+        end)
+        print(TAG .. " SetTargetLocationTurnInPlace: " .. (ok2 and "OK" or tostring(err2)))
+
+        -- Step 4: After delay, freeze NPC before scheduler reassigns a station
+        ExecuteInGameThreadWithDelay(700, function()
+            pcall(function()
+                if SafeIsValid(nearestNpc) then
+                    se:EnableScheduling(false, true, true)
+                    print(TAG .. " EnableScheduling(false) - frozen after 700ms")
+                end
+            end)
+        end)
+
+        -- Save state for release toggle
+        _G._TurnInPlaceState = {
+            npcName = nearestName,
+            activityId = nil,
+            startYaw = npcRot.Yaw or 0,
+        }
+
+        -- Check rotation after delays
+        ExecuteInGameThreadWithDelay(1500, function()
+            pcall(function()
+                if SafeIsValid(nearestNpc) then
+                    local newRot = nearestNpc:K2_GetActorRotation()
+                    print(string.format("%s After 1.5s: yaw=%.1f (was %.1f, delta=%.1f)",
+                        TAG, newRot.Yaw or 0, npcRot.Yaw or 0, (newRot.Yaw or 0) - (npcRot.Yaw or 0)))
+                end
+            end)
+        end)
+
+        ExecuteInGameThreadWithDelay(3000, function()
+            pcall(function()
+                if SafeIsValid(nearestNpc) then
+                    local newRot = nearestNpc:K2_GetActorRotation()
+                    print(string.format("%s After 3s: yaw=%.1f (was %.1f, delta=%.1f)",
+                        TAG, newRot.Yaw or 0, npcRot.Yaw or 0, (newRot.Yaw or 0) - (npcRot.Yaw or 0)))
+                end
+            end)
+        end)
+
+        print(TAG .. " === TEST FIRED (press F7 again to release) ===")
     end)
 end
 
--- ============================================
--- SetBlendshape - set morph target on NPC
--- ============================================
-function CallSetBlendshape(actor, curveName, value, modActor)
-    -- Use passed modActor or fetch (caller should cache for multiple calls)
-    local mod = modActor or GetSonorusModActor()
-    if not mod then
-        print("[Blueprint] SetBlendshape error: ModActor is nil")
-        return false
-    end
-    if not actor then
-        print("[Blueprint] SetBlendshape error: Actor is nil")
-        return false
-    end
+function DebugF7_ScheduleExplorer()
+    ExecuteInGameThread(function()
+        print("[DebugF7] === SCHEDULE EXPLORER ===")
+        local staticData = GetStaticCache()
+        if not staticData then print("[DebugF7] No static cache") return end
 
-    local ok, err = pcall(function()
-        mod:setblendshape(actor, curveName, value)
+        local popManager = staticData.populationManager
+        if not popManager or not SafeIsValid(popManager) then
+            print("[DebugF7] No PopulationManager")
+            return
+        end
+
+        -- Test subjects - mix of nearby and distant NPCs
+        local testNames = {
+            "PhineasBlack",
+            "SebastianSallow",
+            "NatasaiOnai",
+            "Natsai",
+            "NatsaiOnai",
+            "PoppySweeting",
+            "AbrahamRonen",
+            "MatildaWeasley",
+        }
+
+        for _, entityName in ipairs(testNames) do
+            print(string.format("\n[DebugF7] --- %s ---", entityName))
+            local se = nil
+            local ok, err = pcall(function()
+                se = popManager:GetScheduledEntityFromName(entityName)
+            end)
+            if not ok then
+                print(string.format("[DebugF7]   GetSEFromName FAILED: %s", tostring(err)))
+                goto nextEntity
+            end
+            if not se then
+                print("[DebugF7]   ScheduledEntity = nil (not found)")
+                goto nextEntity
+            end
+
+            -- Check if valid
+            local seValid = false
+            pcall(function() seValid = se:IsValid() end)
+            print(string.format("[DebugF7]   SE valid: %s", tostring(seValid)))
+            if not seValid then goto nextEntity end
+
+            -- Identity
+            pcall(function()
+                local myName = se:GetMyName()
+                local nameStr = nil
+                pcall(function() nameStr = myName:ToString() end)
+                print(string.format("[DebugF7]   GetMyName: %s", tostring(nameStr or myName)))
+            end)
+
+            pcall(function()
+                local myId = se:GetMyID()
+                print(string.format("[DebugF7]   GetMyID: %s", tostring(myId)))
+            end)
+
+            -- Is in flesh (streamed in)?
+            pcall(function()
+                local inFlesh = se:CurrentlyInFlesh()
+                print(string.format("[DebugF7]   CurrentlyInFlesh: %s", tostring(inFlesh)))
+            end)
+
+            -- Get flesh actor if loaded
+            pcall(function()
+                local flesh = se:GetFlesh()
+                if flesh and SafeIsValid(flesh) then
+                    print(string.format("[DebugF7]   Flesh: %s", flesh:GetFullName()))
+                else
+                    print("[DebugF7]   Flesh: nil/invalid (not streamed in)")
+                end
+            end)
+
+            -- Location (works even without flesh)
+            pcall(function()
+                local loc = se:GetLocation()
+                if loc then
+                    print(string.format("[DebugF7]   Location: (%.0f, %.0f, %.0f)", loc.X or 0, loc.Y or 0, loc.Z or 0))
+                else
+                    print("[DebugF7]   Location: nil")
+                end
+            end)
+
+            -- Enabled / state
+            pcall(function() print(string.format("[DebugF7]   IsEnabled: %s", tostring(se:IsEnabled()))) end)
+            pcall(function() print(string.format("[DebugF7]   IsStudent: %s", tostring(se:IsStudent()))) end)
+            pcall(function() print(string.format("[DebugF7]   IsGhost: %s", tostring(se:IsGhost()))) end)
+            pcall(function() print(string.format("[DebugF7]   IsHobo: %s", tostring(se:IsHobo()))) end)
+            pcall(function() print(string.format("[DebugF7]   IsInTransit: %s", tostring(se:IsInTransit()))) end)
+
+            -- Current activity
+            pcall(function()
+                local out = {}
+                local out2 = {}
+                se:GetCurrentActivity(out, out2)
+                if out.ActivityIsValid then
+                    local activity = nil
+                    pcall(function() activity = out.Activity:ToString() end)
+                    local actType = nil
+                    pcall(function() actType = out.ActivityType:ToString() end)
+                    local location = nil
+                    pcall(function() location = out.Location:ToString() end)
+                    local locKey = nil
+                    pcall(function() locKey = out.LocationKey:ToString() end)
+                    local stationKey = nil
+                    pcall(function() stationKey = out.StationKey:ToString() end)
+                    print(string.format("[DebugF7]   CurrentActivity: %s", tostring(activity)))
+                    print(string.format("[DebugF7]     Type: %s", tostring(actType)))
+                    print(string.format("[DebugF7]     Location: %s", tostring(location)))
+                    print(string.format("[DebugF7]     LocationKey: %s", tostring(locKey)))
+                    print(string.format("[DebugF7]     StationKey: %s", tostring(stationKey)))
+                    print(string.format("[DebugF7]     Time: %s-%s (dur %s min)",
+                        tostring(out.StartTime), tostring(out.EndTime), tostring(out.DurationMinutes)))
+                    print(string.format("[DebugF7]     DaysMask: %s  Priority: %s", tostring(out.DaysMask), tostring(out.Priority)))
+                else
+                    print("[DebugF7]   CurrentActivity: NONE (ActivityIsValid=false)")
+                end
+            end)
+
+            -- Upcoming activity
+            pcall(function()
+                local out = {}
+                local out2 = {}
+                se:GetUpcomingActivity(out, out2)
+                if out.ActivityIsValid then
+                    local activity = nil
+                    pcall(function() activity = out.Activity:ToString() end)
+                    local location = nil
+                    pcall(function() location = out.Location:ToString() end)
+                    print(string.format("[DebugF7]   UpcomingActivity: %s @ %s", tostring(activity), tostring(location)))
+                    print(string.format("[DebugF7]     Time: %s-%s", tostring(out.StartTime), tostring(out.EndTime)))
+                else
+                    print("[DebugF7]   UpcomingActivity: NONE")
+                end
+            end)
+
+            -- Minutes to upcoming
+            pcall(function()
+                local out = {}
+                local out2 = {}
+                se:GetMinutesToUpcomingActivity(out, out2)
+                if out.ActivityIsValid ~= nil then
+                    print(string.format("[DebugF7]   MinutesToUpcoming: %s (valid=%s)",
+                        tostring(out.MinutesToUpcomingActivity), tostring(out.ActivityIsValid)))
+                end
+            end)
+
+            ::nextEntity::
+        end
+
+        print("\n[DebugF7] === SCHEDULE EXPLORER DONE ===")
     end)
-
-    if not ok then
-        print("[Blueprint] SetBlendshape error: " .. tostring(err))
-        return false
-    end
-    return true
 end
 
--- ============================================
--- ActionExecute - run action on NPC (LookAt, Wave, etc)
--- ============================================
-function CallActionExecute(actor, actionName)
-    local mod = GetSonorusModActor()
-    if not mod then
-        print("[Blueprint] ActionExecute error: ModActor is nil")
-        return false
-    end
-    if not actor then
-        print("[Blueprint] ActionExecute error: Actor is nil")
-        return false
-    end
+function DebugF7_CompanionOrient()
+    ExecuteInGameThread(function()
+        print("[DebugF7] === COMPANION ORIENT TO NEAREST NPC ===")
+        local staticData = GetStaticCache()
+        if not staticData then print("[DebugF7] No static cache") return end
 
-    local ok, err = pcall(function()
-        mod:actionexecute(actor, actionName)
+        local companionMgr = staticData.companionManager
+        if not companionMgr then print("[DebugF7] No CompanionManager") return end
+
+        local companionPawn = nil
+        pcall(function() companionPawn = companionMgr:GetPrimaryCompanionPawn() end)
+        if not companionPawn or not SafeIsValid(companionPawn) then
+            print("[DebugF7] No companion pawn")
+            return
+        end
+
+        local compLoc = companionPawn:K2_GetActorLocation()
+        local compRot = companionPawn:K2_GetActorRotation()
+        local compName = companionPawn:GetFullName()
+        print(string.format("[DebugF7] Companion at (%.0f, %.0f, %.0f) yaw=%.1f",
+            compLoc.X, compLoc.Y, compLoc.Z, compRot.Yaw or 0))
+
+        -- Find nearest NPC that isn't the companion
+        local nearestNpc = nil
+        local nearestDist = math.huge
+        local nearestName = nil
+
+        if GetNearbyNPCs then
+            local npcResult = GetNearbyNPCs(2000, 0.9)
+            if npcResult and npcResult.nearbyList then
+                for _, entry in ipairs(npcResult.nearbyList) do
+                    if entry.actor and SafeIsValid(entry.actor) then
+                        local entryName = entry.actor:GetFullName()
+                        if entryName ~= compName then
+                            local npcLoc = entry.actor:K2_GetActorLocation()
+                            local dx = npcLoc.X - compLoc.X
+                            local dy = npcLoc.Y - compLoc.Y
+                            local dist = math.sqrt(dx * dx + dy * dy)
+                            if dist < nearestDist then
+                                nearestDist = dist
+                                nearestNpc = entry.actor
+                                nearestName = entry.name
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        if not nearestNpc then
+            print("[DebugF7] No nearby NPC found (excluding companion)")
+            return
+        end
+
+        local tgtLoc = nearestNpc:K2_GetActorLocation()
+        local dx = tgtLoc.X - compLoc.X
+        local dy = tgtLoc.Y - compLoc.Y
+        local dist = math.sqrt(dx * dx + dy * dy)
+        local dirX = dx / dist
+        local dirY = dy / dist
+
+        -- Calculate angle
+        local angleToTarget = math.atan(dirY, dirX) * 180 / math.pi
+        local compYaw = compRot.Yaw or 0
+        local diff = angleToTarget - compYaw
+        while diff > 180 do diff = diff - 360 end
+        while diff < -180 do diff = diff + 360 end
+        local turnAngle = math.abs(diff)
+
+        print(string.format("[DebugF7] Nearest NPC: %s (dist=%.0f, angle=%.1f, turnNeeded=%.1f)",
+            nearestName, dist, angleToTarget, turnAngle))
+        print(string.format("[DebugF7] Direction: (%.3f, %.3f)", dirX, dirY))
+
+        if turnAngle < 35 then
+            print("[DebugF7] Already facing target (< 35 deg), skipping")
+            return
+        end
+
+        -- Check companion speed (already moving = shorter pulse)
+        local speed = 0
+        pcall(function()
+            local vel = companionPawn:GetVelocity()
+            if vel then
+                speed = math.sqrt(vel.X*vel.X + vel.Y*vel.Y + vel.Z*vel.Z)
+            end
+        end)
+
+        -- Kill any queued MoveToLocation on the pawn itself
+        pcall(function() companionPawn.CharacterMovement:StopMovementImmediately() end)
+        -- Also clear CompanionManager stop state
+        pcall(function() companionMgr:StopMovement(true) end)
+        pcall(function() companionMgr:StopMovement(false) end)
+
+        -- Pulse: SetCompanionForcedWaitLocation toward nearest NPC
+        local waitPos = {
+            X = compLoc.X + dirX * 200,
+            Y = compLoc.Y + dirY * 200,
+            Z = compLoc.Z
+        }
+        local waitDir = { X = dirX, Y = dirY, Z = 0 }
+        companionMgr:SetCompanionForcedWaitLocation(waitPos, waitDir)
+
+        local delay = turnAngle > 120 and 700 or 500
+        if speed > 1 then
+            delay = math.floor(delay / 2)
+        end
+        print(string.format("[DebugF7] Pulsing companion toward %s (delay=%dms, speed=%.0f)", nearestName, delay, speed))
+
+        ExecuteInGameThreadWithDelay(delay, function()
+            pcall(function() companionMgr:StopMovement(true) end)
+            pcall(function() companionMgr:StopMovement(false) end)
+            pcall(function() companionMgr:StopCompanionForcedWaiting() end)
+            print("[DebugF7] Pulse complete, follow restored")
+        end)
+
+        if ShowHint then
+            ShowHint("Orient companion -> " .. nearestName .. " (angle=" .. math.floor(turnAngle) .. ")", 3)
+        end
     end)
+end
 
-    if not ok then
-        print("[Blueprint] ActionExecute error: " .. tostring(err))
-        return false
-    end
-    return true
+-- Preserved: Original F7 Gaze/LookAt Tests (renamed)
+function DebugF7_GazeTests()
+    ExecuteInGameThread(function()
+        if _G.DebugGazeLoop then
+            pcall(function() CancelDelayedAction(_G.DebugGazeLoop) end)
+            _G.DebugGazeLoop = nil
+        end
+        local staticData = GetStaticCache()
+        if not staticData then print("[DebugF7-Gaze] No static cache") return end
+        local player = staticData.player
+        if not player or not SafeIsValid(player) then print("[DebugF7-Gaze] No player") return end
+        local companionMgr = staticData.companionManager
+        if not companionMgr then print("[DebugF7-Gaze] No CompanionManager") return end
+        local companionPawn = nil
+        pcall(function() companionPawn = companionMgr:GetPrimaryCompanionPawn() end)
+        if not companionPawn or not SafeIsValid(companionPawn) then
+            print("[DebugF7-Gaze] No companion pawn")
+            return
+        end
+        local companionId = Utils.GetCompanionId(companionPawn) or "?"
+        _G.DebugGazeTestIdx = _G.DebugGazeTestIdx + 1
+        local idx = _G.DebugGazeTestIdx
+        print(string.format("[DebugF7-Gaze] === TEST %d === Companion: %s", idx, companionId))
+        if idx > 11 then
+            print("[DebugF7-Gaze] All tests complete. Resetting.")
+            _G.DebugGazeTestIdx = 0
+            return
+        end
+        print("[DebugF7-Gaze] (Old gaze test " .. idx .. " - see git history for full implementation)")
+    end)
+end
+
+-- F7 Debug Function (Original) - Nearby Station Scanner
+function DebugF7_StationScanner()
+    ExecuteInGameThread(function()
+        if true then
+            print("[DebugF7] === VR CONTROLLER DEBUG ===")
+            local staticData = GetStaticCache()
+            if not staticData then print("[DebugF7] No static cache") return end
+            local cam = staticData.cameraManager
+            if not cam then print("[DebugF7] No camera") return end
+            local camRot
+            pcall(function() camRot = cam:GetCameraRotation() end)
+            if camRot then
+                print(string.format("[DebugF7] CamRot (=wand): yaw=%.1f pitch=%.1f", camRot.Yaw, camRot.Pitch))
+            end
+            local dbg = _G.VRDebug
+            if dbg then
+                if dbg.hmd then
+                    print(string.format("[DebugF7] HMD: yaw=%.1f pitch=%.1f", dbg.hmd.yaw, dbg.hmd.pitch))
+                end
+                if dbg.dev1 then
+                    print(string.format("[DebugF7] Dev1 (%s): yaw=%.1f pitch=%.1f", dbg.dev1.role or "?", dbg.dev1.yaw, dbg.dev1.pitch))
+                end
+                if dbg.dev2 then
+                    print(string.format("[DebugF7] Dev2 (%s): yaw=%.1f pitch=%.1f", dbg.dev2.role or "?", dbg.dev2.yaw, dbg.dev2.pitch))
+                end
+                print(string.format("[DebugF7] Using device idx: %s", tostring(dbg.using_idx)))
+            else
+                print("[DebugF7] No VRDebug data yet")
+            end
+            local vrOff = _G.VROffset
+            if vrOff then
+                print(string.format("[DebugF7] Computed offset: yaw=%.1f pitch=%.1f", vrOff.yaw, vrOff.pitch))
+            end
+            return
+        end
+
+        print("[DebugF7] === STATION SCANNER ===")
+
+        local staticData = GetStaticCache()
+        if not staticData then print("[DebugF7] No static cache") return end
+
+        local player = staticData.player
+        if not player then print("[DebugF7] No player") return end
+
+        local playerLoc = nil
+        pcall(function() playerLoc = player:K2_GetActorLocation() end)
+        if not playerLoc then print("[DebugF7] No player location") return end
+
+        local KismetSystem = staticData.kismetSystem
+        local KismetMath = staticData.kismetMath
+
+        -- Find all stations
+        local allStations = FindAllOf("Station")
+        if not allStations then
+            ShowHint("No stations found", 3)
+            return
+        end
+
+        local scanRadius = 1500 -- ~15 meters in UE units
+        local nearbyStations = {}
+
+        for _, station in pairs(allStations) do
+            pcall(function()
+                local stationLoc = station:K2_GetActorLocation()
+                local dx = stationLoc.X - playerLoc.X
+                local dy = stationLoc.Y - playerLoc.Y
+                local dz = stationLoc.Z - playerLoc.Z
+                local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+
+                if dist <= scanRadius then
+                    local stationComp = nil
+                    pcall(function() stationComp = station:GetStationComponent() end)
+                    if not stationComp then return end
+
+                    local active = false
+                    pcall(function() active = stationComp:IsStationActive() end)
+                    if not active then return end
+
+                    local numConns = 0
+                    pcall(function() numConns = stationComp:GetNumConnections() end)
+
+                    local isChair = false
+                    pcall(function() isChair = stationComp:IsAChair() end)
+
+                    local isBed = false
+                    pcall(function() isBed = stationComp:IsABed() end)
+
+                    local propType = -1
+                    pcall(function() propType = stationComp:GetPropType() end)
+
+                    local meshName = "?"
+                    pcall(function()
+                        local mn = stationComp:GetMeshName()
+                        if mn then pcall(function() meshName = mn:ToString() end) end
+                    end)
+
+                    local stationName = "?"
+                    pcall(function() stationName = station:GetFullName():match("([^%.]+)$") end)
+
+                    local stationClass = "?"
+                    pcall(function() stationClass = station:GetClass():GetFullName():match("([^%.]+)$") end)
+
+                    -- Check occupancy
+                    local numUsers = 0
+                    pcall(function()
+                        local users = {}
+                        stationComp:GetStationUsers(users)
+                        for _ in pairs(users) do numUsers = numUsers + 1 end
+                    end)
+
+                    table.insert(nearbyStations, {
+                        station = station,
+                        stationComp = stationComp,
+                        name = stationName,
+                        class = stationClass,
+                        loc = stationLoc,
+                        dist = dist,
+                        conns = numConns,
+                        users = numUsers,
+                        isChair = isChair,
+                        isBed = isBed,
+                        propType = propType,
+                        mesh = meshName,
+                    })
+                end
+            end)
+        end
+
+        -- Sort by distance
+        table.sort(nearbyStations, function(a, b) return a.dist < b.dist end)
+
+        -- Line trace visibility check for each station
+        if KismetSystem and KismetMath then
+            local playerHalfHeight = 88
+            pcall(function()
+                local capsule = player.CapsuleComponent
+                if capsule and capsule.CapsuleHalfHeight then
+                    playerHalfHeight = capsule.CapsuleHalfHeight
+                end
+            end)
+
+            local traceStart = nil
+            pcall(function()
+                traceStart = KismetMath:MakeVector(playerLoc.X, playerLoc.Y, playerLoc.Z + playerHalfHeight * 2 + 20)
+            end)
+
+            if traceStart then
+                local ETraceTypeQuery_Visibility = 0
+                local EDrawDebugTrace_None = 0
+                local TraceColor = { R = 0, G = 0, B = 0, A = 0 }
+                local ActorsToIgnore = { player }
+
+                for _, s in ipairs(nearbyStations) do
+                    s.visible = false
+                    pcall(function()
+                        local EndVector = KismetMath:MakeVector(s.loc.X, s.loc.Y, s.loc.Z + 50)
+                        local HitResult = {}
+                        local WasHit = KismetSystem:LineTraceSingle(
+                            player, traceStart, EndVector,
+                            ETraceTypeQuery_Visibility, false, ActorsToIgnore,
+                            EDrawDebugTrace_None, HitResult, true,
+                            TraceColor, TraceColor, 0.0
+                        )
+                        s.visible = not WasHit
+                    end)
+                end
+            end
+        end
+
+        -- Filter out PROP_TYPE_NONE (area/zone markers) and assign labels
+        local filtered = {}
+        for _, s in ipairs(nearbyStations) do
+            local label = PROP_TYPE_LABELS[s.propType]
+            if label then
+                s.typeLabel = label
+                table.insert(filtered, s)
+            end
+        end
+        nearbyStations = filtered
+
+        -- Print results
+        print(string.format("[DebugF7] Found %d stations within %.0fm", #nearbyStations, scanRadius / 100))
+
+        local hintLines = {}
+        for i, s in ipairs(nearbyStations) do
+            local vis = s.visible and "VIS" or "HID"
+            local spots = s.conns - s.users
+            local spotsStr = spots .. "/" .. s.conns
+            if s.users > 0 then spotsStr = spotsStr .. " (" .. s.users .. " used)" end
+
+            local line = string.format("%s %.0fm %s spots=%s %s",
+                vis, s.dist / 100, s.typeLabel, spotsStr, s.mesh)
+
+            print(string.format("[DebugF7] [%d] %s | %s | class=%s", i, line, s.name, s.class))
+
+            if i <= 15 then
+                table.insert(hintLines, string.format("%s %.0fm %s %s", vis, s.dist / 100, s.typeLabel, spotsStr))
+            end
+        end
+
+        local hintText = string.format("STATIONS (%d within %.0fm):\n", #nearbyStations, scanRadius / 100)
+            .. table.concat(hintLines, "\n")
+        ShowHint(hintText, 15)
+
+        print("[DebugF7] === SCAN COMPLETE ===")
+    end)
 end
 
 -- ============================================
@@ -936,16 +1627,6 @@ end
 -- Maps speaker display names to actor references
 -- ============================================
 _G.SpeakerActorCache = _G.SpeakerActorCache or {}
-
--- Safe IsValid check - Blueprint output param actors may not support IsValid() properly
-local function SafeIsValid(actor)
-    if not actor then return false end
-    local valid = false
-    pcall(function()
-        valid = actor:IsValid()
-    end)
-    return valid
-end
 
 -- Get actor for a speaker by name (cached)
 function GetSpeakerActor(speakerName)
@@ -970,29 +1651,43 @@ function GetSpeakerActor(speakerName)
         if SafeIsValid(cached) then
             return cached
         else
-            print("[GetSpeakerActor] Cache hit but invalid: " .. speakerName)
+            -- Clear invalid entry to avoid repeated checks
+            _G.SpeakerActorCache[speakerName] = nil
+            print("[GetSpeakerActor] Cache hit but invalid (cleared): " .. speakerName)
         end
-    else
-        -- DEBUG: Show what keys ARE in cache
-        local keys = {}
-        for k, _ in pairs(_G.SpeakerActorCache or {}) do
-            table.insert(keys, k)
-        end
-        print("[GetSpeakerActor] Cache miss: '" .. speakerName .. "', keys: " .. table.concat(keys, ", "))
     end
 
-    -- Not in cache - return nil (don't call Blueprint, it returns invalid actors)
+    -- Not in cache - search NPC cache directly (bypasses visibility filtering)
+    -- This handles cases where visibility raycast filtered out the speaker
+    local npcs = GetCachedNPCs()
+    if npcs and #npcs > 0 then
+        local staticData = GetStaticCache()
+        local targetLower = speakerName:lower()
+        for _, npc in pairs(npcs) do
+            if SafeIsValid(npc) then
+                local npcId = Utils.GetActorVoiceId(npc, staticData)
+                if npcId and npcId:lower() == targetLower then
+                    -- Found! Cache it for future lookups
+                    _G.SpeakerActorCache[speakerName] = npc
+                    print("[GetSpeakerActor] Found via NPC cache fallback: " .. speakerName)
+                    return npc
+                end
+            end
+        end
+    end
+
     return nil
 end
 
 -- Get actor for whoever is currently speaking (turn-based with fallbacks)
 function GetCurrentSpeakerActor()
     local pState = _G.PlaybackState
+    local currentTurnId = _G.SonorusState and _G.SonorusState.currentTurnId
 
     -- PRIMARY: Use currentTurnId from state (set by play_turn handler)
     -- This is the new atomic approach - avoids race conditions
-    if _G.SonorusState and _G.SonorusState.currentTurnId then
-        local actor = _G.TurnActorCache and _G.TurnActorCache[_G.SonorusState.currentTurnId]
+    if currentTurnId then
+        local actor = _G.TurnActorCache and _G.TurnActorCache[currentTurnId]
         if actor and SafeIsValid(actor) then
             return actor
         end
@@ -1009,11 +1704,18 @@ function GetCurrentSpeakerActor()
                     return actor
                 end
             end
-            -- Fall back to speaker name lookup
+            -- Fall back to speaker name lookup (handles location change recovery)
             local lookupName = currentItem.speakerId or currentItem.speaker
             if lookupName then
                 local actor = GetSpeakerActor(lookupName)
-                if actor then return actor end
+                if actor then
+                    -- Update TurnActorCache with recovered actor for future lookups
+                    local turnId = currentItem.turnId or currentTurnId
+                    if turnId and _G.TurnActorCache then
+                        _G.TurnActorCache[turnId] = actor
+                    end
+                    return actor
+                end
             end
         end
     end
@@ -1030,6 +1732,9 @@ function GetCurrentSpeakerActor()
     return nil
 end
 
+-- Export globally for LipSync module
+_G.GetCurrentSpeakerActor = GetCurrentSpeakerActor
+
 -- Clear speaker cache (on reset or conversation end)
 function ClearSpeakerCache()
     _G.SpeakerActorCache = {}
@@ -1037,52 +1742,54 @@ function ClearSpeakerCache()
 end
 
 -- Mute all speakers in the queue (call when queue is populated)
+-- Stores speaker names (not AkComponent refs) so unmute works even if NPCs are recreated
 function MuteQueueSpeakers(queue)
     if not queue or #queue == 0 then return end
     if not _G.SonorusState then return end
 
-    _G.SonorusState.mutedAkComponents = _G.SonorusState.mutedAkComponents or {}
+    _G.SonorusState.mutedSpeakers = _G.SonorusState.mutedSpeakers or {}
 
     local mutedCount = 0
     for _, item in ipairs(queue) do
         local speakerName = item.speakerId or item.speaker
-        if speakerName then
+        if speakerName and not _G.SonorusState.mutedSpeakers[speakerName] then
             local actor = GetSpeakerActor(speakerName)
             if actor then
                 local comp = MuteNPCAudio(actor)
                 if comp then
-                    -- Check if already muted
-                    local alreadyMuted = false
-                    for _, existing in ipairs(_G.SonorusState.mutedAkComponents) do
-                        if existing == comp then
-                            alreadyMuted = true
-                            break
-                        end
-                    end
-                    if not alreadyMuted then
-                        table.insert(_G.SonorusState.mutedAkComponents, comp)
-                        mutedCount = mutedCount + 1
-                    end
+                    _G.SonorusState.mutedSpeakers[speakerName] = true
+                    mutedCount = mutedCount + 1
                 end
             end
         end
     end
 
     if mutedCount > 0 then
-        print("[Sonorus] Muted " .. mutedCount .. " queue speakers (total: " .. #_G.SonorusState.mutedAkComponents .. ")")
+        local total = 0
+        for _ in pairs(_G.SonorusState.mutedSpeakers) do total = total + 1 end
+        print("[Sonorus] Muted " .. mutedCount .. " queue speakers (total: " .. total .. ")")
     end
 end
 
 -- Unmute all speakers (call at conversation end)
+-- Looks up actors by name and unmutes their current AkComponent (handles NPC recreation)
 function UnmuteAllSpeakers()
     if not _G.SonorusState then return end
-    local mutedComps = _G.SonorusState.mutedAkComponents or {}
-    _G.SonorusState.mutedAkComponents = {}
+    local mutedSpeakers = _G.SonorusState.mutedSpeakers or {}
+    _G.SonorusState.mutedSpeakers = {}
 
-    if #mutedComps > 0 then
-        print("[Sonorus] Unmuting " .. #mutedComps .. " speakers")
-        for _, comp in ipairs(mutedComps) do
-            UnmuteNPCAudio(comp)
+    local count = 0
+    for speakerName, _ in pairs(mutedSpeakers) do
+        count = count + 1
+    end
+
+    if count > 0 then
+        print("[Sonorus] Unmuting " .. count .. " speakers")
+        for speakerName, _ in pairs(mutedSpeakers) do
+            local actor = GetSpeakerActor(speakerName)
+            if actor then
+                UnmuteNPCAudioByActor(actor)
+            end
         end
     end
 end
@@ -1111,73 +1818,42 @@ _G.Locations = _G.Locations or {}
 _G.LocationsLoaded = _G.LocationsLoaded or false
 _G.Localization = _G.Localization or {}
 _G.LocalizationLoaded = _G.LocalizationLoaded or false
+-- Voice manifest: maps voice IDs to their reference info
+_G.VoiceManifest = _G.VoiceManifest or {}
+_G.VoiceManifestLoaded = _G.VoiceManifestLoaded or false
+-- NPC ID normalization: lowercase -> proper case mapping (e.g., "neridaroberts" -> "NeridaRoberts")
+-- Built from voice_manifest.json voice keys which have proper casing
+_G.VoiceIdNormalize = _G.VoiceIdNormalize or {}
+-- Companion callout history for repeat blocking: {[voiceName] = {[text] = gameTimeMinutes}}
+_G.CompanionCalloutHistory = _G.CompanionCalloutHistory or {}
 
 -- ============================================
--- File I/O Helpers
--- ============================================
-function ReadFile(path)
-    -- Defensive: check io.open exists and is a function
-    if type(io) ~= "table" or type(io.open) ~= "function" then
-        print("[Sonorus] ERROR: io.open corrupted, skipping file read")
-        return ""
-    end
-
-    local ok, f = pcall(function() return io.open(path, "r") end)
-    if not ok or not f then
-        return ""
-    end
-
-    -- Verify f is a file handle, not something weird
-    if type(f) ~= "userdata" then
-        print("[Sonorus] ERROR: io.open returned unexpected type: " .. type(f))
-        return ""
-    end
-
-    local content = ""
-    ok = pcall(function()
-        content = f:read("*a") or ""
-        f:close()
-    end)
-
-    return content
-end
-
-function WriteFile(path, content)
-    local f = io.open(path, "w")
-    if f then
-        f:write(content)
-        f:close()
-        return true
-    end
-    return false
-end
-
-function ClearFile(path)
-    WriteFile(path, "")
-end
-
--- Parse JSON response
-function ParseJsonResponse(jsonStr)
-    if not jsonStr or jsonStr == "" then return {} end
-    local ok, result = pcall(json.decode, jsonStr)
-    if ok and result then return result end
-    return {}
-end
-
 -- ============================================
 -- Server Management
 -- ============================================
 function IsServerAlive()
     -- Check heartbeat file - if timestamp is recent, server is alive
     local content = ReadFile("sonorus\\server.heartbeat")
-    if content == "" then return false end
+    if content == "" then
+        print("[Sonorus] Heartbeat file empty or missing")
+        return false
+    end
 
     local timestamp = tonumber(content)
-    if not timestamp then return false end
+    if not timestamp then
+        print("[Sonorus] Heartbeat file invalid: " .. tostring(content))
+        return false
+    end
 
-    -- Server is alive if heartbeat is within last 5 seconds
+    -- Server is alive if heartbeat is within last 10 seconds
+    -- (Python writes every 1s, 10s gives margin for file system delays)
     local now = os.time()
-    local alive = (now - timestamp) < 5
+    local age = now - timestamp
+    local alive = age < 10
+
+    if not alive then
+        print("[Sonorus] Heartbeat stale: " .. age .. "s old")
+    end
 
     -- Clear startup guard if server is confirmed alive
     if alive and _G.SonorusServerState.startupInProgress then
@@ -1240,7 +1916,7 @@ function StartServer()
 
     -- Use batch file that knows its own location
     -- Close handle immediately since 'start' detaches the process
-    local handle = io.popen('start "SonorusServer" sonorus\\start_server.bat')
+    local handle = io.popen('start "SonorusServer" sonorus\\start_server.bat --from-game')
     if handle then handle:close() end
 
     print("[Sonorus] Server process spawned")
@@ -1265,6 +1941,17 @@ end
 local function sendDialogueEntry(entry)
     if not entry then return end
 
+    -- Suppress all non-combat entries during combat
+    -- Combat entries use direct socket send to bypass this check
+    if _G.CombatStats and _G.CombatStats.active then
+        local entryType = entry.type or "dialogue"
+        -- Only allow combat entries through during combat
+        if entryType ~= "combat" then
+            -- Silently skip - don't log to avoid spam during combat
+            return
+        end
+    end
+
     -- Send to Python via socket
     pcall(function()
         SocketClient.send({
@@ -1275,65 +1962,15 @@ local function sendDialogueEntry(entry)
 end
 
 -- Load subtitles.json (lazy load on first use)
+-- Uses language-specific file if set (e.g., subtitles_de_de.json for German)
 function LoadSubtitles()
-    if _G.SubtitlesLoaded then return true end
-
-    print("[Sonorus] Loading subtitles.json...")
-    local content = ReadFile(FILES.subtitles)
-
-    if content == "" then
-        print("[Sonorus] Warning: subtitles.json not found or empty")
-        print("[Sonorus] Run extract_localization.py to generate it")
-        return false
-    end
-
-    local ok, result = pcall(json.decode, content)
-    if not ok or not result then
-        print("[Sonorus] Error parsing subtitles.json")
-        return false
-    end
-
-    _G.Subtitles = result
-    _G.SubtitlesLoaded = true
-
-    local count = 0
-    for _ in pairs(_G.Subtitles) do count = count + 1 end
-    print(string.format("[Sonorus] Loaded %d subtitle entries", count))
-
-    return true
+    local path = GetLocalizedPath("subtitles", ".json")
+    return FileIO.LoadJsonCached("Subtitles", path, "subtitles.json")
 end
 
 -- Load locations.json (lazy load on first use)
 function LoadLocations()
-    if _G.LocationsLoaded then return true end
-
-    print("[Sonorus] Loading locations.json...")
-    local content = ReadFile(FILES.locations)
-
-    if content == "" then
-        print("[Sonorus] Warning: locations.json not found or empty")
-        print("[Sonorus] Run: python extract_localization.py --main")
-        return false
-    end
-
-    local ok, result = pcall(json.decode, content)
-    if not ok or not result then
-        print("[Sonorus] Error parsing locations.json")
-        return false
-    end
-
-    _G.Locations = result
-    _G.LocationsLoaded = true
-
-    local count = 0
-    local withDesc = 0
-    for _, v in pairs(_G.Locations) do
-        count = count + 1
-        if type(v) == "table" and v.desc then withDesc = withDesc + 1 end
-    end
-    print(string.format("[Sonorus] Loaded %d location entries (%d with descriptions)", count, withDesc))
-
-    return true
+    return FileIO.LoadJsonCached("Locations", FILES.locations, "locations.json")
 end
 
 -- Get display name for a location internal ID
@@ -1379,6 +2016,28 @@ function GetLocationDisplayName(internalId)
         end
     end
 
+    -- Try longest prefix match (e.g. "HOG_Class_Charms_Patrol_Prof" matches "HOG_Class_Charms")
+    local bestMatch = nil
+    local bestLen = 0
+    for key, value in pairs(_G.Locations) do
+        if #key > bestLen and internalId:sub(1, #key) == key then
+            bestLen = #key
+            bestMatch = value
+        end
+    end
+    if bestMatch then return extractName(bestMatch) end
+
+    -- Fallback to main_localization.json
+    if not _G.LocalizationLoaded then
+        LoadLocalization()
+    end
+    if _G.Localization then
+        local locEntry = _G.Localization[internalId]
+        if locEntry and type(locEntry) == "string" and locEntry ~= "" then
+            return locEntry
+        end
+    end
+
     return nil
 end
 
@@ -1387,9 +2046,28 @@ function GetSubtitleText(lineID)
     if not _G.SubtitlesLoaded then
         LoadSubtitles()
     end
+
+    -- Handle case where file doesn't exist (e.g., language changed but not yet extracted)
+    if not _G.Subtitles then
+        return ""
+    end
+
     -- Try original key first (NPCs use TitleCase)
     local text = _G.Subtitles[lineID]
     if text then return text end
+
+    -- Try Normalizing the NPC part of the key e.g. neridaroberts_10364 to NeridaRoberts_10364
+    local npcId, lineNum = string.match(lineID, "^([^_]+)_(.+)$")
+    if npcId and lineNum then
+        local normalized = NormalizeNpcId(npcId)
+        if normalized ~= npcId then
+            local normalizedLineID = normalized .. "_" .. lineNum
+            _G.DevPrint("normalizedLineID " .. normalizedLineID)
+
+            text = _G.Subtitles[normalizedLineID]
+            if text then return text end
+        end
+    end
 
     -- Player keys are lowercase in subtitles.json
     local key = string.lower(lineID or "")
@@ -1409,33 +2087,42 @@ end
 -- ============================================
 
 -- Load main_localization.json (lazy load, ~3MB)
+-- Uses language-specific file if set (e.g., main_localization_de_de.json for German)
 function LoadLocalization()
-    if _G.LocalizationLoaded then return true end
-
-    print("[Sonorus] Loading main_localization.json...")
-    local content = ReadFile(FILES.localization)
-
-    if content == "" then
-        print("[Sonorus] Warning: main_localization.json not found")
-        print("[Sonorus] Run: python extract_localization.py --main")
-        return false
-    end
-
-    local ok, result = pcall(json.decode, content)
-    if not ok or not result then
-        print("[Sonorus] Error parsing main_localization.json")
-        return false
-    end
-
-    _G.Localization = result
-    _G.LocalizationLoaded = true
-
-    local count = 0
-    for _ in pairs(_G.Localization) do count = count + 1 end
-    print(string.format("[Sonorus] Loaded %d localization entries", count))
-
-    return true
+    local path = GetLocalizedPath("main_localization", ".json")
+    return FileIO.LoadJsonCached("Localization", path, "main_localization.json")
 end
+
+--- Normalize an NPC ID to proper case using voice manifest
+--- If the ID has no uppercase letters, looks up the proper case from voice_manifest.json
+--- This fixes IDs like "neridaroberts" -> "NeridaRoberts"
+---@param npcId string The NPC ID to normalize (e.g., "neridaroberts" or "NeridaRoberts")
+---@return string normalizedId The properly-cased ID, or original if not found/already proper
+function NormalizeNpcId(npcId)
+    if not npcId or npcId == "" then return npcId end
+
+    -- Check if ID already has uppercase letters (proper casing)
+    -- If it has ANY uppercase, assume it's already correct
+    if npcId:match("[A-Z]") then
+        return npcId
+    end
+
+    -- All lowercase - need to normalize
+    -- Load voice manifest if not loaded
+    if not _G.VoiceManifestLoaded then
+        LoadVoiceManifest()
+    end
+
+    -- Look up in normalization map
+    local properCase = _G.VoiceIdNormalize[npcId]
+    if properCase then
+        return properCase
+    end
+
+    -- Not found in voice manifest - return as-is
+    return npcId
+end
+_G.NormalizeNpcId = NormalizeNpcId
 
 -- Get localized display name for internal ID
 -- Falls back to prettified name if not found
@@ -1447,14 +2134,17 @@ function GetDisplayName(internalName)
         LoadLocalization()
     end
 
-    -- Try exact match
-    local displayName = _G.Localization[internalName]
-    if displayName and displayName ~= "" then
-        return displayName
+    -- Handle case where file doesn't exist (e.g., language changed but not yet extracted)
+    if _G.Localization then
+        -- Normalize because the localization has pascal case keys while some NPC ids do not e.g. "neridaroberts"
+        local displayName = _G.Localization[NormalizeNpcId(internalName)]
+        if displayName and displayName ~= "" then
+            return displayName
+        end
     end
 
     -- Fallback: prettify the internal name
-    return string.gsub(internalName, "(%l)(%u)", "%1 %2")
+    return string.gsub(NormalizeNpcId(internalName), "(%l)(%u)", "%1 %2")
 end
 
 -- ============================================
@@ -1465,31 +2155,7 @@ _G.SpellMappingsLoaded = _G.SpellMappingsLoaded or false
 
 -- Load spell_mappings.json
 function LoadSpellMappings()
-    if _G.SpellMappingsLoaded then return true end
-
-    print("[Sonorus] Loading spell_mappings.json...")
-    local content = ReadFile(FILES.spellMappings)
-
-    if content == "" then
-        print("[Sonorus] Warning: spell_mappings.json not found")
-        print("[Sonorus] Run: python extract_spell_mappings.py")
-        return false
-    end
-
-    local ok, data = pcall(json.decode, content)
-    if not ok or not data then
-        print("[Sonorus] Error: Failed to parse spell_mappings.json")
-        return false
-    end
-
-    _G.SpellMappings = data
-    _G.SpellMappingsLoaded = true
-
-    local count = 0
-    for _ in pairs(_G.SpellMappings) do count = count + 1 end
-    print(string.format("[Sonorus] Loaded %d spell mappings", count))
-
-    return true
+    return FileIO.LoadJsonCached("SpellMappings", FILES.spellMappings, "spell_mappings.json")
 end
 
 -- Get spell info from Blueprint class name
@@ -1529,13 +2195,60 @@ function GetSpellInfo(blueprintClassName)
     }
 end
 
+-- Combat tracking utilities are now in Utils/Combat.lua
+
+-- ============================================
+-- Voice Manifest & NPC ID Normalization
+-- ============================================
+
+--- Load voice_manifest.json and build ID normalization map
+--- The voice manifest contains properly-cased voice IDs (e.g., "NeridaRoberts")
+--- We build a lowercase -> proper case map so we can normalize IDs from the game
+--- which sometimes returns lowercase (e.g., "neridaroberts" -> "NeridaRoberts")
+function LoadVoiceManifest()
+    -- Already loaded check
+    if _G.VoiceManifestLoaded then return true end
+
+    print("[Sonorus] Loading voice_manifest.json...")
+
+    local content = FileIO.ReadFile(FILES.voiceManifest)
+    if content == "" then
+        print("[Sonorus] Warning: voice_manifest.json not found or empty")
+        return false
+    end
+
+    local ok, result = pcall(json.decode, content)
+    if not ok or not result then
+        print("[Sonorus] Error parsing voice_manifest.json")
+        return false
+    end
+
+    _G.VoiceManifest = result
+    _G.VoiceManifestLoaded = true
+
+    -- Build lowercase -> proper case normalization map from voice keys
+    local voices = result.voices or {}
+    local normalizeMap = {}
+    local count = 0
+
+    for voiceId, _ in pairs(voices) do
+        local lowerKey = voiceId:lower()
+        normalizeMap[lowerKey] = voiceId
+        count = count + 1
+    end
+
+    _G.VoiceIdNormalize = normalizeMap
+    print(string.format("[Sonorus] Loaded %d voice entries, built ID normalization map", count))
+
+    return true
+end
+
+-- Export globally
+_G.LoadVoiceManifest = LoadVoiceManifest
+
 -- ============================================
 -- Utility
 -- ============================================
-local function prettifyName(name)
-    -- Use localization lookup (includes fallback to space-separated)
-    return GetDisplayName(name)
-end
 
 local function calculateDistance(loc1, loc2)
     local dx = loc1.X - loc2.X
@@ -1561,25 +2274,32 @@ local function IsNamedNPC(voiceName)
     return true
 end
 
-local function GetEarshotWitnesses(speakerVoiceName)
+local function GetEarshotWitnesses(speakerVoiceName, distanceOverride)
     -- Get list of named NPC IDs within earshot, excluding speaker and player
     -- Uses player-relative nearbyNPCs as a proxy for speaker-relative earshot
+    -- distanceOverride: optional custom distance (e.g., 3000 for combat)
     local witnesses = {}
+
+    -- Use larger search radius if custom distance requested
+    local searchRadius = distanceOverride and math.max(distanceOverride, 2000) or 2000
 
     -- Get nearby NPCs (use cached result if available from recent WriteGameContext)
     local npcResult = nil
     pcall(function()
-        npcResult = GetNearbyNPCs(2000, 0.9)
+        npcResult = GetNearbyNPCs(searchRadius, 0.9)
     end)
 
     if not npcResult or not npcResult.nearbyList then
         return witnesses
     end
 
+    -- Base earshot distance (can be overridden for combat, etc.)
+    local earshotDistance = distanceOverride or 1000  -- ~10m normal, or custom
+
     -- Reduce earshot distance when player is invisible (Disillusionment)
-    local earshotDistance = 1000  -- ~10m normal
+    -- (proportional reduction even with override)
     if npcResult.playerInStealth then
-        earshotDistance = 300  -- ~3m when invisible (30%)
+        earshotDistance = earshotDistance * 0.3  -- 30% when invisible
     end
 
     for _, npc in ipairs(npcResult.nearbyList) do
@@ -1628,9 +2348,7 @@ local function TryFindFirstOf(className)
     end)
     -- Check result is valid UObject (not nil, not function)
     if success and result and type(result) == "userdata" then
-        local isValid = false
-        pcall(function() isValid = result:IsValid() end)
-        if isValid then
+        if SafeIsValid(result) then
             return result
         end
     end
@@ -1648,30 +2366,81 @@ function GetPlayerInfo()
     local uiManager = TryFindFirstOf("UIManager")
     if not uiManager then return info end
 
-    -- Get player name - nested pcall around ToString() is required
-    pcall(function()
-        local result = uiManager:GetPlayerName()
-        if result then
-            local str = nil
-            pcall(function() str = result:ToString() end)
-            if str and str ~= "" then info.name = str end
-        end
-    end)
+    -- Get player name and house using safe FString helpers
+    local name = Utils.SafeMethodToString(uiManager, "GetPlayerName")
+    if name then info.name = name end
 
-    -- Get player house - nested pcall around ToString() is required
-    pcall(function()
-        local result = uiManager:GetPlayerHouse()
-        if result then
-            local str = nil
-            pcall(function() str = result:ToString() end)
-            if str and str ~= "" then info.house = str end
-        end
-    end)
+    local house = Utils.SafeMethodToString(uiManager, "GetPlayerHouse")
+    if house then info.house = house end
 
     return info
 end
 
--- Get current time using the Scheduler
+-- Time cache: persists across hot reload, invalidated on load/fast travel
+_G._TimeCache = _G._TimeCache or {
+    lastHour = -1, dayOfWeek = 0, dayOfMonth = 1, month = 9, year = 1890, initialized = false
+}
+
+-- Refresh time cache from Scheduler. Call with fresh=true on save load / fast travel.
+-- Normal calls: 1 UFunction call (GetMinuteOfTheDay). Fresh: 5 calls (all fields).
+function RefreshTimeCache(fresh)
+    local scheduler = Cache.Get("Scheduler", function()
+        return TryFindFirstOf("Scheduler")
+    end)
+    if not scheduler then return end
+
+    local tc = _G._TimeCache
+    if fresh then
+        tc.initialized = false
+        tc.lastHour = -1
+    end
+
+    -- Always fetch time (1 UFunction call)
+    local hour, minute = 12, 0
+    pcall(function()
+        local minuteOfDay = scheduler:GetMinuteOfTheDay() or 720
+        hour = math.floor(minuteOfDay / 60)
+        minute = minuteOfDay % 60
+    end)
+    tc.hour = hour
+    tc.minute = minute
+
+    -- Check if day might have changed: hour crossed midnight (was PM, now AM) or first run
+    local dayMayHaveChanged = not tc.initialized
+        or (tc.lastHour >= 12 and hour < 12)  -- PM → AM = new day
+    tc.lastHour = hour
+
+    if dayMayHaveChanged then
+        if not tc.initialized then
+            -- First run / fresh: fetch everything once
+            pcall(function() tc.dayOfWeek = scheduler:GetDayOfTheWeek() or 0 end)
+            pcall(function() tc.dayOfMonth = scheduler:GetDayOfTheMonth() or 1 end)
+            pcall(function() tc.month = scheduler:GetMonthOfTheYear() or 9 end)
+            pcall(function() tc.year = scheduler:GetCalendarYear() or 1890 end)
+            tc.initialized = true
+        else
+            -- PM→AM flip: check if day actually changed
+            local oldDay = tc.dayOfMonth
+            local oldMonth = tc.month
+            local newDay = nil
+            pcall(function() newDay = scheduler:GetDayOfTheMonth() end)
+            if newDay and newDay ~= oldDay then
+                tc.dayOfMonth = newDay
+                pcall(function() tc.dayOfWeek = scheduler:GetDayOfTheWeek() or 0 end)
+                -- Day went down = new month
+                if newDay < oldDay then
+                    pcall(function() tc.month = scheduler:GetMonthOfTheYear() or 9 end)
+                    -- Month went down = new year
+                    if tc.month < oldMonth then
+                        pcall(function() tc.year = scheduler:GetCalendarYear() or 1890 end)
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- Get current time using cached Scheduler data
 function GetTimeOfDay()
     local result = {
         hour = 12,
@@ -1686,22 +2455,17 @@ function GetTimeOfDay()
         dateFormatted = "Monday, September 1st, 1890",
     }
 
-    local scheduler = TryFindFirstOf("Scheduler")
-    if not scheduler then
-        return result
+    local tc = _G._TimeCache
+    if not tc.initialized then
+        RefreshTimeCache()
     end
 
-    -- Each call in its own pcall to isolate failures
-    -- Note: Some methods use : (instance) and some use . (may vary)
-    pcall(function() result.hour = scheduler:GetHourOfTheDay() or 12 end)
-    pcall(function()
-        local minuteOfDay = scheduler:GetMinuteOfTheDay() or 0
-        result.minute = minuteOfDay % 60
-    end)
-    pcall(function() result.dayOfWeek = scheduler:GetDayOfTheWeek() or 0 end)
-    pcall(function() result.dayOfMonth = scheduler:GetDayOfTheMonth() or 1 end)
-    pcall(function() result.month = scheduler:GetMonthOfTheYear() or 9 end)
-    pcall(function() result.year = scheduler:GetCalendarYear() or 1890 end)
+    result.hour = tc.hour or 12
+    result.minute = tc.minute or 0
+    result.dayOfWeek = tc.dayOfWeek
+    result.dayOfMonth = tc.dayOfMonth
+    result.month = tc.month
+    result.year = tc.year
 
     -- Format time string
     local h = result.hour
@@ -1751,6 +2515,68 @@ function GetTimeOfDay()
 
     return result
 end
+
+-- Convert game time to total minutes since epoch (for time comparisons)
+-- Uses a simplified calculation: year * 365 * 24 * 60 + month * 30 * 24 * 60 + day * 24 * 60 + hour * 60 + minute
+function GetGameTimeMinutes()
+    local time = GetTimeOfDay()
+    -- Approximate: treat all months as 30 days, all years as 365 days
+    local totalMinutes = (time.year * 365 * 24 * 60) +
+                         ((time.month - 1) * 30 * 24 * 60) +
+                         ((time.dayOfMonth - 1) * 24 * 60) +
+                         (time.hour * 60) +
+                         time.minute
+    return totalMinutes
+end
+
+-- Check if a companion callout should be blocked as a repeat
+-- Returns true if blocked (duplicate within time window), false if allowed
+-- blockMinutes: 0 = disabled (allow all), -1 = never repeat, >0 = block within N game minutes
+function IsCompanionCalloutBlocked(voiceName, text, blockMinutes)
+    if not voiceName or not text then return false end
+    if blockMinutes == 0 then return false end  -- Feature disabled
+
+    local history = _G.CompanionCalloutHistory[voiceName]
+    if not history then
+        -- First time seeing this companion's callouts
+        _G.CompanionCalloutHistory[voiceName] = {[text] = GetGameTimeMinutes()}
+        return false
+    end
+
+    local lastTime = history[text]
+    if not lastTime then
+        -- First time seeing this text from this companion
+        history[text] = GetGameTimeMinutes()
+        return false
+    end
+
+    local currentTime = GetGameTimeMinutes()
+    local timeDiff = currentTime - lastTime
+
+    -- blockMinutes < 0 means "never repeat" (always block duplicates)
+    if blockMinutes < 0 then
+        print(string.format("[CompanionCallout] Blocked repeat: %s", voiceName))
+        return true
+    end
+
+    -- Check if within time window
+    if timeDiff < blockMinutes then
+        print(string.format("[CompanionCallout] Blocked repeat: %s", voiceName))
+        return true
+    end
+
+    -- Enough time has passed, update timestamp and allow
+    history[text] = currentTime
+    -- print(string.format("[CompanionCallout] Allowing repeat (time diff=%d min): %s - '%s'",
+    --     timeDiff, voiceName, text:sub(1,50)))
+    return false
+end
+
+-- Initialize Combat module with dependencies (must be after GetTimeOfDay and GetDisplayName are defined)
+Combat.init({
+    getTimeOfDay = GetTimeOfDay,
+    getDisplayName = GetDisplayName,
+})
 
 -- Get current location using game systems
 function GetCurrentLocation()
@@ -1856,22 +2682,17 @@ function GetCurrentLocation()
         pcall(function()
             local gameInstance = FindFirstOf("PhoenixGameInstance")
             if gameInstance and gameInstance:IsValid() then
-                local worldName = gameInstance:GetCurrentWorldName()
-                if worldName then
-                    pcall(function()
-                        local name = worldName:ToString()
-                        if name and name ~= "" then
-                            -- Convert internal names to readable names
-                            local readableNames = {
-                                ["Overland"] = "Scottish Highlands",
-                                ["HogwartsCastle"] = "Hogwarts Castle",
-                                ["Hogwarts"] = "Hogwarts",
-                                ["Hogsmeade"] = "Hogsmeade Village",
-                                ["Dungeon"] = "Underground",
-                            }
-                            detailedLocation = readableNames[name] or name
-                        end
-                    end)
+                local name = Utils.SafeMethodToString(gameInstance, "GetCurrentWorldName")
+                if name then
+                    -- Convert internal names to readable names
+                    local readableNames = {
+                        ["Overland"] = "Scottish Highlands",
+                        ["HogwartsCastle"] = "Hogwarts Castle",
+                        ["Hogwarts"] = "Hogwarts",
+                        ["Hogsmeade"] = "Hogsmeade Village",
+                        ["Dungeon"] = "Underground",
+                    }
+                    detailedLocation = readableNames[name] or name
                 end
             end
         end)
@@ -1902,14 +2723,9 @@ function GetCurrentLocation()
         pcall(function()
             local mapHogwarts = FindFirstOf("MapHogwarts")
             if mapHogwarts and mapHogwarts:IsValid() then
-                local locName = mapHogwarts:GetMapLocationName()
-                if locName then
-                    pcall(function()
-                        local name = locName:ToString()
-                        if name and name ~= "" then
-                            detailedLocation = name
-                        end
-                    end)
+                local name = Utils.SafeMethodToString(mapHogwarts, "GetMapLocationName")
+                if name then
+                    detailedLocation = name
                 end
             end
         end)
@@ -1943,9 +2759,88 @@ function GetCurrentLocation()
     return location
 end
 
--- GetPlayerGear is defined earlier in the file (around line 541)
+-- Export for NPCLock snap rotation location check
+_G.GetCurrentLocation = GetCurrentLocation
 
--- Collect all game context and write to file
+-- ============================================
+-- House Points Cache System
+-- ============================================
+-- Reads house points from StatsManager and caches them.
+-- Only called at specific trigger points (not every context update).
+-- Returns true if data was found, false otherwise.
+function RefreshHousePoints()
+    local housePoints = {}
+    local hasData = false
+
+    local ok, err = pcall(function()
+        local statsManager = Cache.Get("StatsManager", function()
+            return FindFirstOf("StatsManager")
+        end)
+        if not statsManager then
+            DevPrint("[HousePoints] StatsManager not found")
+            return
+        end
+
+        local houses = {"Gryffindor", "Slytherin", "Hufflepuff", "Ravenclaw"}
+        local periods = {"Season", "Month", "Week", "Day"}
+
+        for _, house in ipairs(houses) do
+            housePoints[house] = {}
+            for _, period in ipairs(periods) do
+                local statName = "Current_" .. period .. "_" .. house
+                local statOk, statErr = pcall(function()
+                    local statFName = FName(statName)
+                    local exists = statsManager:StatExists(statFName)
+                    if exists then
+                        local points = statsManager:ReadStat(statFName)
+                        housePoints[house][period:lower()] = points or 0
+                        hasData = true
+                    end
+                end)
+                if not statOk then
+                    DevPrint("[HousePoints] Error reading " .. statName .. ": " .. tostring(statErr))
+                end
+            end
+        end
+    end)
+
+    if not ok then
+        DevPrint("[HousePoints] Refresh error: " .. tostring(err))
+        return false
+    end
+
+    -- Update cache
+    _G.CachedHousePoints.data = hasData and housePoints or nil
+    _G.CachedHousePoints.lastRefresh = os.clock()
+
+    if hasData then
+        -- Log actual values for debugging
+        local summary = {}
+        for house, data in pairs(housePoints) do
+            table.insert(summary, string.format("%s=%d", house:sub(1,4), data.season or 0))
+        end
+        DevPrint("[HousePoints] Cache refreshed: " .. table.concat(summary, ", "))
+        -- Send to Python for live display updates
+        if _G.SocketClient and _G.SocketClient.isConnected() then
+            _G.SocketClient.send({
+                type = "house_points_data",
+                points = housePoints
+            })
+        end
+    else
+        DevPrint("[HousePoints] No stats found (mod may not be installed)")
+    end
+
+    return hasData
+end
+
+-- Get cached house points (for context injection)
+-- Returns nil if no data cached
+function GetCachedHousePoints()
+    return _G.CachedHousePoints.data
+end
+
+-- Collect all game context and send to Python server
 function WriteGameContext()
     local context = {
         playerName = "Unknown",
@@ -2008,6 +2903,7 @@ function WriteGameContext()
             local npcResult = GetNearbyNPCs(2000, 0.9)
             if npcResult and npcResult.nearbyList then
                 local nearbyNpcsForContext = {}
+                local seenNames = {}
                 for _, entry in ipairs(npcResult.nearbyList) do
                     table.insert(nearbyNpcsForContext, {
                         name = entry.name,
@@ -2015,7 +2911,27 @@ function WriteGameContext()
                         isLookedAt = entry.isLookedAt,
                         onScreen = entry.onScreen
                     })
+                    seenNames[entry.name:lower()] = true
                 end
+
+                -- When on broom, check if companion is within extended range but outside normal range
+                -- Only add companion specifically - don't extend range for other NPCs
+                if _G.BroomState and _G.BroomState.mounted then
+                    local _, companionId = Utils.GetCompanionNameAndId()
+                    if companionId and not seenNames[companionId:lower()] then
+                        -- Companion not in normal range, check extended broom range
+                        local companionDist = Utils.GetCompanionDistance()
+                        if companionDist and companionDist <= 10000 then
+                            table.insert(nearbyNpcsForContext, {
+                                name = companionId,
+                                distance = math.floor(companionDist),
+                                isLookedAt = false,
+                                onScreen = false
+                            })
+                        end
+                    end
+                end
+
                 context.nearbyNpcs = nearbyNpcsForContext
                 if npcResult.lookedAtNpc then
                     context.lookedAtNpcName = npcResult.lookedAtNpc.name
@@ -2046,6 +2962,32 @@ function WriteGameContext()
                         RecordLocationTransition(zone.location)
                     end
                     _G.LastTrackedLocation = zone.location
+
+                    -- Clear NPC cache on location change - fresh NPCs will be fetched on next access
+                    Cache.ClearEntities("NPC")
+                    DevPrint(string.format("[Sonorus] Location changed to %s - NPC cache cleared", zone.location))
+
+                    -- Emit location:change event for CommitmentManager etc.
+                    pcall(function() Events.emit("location:change", { location = zone.location }) end)
+
+                    -- Update cached reverb on location change
+                    pcall(function()
+                        local reverb = GetCurrentReverb()
+                        if reverb then
+                            _G.CachedReverb = reverb
+                            -- Send reverb update to Python for live audio adjustment
+                            if SocketClient and SocketClient.send then
+                                SocketClient.send({
+                                    type = "reverb_update",
+                                    auxBus = reverb.auxBus,
+                                    sendLevel = reverb.sendLevel,
+                                    zone = reverb.zone,
+                                    priority = reverb.priority
+                                })
+                            end
+                            DevPrint(string.format("[Sonorus] Reverb cached: %s (zone=%s)", reverb.auxBus, reverb.zone))
+                        end
+                    end)
                 end
             end
         end)
@@ -2081,40 +3023,12 @@ function WriteGameContext()
                     context.isSwimming = player:IsSwimming() or false
                 end)
                 -- Companion info (companion shares player's stealth state via Disillusionment)
-                pcall(function()
-                    local companionMgr = staticData and staticData.companionManager
-                    if companionMgr then
-                        local companionPawn = companionMgr:GetPrimaryCompanionPawn()
-                        if companionPawn then
-                            context.hasCompanion = true
-                            context.companionInStealth = context.inStealth  -- Shares player's state
-                            -- Companion swimming (via cached NPC_Component class)
-                            pcall(function()
-                                local npcCompClass = staticData.npcComponentClass
-                                if npcCompClass then
-                                    local npcComp = companionPawn:GetComponentByClass(npcCompClass)
-                                    if npcComp then
-                                        context.companionIsSwimming = npcComp:IsSwimming() or false
-                                    end
-                                end
-                            end)
-                            -- Get companion name using PhoenixBPLibrary (same as NPCs)
-                            pcall(function()
-                                local lib = staticData.bpLibrary
-                                if lib then
-                                    local nameResult = lib:GetActorName(companionPawn)
-                                    if nameResult then
-                                        local name = nil
-                                        pcall(function() name = nameResult:ToString() end)
-                                        if name and name ~= "" then
-                                            context.companionId = name  -- Internal ID, not display name
-                                        end
-                                    end
-                                end
-                            end)
-                        end
+                local companionInfo = Utils.GetCompanionInfo(staticData, context.isOnBroom, context.inStealth, IsCompanionOnBroom, GetNearbyNPCs)
+                if companionInfo then
+                    for k, v in pairs(companionInfo) do
+                        context[k] = v
                     end
-                end)
+                end
             end
         end)
 
@@ -2122,6 +3036,19 @@ function WriteGameContext()
         -- Fallback to GearScreen if hooks haven't fired yet
         if _G.BroomState then
             context.isOnBroom = _G.BroomState.mounted or false
+        end
+
+        -- ============================================
+        -- Game Mods Data Collection (uses cached data)
+        -- ============================================
+        context.mods = {}
+
+        -- House Points - use cached data (refreshed at specific trigger points)
+        local cachedHP = GetCachedHousePoints()
+        if cachedHP then
+            context.mods.housePoints = {
+                points = cachedHP
+            }
         end
 
         -- Send via socket (already on game thread so all data is ready)
@@ -2148,7 +3075,8 @@ end
 --   npcs: nearbyNpcs, lookedAtNpcName (EXPENSIVE)
 --   zone: zoneLocation
 --   mission: currentQuest, questObjective
---   companion: hasCompanion, companionId, companionInStealth, companionIsSwimming
+--   companion: hasCompanion, companionId, companionInStealth, companionIsSwimming, companionIsOnBroom
+--   mods: mods.housePoints (uses cached data, cheap)
 
 function WriteSelectiveContext(groups)
     local context = {}
@@ -2182,6 +3110,12 @@ function WriteSelectiveContext(groups)
     if groupSet["state"] then
         local state = _G.SonorusState or {}
         context.playerLoaded = state.playerLoaded or false
+        -- Auto-correct: if player actor exists but ClientRestart never fired, fix it
+        if not context.playerLoaded and Utils.SafeIsValid(player) then
+            print("[Sonorus] playerLoaded was false but player actor is valid - auto-correcting")
+            state.playerLoaded = true
+            context.playerLoaded = true
+        end
         context.isGamePaused = Utils.IsGamePaused()
 
         -- Broom state from cached global
@@ -2222,8 +3156,13 @@ function WriteSelectiveContext(groups)
             local time = GetTimeOfDay()
             context.hour = time.hour
             context.minute = time.minute
+            context.year = time.year
+            context.month = time.month
+            context.day = time.dayOfMonth
+            context.dayOfWeek = time.dayOfWeek
             context.timePeriod = time.period
             context.isDay = time.isDay
+            context.gameTime = time.formatted         -- e.g., "7:45 AM"
             context.timeFormatted = time.formatted
             context.dateFormatted = time.dateFormatted
         end)
@@ -2243,6 +3182,13 @@ function WriteSelectiveContext(groups)
                         RecordLocationTransition(zone.location)
                     end
                     _G.LastTrackedLocation = zone.location
+
+                    -- Clear NPC cache on location change - fresh NPCs will be fetched on next access
+                    Cache.ClearEntities("NPC")
+                    DevPrint(string.format("[Sonorus] Location changed to %s - NPC cache cleared", zone.location))
+
+                    -- Emit location:change event for CommitmentManager etc.
+                    pcall(function() Events.emit("location:change", { location = zone.location }) end)
                 end
             end
         end)
@@ -2276,6 +3222,7 @@ function WriteSelectiveContext(groups)
             local npcResult = GetNearbyNPCs(2000, 0.9)
             if npcResult and npcResult.nearbyList then
                 local nearbyNpcsForContext = {}
+                local seenNames = {}
                 for _, entry in ipairs(npcResult.nearbyList) do
                     table.insert(nearbyNpcsForContext, {
                         name = entry.name,
@@ -2283,16 +3230,47 @@ function WriteSelectiveContext(groups)
                         isLookedAt = entry.isLookedAt,
                         onScreen = entry.onScreen
                     })
+                    seenNames[entry.name:lower()] = true
                 end
+
+                -- When on broom, check if companion is within extended range but outside normal range
+                -- Only add companion specifically - don't extend range for other NPCs
+                if _G.BroomState and _G.BroomState.mounted then
+                    local _, companionId = Utils.GetCompanionNameAndId()
+                    if companionId and not seenNames[companionId:lower()] then
+                        -- Companion not in normal range, check extended broom range
+                        local companionDist = Utils.GetCompanionDistance()
+                        if companionDist and companionDist <= 10000 then
+                            table.insert(nearbyNpcsForContext, {
+                                name = companionId,
+                                distance = math.floor(companionDist),
+                                isLookedAt = false,
+                                onScreen = false
+                            })
+                        end
+                    end
+                end
+
                 context.nearbyNpcs = nearbyNpcsForContext
                 if npcResult.lookedAtNpc then
                     context.lookedAtNpcName = npcResult.lookedAtNpc.name
                 end
             end
         end)
+
+        -- Include preview lock info for target selection
+        -- This tells Python which NPC the player locked before typing (more reliable than isLookedAt)
+        if _G.ChatPreviewLock and _G.ChatPreviewLock.npcName then
+            context.previewLockedNpc = _G.ChatPreviewLock.npcName
+            context.previewLockState = _G.ChatPreviewLock.state
+        elseif _G.STTPreviewLock and _G.STTPreviewLock.npcName then
+            context.previewLockedNpc = _G.STTPreviewLock.npcName
+            context.previewLockState = _G.STTPreviewLock.state
+        end
     end
 
     -- GROUP: vision (for vision LLM - line trace visibility checks on on-screen NPCs)
+    -- Note: No broom extension here - vision is about what's visually on-screen, not conversation range
     if groupSet["vision"] then
         pcall(function()
             local npcResult = GetNearbyNPCs(2000, 0.9)
@@ -2325,44 +3303,30 @@ function WriteSelectiveContext(groups)
 
     -- GROUP: companion (cheap - uses cached CompanionManager)
     if groupSet["companion"] then
-        pcall(function()
-            local staticData = Cache.GetStaticData()
-            local companionMgr = staticData and staticData.companionManager
-            if companionMgr then
-                local companionPawn = companionMgr:GetPrimaryCompanionPawn()
-                if companionPawn then
-                    context.hasCompanion = true
-                    -- Companion shares player's stealth state
-                    if player then
-                        pcall(function() context.companionInStealth = player.InStealthMode or false end)
-                    end
-                    -- Companion swimming (via cached NPC_Component class)
-                    pcall(function()
-                        local npcCompClass = staticData.npcComponentClass
-                        if npcCompClass then
-                            local npcComp = companionPawn:GetComponentByClass(npcCompClass)
-                            if npcComp then
-                                context.companionIsSwimming = npcComp:IsSwimming() or false
-                            end
-                        end
-                    end)
-                    -- Get companion name
-                    pcall(function()
-                        local lib = staticData.bpLibrary
-                        if lib then
-                            local nameResult = lib:GetActorName(companionPawn)
-                            if nameResult then
-                                local name = nil
-                                pcall(function() name = nameResult:ToString() end)
-                                if name and name ~= "" then
-                                    context.companionId = name  -- Internal ID, not display name
-                                end
-                            end
-                        end
-                    end)
-                end
+        -- Get player stealth for companion (shares state)
+        local isPlayerInStealth = false
+        if player then
+            pcall(function() isPlayerInStealth = player.InStealthMode or false end)
+        end
+
+        local staticData = Cache.GetStaticData()
+        local companionInfo = Utils.GetCompanionInfo(staticData, context.isOnBroom, isPlayerInStealth, IsCompanionOnBroom, GetNearbyNPCs)
+        if companionInfo then
+            for k, v in pairs(companionInfo) do
+                context[k] = v
             end
-        end)
+        end
+    end
+
+    -- GROUP: mods (cheap - uses cached house points data)
+    if groupSet["mods"] then
+        context.mods = {}
+        local cachedHP = GetCachedHousePoints()
+        if cachedHP then
+            context.mods.housePoints = {
+                points = cachedHP
+            }
+        end
     end
 
     -- Send via socket
@@ -2409,6 +3373,59 @@ end
 -- UI
 -- ============================================
 
+-- Input mode switching to block game input during chat
+-- Uses WidgetBlueprintLibrary static functions to properly disable game input
+-- This blocks Blueprint mods that poll input via IsInputKeyDown/GetAsyncKeyState
+_G.InputModeBlockingEnabled = false  -- Can be disabled in settings if causing issues
+
+function SetInputModeUIOnly()
+    if not _G.InputModeBlockingEnabled then return end
+    pcall(function()
+        local staticData = Cache and Cache.GetStaticData()
+        local pc = staticData and staticData.playerController
+        if not pc then
+            pc = FindFirstOf("PlayerController")
+        end
+        if not pc or not Utils.SafeIsValid(pc) then
+            print("[InputMode] No valid PlayerController")
+            return
+        end
+
+        local lib = StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary")
+        if lib and lib:IsValid() then
+            -- SetInputMode_UIOnlyEx(PlayerController, InWidgetToFocus, InMouseLockMode)
+            -- InMouseLockMode: 0 = DoNotLock (keep mouse working normally)
+            lib:SetInputMode_UIOnlyEx(pc, nil, 0)
+            print("[InputMode] Set to UI Only (game input blocked)")
+        else
+            print("[InputMode] WidgetBlueprintLibrary not found")
+        end
+    end)
+end
+
+function SetInputModeGameOnly()
+    if not _G.InputModeBlockingEnabled then return end
+    pcall(function()
+        local staticData = Cache and Cache.GetStaticData()
+        local pc = staticData and staticData.playerController
+        if not pc then
+            pc = FindFirstOf("PlayerController")
+        end
+        if not pc or not Utils.SafeIsValid(pc) then
+            print("[InputMode] No valid PlayerController")
+            return
+        end
+
+        local lib = StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary")
+        if lib and lib:IsValid() then
+            lib:SetInputMode_GameOnly(pc)
+            print("[InputMode] Set to Game Only (normal input restored)")
+        else
+            print("[InputMode] WidgetBlueprintLibrary not found")
+        end
+    end)
+end
+
 -- Chat input display using subtitle system (updates in place, no flashing)
 -- State: tracks if we have an active subtitle displayed
 _G.ChatInputSubtitleActive = _G.ChatInputSubtitleActive or false
@@ -2423,10 +3440,14 @@ function ProcessChatInput()
     local active = state.active
     print("[ChatInput] Processing: active=" .. tostring(active))
     local text = state.text or ""
-    local displayText = "You: " .. text .. "|"
+    -- Use "Prompt: " for director mode, "You: " for normal chat mode
+    local prefix = (state.mode == "prompt") and "Prompt: " or "You: "
+    local displayText = prefix .. text .. "|"
 
     -- Check if subtitle HUD exists (required for subtitles to display)
-    local subtitleHUD = FindFirstOf("UI_BP_Subtitle_HUD_C")
+    local subtitleHUD = Cache.Get("UI_BP_Subtitle_HUD_C", function()
+        return FindFirstOf("UI_BP_Subtitle_HUD_C")
+    end)
     if not subtitleHUD then
         print("[ChatInput] WARN: Subtitle HUD not found")
         return
@@ -2438,7 +3459,9 @@ function ProcessChatInput()
         return
     end
 
-    local subtitles = FindFirstOf("Subtitles")
+    local subtitles = Cache.Get("Subtitles", function()
+        return FindFirstOf("Subtitles")
+    end)
     if not subtitles then
         print("[ChatInput] WARN: Subtitles object not found")
         return
@@ -2454,6 +3477,9 @@ function ProcessChatInput()
         -- Check if text changed (for updates vs fresh add)
         local textChanged = (_G.ChatInputLastText ~= text)
         _G.ChatInputLastText = text
+
+        -- Skip subtitle display in VR (immersive mode)
+        if _G.VROffset then return end
 
         local ok, err = pcall(function()
             -- Always Remove+Add to guarantee subtitle shows (handles stale state)
@@ -2478,10 +3504,23 @@ function ProcessChatInput()
 end
 
 function ShowMessage(message)
+    -- Skip subtitle display in VR (immersive mode)
+    if _G.VROffset then return end
+
+    -- Convert *emphasis* to <i>emphasis</i> for UE4 rich text
+    message = string.gsub(message, "%*([^%*]+)%*", "<i>%1</i>")
+
+    -- Bump generation counter to cancel any pending player_message auto-hide timers
+    _G.SubtitleGen = (_G.SubtitleGen or 0) + 1
+
     -- Mode 3 approach: Check Subtitle_HUD exists first for consistent display
-    local subtitleHUD = FindFirstOf("UI_BP_Subtitle_HUD_C")
+    local subtitleHUD = Cache.Get("UI_BP_Subtitle_HUD_C", function()
+        return FindFirstOf("UI_BP_Subtitle_HUD_C")
+    end)
     if subtitleHUD and subtitleHUD:IsValid() then
-        local subtitles = FindFirstOf("Subtitles")
+        local subtitles = Cache.Get("Subtitles", function()
+            return FindFirstOf("Subtitles")
+        end)
         if subtitles and subtitles:IsValid() then
             pcall(function()
                 -- Clear any existing subtitle first to avoid stacking
@@ -2493,18 +3532,26 @@ function ShowMessage(message)
     end
 
     -- Fallback to hint message if subtitle HUD unavailable
-    local UIManager = FindFirstOf("UIManager")
+    ShowHint(message, 3600)
+end
+
+function ShowHint(message, duration, layout)
+    local UIManager = Cache.Get("UIManager", function()
+        return FindFirstOf("UIManager")
+    end)
     if UIManager and UIManager:IsValid() then
-        local layout = {
+        layout = layout or {
             Position = { X = 500, Y = 500 },
             Alignment = { X = 500, Y = 500 }
         }
-        UIManager:SetAndShowHintMessage(message, layout, true, 3600)
+        UIManager:SetAndShowHintMessage(message, layout, true, duration or 2)
     end
 end
 
 function HideMessage()
-    local subtitles = FindFirstOf("Subtitles")
+    local subtitles = Cache.Get("Subtitles", function()
+        return FindFirstOf("Subtitles")
+    end)
     if subtitles and subtitles:IsValid() then
         pcall(function()
             subtitles:BPRemoveStandaloneSubtitle()
@@ -2513,7 +3560,15 @@ function HideMessage()
 end
 
 function UpdateMessage(message)
-    local subtitles = FindFirstOf("Subtitles")
+    -- Skip subtitle display in VR (immersive mode)
+    if _G.VROffset then return end
+
+    -- Convert *emphasis* to <i>emphasis</i> for UE4 rich text
+    message = string.gsub(message, "%*([^%*]+)%*", "<i>%1</i>")
+
+    local subtitles = Cache.Get("Subtitles", function()
+        return FindFirstOf("Subtitles")
+    end)
     if subtitles and subtitles:IsValid() then
         pcall(function()
             subtitles:BPUpdateStandaloneSubtitle(message)
@@ -2530,490 +3585,24 @@ function ShowNotification(text)
         return FindFirstOf("PhoenixHUD")
     end)
 
-    if not hud then return end
+    if not hud then
+        print("[Notification] No HUD found, dropping: " .. tostring(text))
+        return
+    end
 
-    pcall(function()
+    print("[Notification] Sending to AddNotification: \"" .. tostring(text) .. "\"")
+    local ok, err = pcall(function()
         hud.HUDWidgetRef.TextNotificationPanel:AddNotification(text)
     end)
-end
-
--- ============================================
--- NPC Audio Muting Functions
--- ============================================
-function MuteNPCAudio(actor)
-    if not actor or not SafeIsValid(actor) then
-        print("[Sonorus] MuteNPCAudio: Invalid actor")
-        return nil
-    end
-
-    local staticData = Cache.GetStaticData()
-    local akClass = staticData and staticData.akComponentClass
-    if not akClass then
-        print("[Sonorus] Could not find AkComponent class")
-        return nil
-    end
-
-    local comp = nil
-    pcall(function()
-        comp = actor:GetComponentByClass(akClass)
-    end)
-
-    if comp and comp:IsValid() then
-        print("[Sonorus] Found AkComponent, muting...")
-        pcall(function()
-            comp:SetOutputBusVolume(0)
-        end)
-        return comp
-    end
-
-    return nil
-end
-
-function UnmuteNPCAudio(comp)
-    if comp and comp:IsValid() then
-        print("[Sonorus] Restoring audio volume...")
-        pcall(function()
-            comp:SetOutputBusVolume(1.0)
-        end)
+    if not ok then
+        print("[Notification] AddNotification error: " .. tostring(err))
     end
 end
 
 -- ============================================
--- Lip Sync (Phoneme-based with visemes)
+-- Lip Sync (delegated to Utils/LipSync.lua)
 -- ============================================
-
--- Viseme data storage
-_G.VisemeData = _G.VisemeData or {}
--- Ensure all fields exist (handles hot reload)
-local vd = _G.VisemeData
-vd.startTime = vd.startTime or 0
-vd.localStartTime = vd.localStartTime or 0
-vd.frames = vd.frames or {}
-vd.loaded = vd.loaded or false
-vd.lastContentLen = vd.lastContentLen or 0
-vd.currentJaw = vd.currentJaw or 0
-vd.currentSmile = vd.currentSmile or 0
-vd.currentFunnel = vd.currentFunnel or 0
-vd.lastReadTime = vd.lastReadTime or 0  -- Throttle file reads
-vd.syncPrinted = vd.syncPrinted or false  -- Only print "sync started" once
-
--- State flag for async CloseLips completion (checked by OnTick)
-_G.CloseLipsComplete = false
--- Store last speaker actor for closing (survives cache clears)
-_G.LastSpeakerActorForClosing = nil
-
-function CloseLips()
-    -- Timeout protection: force complete after ~1.5 seconds (30 ticks at 50ms)
-    _G.CloseLipsIterations = (_G.CloseLipsIterations or 0) + 1
-    if _G.CloseLipsIterations >= 30 then
-        print("[Sonorus] CloseLips: Timeout - forcing completion")
-        local actor = _G.LastSpeakerActorForClosing
-        if actor then
-            ForceResetBlendshapes(actor)
-        end
-        ResetNearbyNPCLips()
-        _G.CloseLipsComplete = true
-        _G.CloseLipsIterations = 0
-        _G.LastSpeakerActorForClosing = nil
-        -- Reset viseme data
-        local data = _G.VisemeData
-        data.currentJaw = 0
-        data.currentSmile = 0
-        data.currentFunnel = 0
-        data.loaded = false
-        data.frames = {}
-        if _G.SocketClient and _G.SocketClient.send then
-            _G.SocketClient.send({ type = "turn_complete" })
-        end
-        return
-    end
-
-    -- Use stored actor from AnimateLips - DO NOT call GetCurrentSpeakerActor()
-    -- because currentTurnId may have already changed to the next speaker (pre-buffering)
-    local actor = _G.LastSpeakerActorForClosing
-    if actor then
-        local valid = false
-        pcall(function() valid = actor:IsValid() end)
-        if not valid then
-            actor = nil
-            _G.LastSpeakerActorForClosing = nil
-        end
-    end
-
-    if not actor then
-        print("[Sonorus] CloseLips: No actor found - resetting all nearby NPC lips")
-        -- Force reset all nearby NPCs as fallback
-        ResetNearbyNPCLips()
-        _G.CloseLipsComplete = true
-        _G.LastSpeakerActorForClosing = nil
-        -- Still signal Python even if no actor (so it doesn't wait for timeout)
-        if _G.SocketClient and _G.SocketClient.send then
-            _G.SocketClient.send({ type = "turn_complete" })
-        end
-        return  -- Done
-    end
-
-    -- Smoothly close mouth over several frames instead of snapping
-    local data = _G.VisemeData
-    local closeSpeed = 0.3
-
-    -- Lerp current values toward 0
-    data.currentJaw = data.currentJaw * (1 - closeSpeed)
-    data.currentSmile = data.currentSmile * (1 - closeSpeed)
-    data.currentFunnel = data.currentFunnel * (1 - closeSpeed)
-
-    -- Apply per-character scale (same as AnimateLips)
-    local scale = data.scale or 1.0
-    local jaw = data.currentJaw * scale
-    local smile = data.currentSmile * scale
-    local funnel = data.currentFunnel * scale
-
-    -- Apply smoothed + scaled values
-    CallSetBlendshape(actor, "jaw_drop", jaw)
-    CallSetBlendshape(actor, "smile_l", smile)
-    CallSetBlendshape(actor, "smile_r", smile)
-    CallSetBlendshape(actor, "lwr_lip_funl_l", funnel)
-    CallSetBlendshape(actor, "lwr_lip_funl_r", funnel)
-    CallSetBlendshape(actor, "upr_lip_funl_l", funnel * 0.7)
-    CallSetBlendshape(actor, "upr_lip_funl_r", funnel * 0.7)
-    CallSetBlendshape(actor, "lwr_lip_dn_l", jaw * 0.3)
-    CallSetBlendshape(actor, "lwr_lip_dn_r", jaw * 0.3)
-
-    -- If values are near zero, fully reset and signal done
-    if data.currentJaw < 0.01 and data.currentSmile < 0.01 and data.currentFunnel < 0.01 then
-        local blendshapes = {
-            "lwr_lip_funl_l", "lwr_lip_funl_r", "upr_lip_funl_r", "upr_lip_funl_l",
-            "jaw_drop", "lips_up_l", "lwr_lip_dn_l", "lwr_lip_dn_r",
-            "dimple_l", "dimple_r", "smile_l", "smile_r",
-            "mouth_mov_r", "mouth_mov_l", "lips_up_r"
-        }
-        for _, name in ipairs(blendshapes) do
-            CallSetBlendshape(actor, name, 0)
-        end
-        -- Reset viseme data for next conversation
-        data.loaded = false
-        data.syncPrinted = false  -- Allow new sync on next conversation
-        data.frames = {}
-        data.localStartTime = 0
-        data.lastContentLen = 0
-        data.currentJaw = 0
-        data.currentSmile = 0
-        data.currentFunnel = 0
-        _G.CloseLipsComplete = true  -- Signal done via flag (async-safe)
-        _G.LastSpeakerActorForClosing = nil  -- Clear stored actor
-
-        -- Signal Python that this turn's mouth animation is complete
-        -- This allows Python to safely start the next turn
-        if _G.SocketClient and _G.SocketClient.send then
-            _G.SocketClient.send({ type = "turn_complete" })
-        end
-        print("[Sonorus] CloseLips: Complete")
-    end
-    -- Still closing - flag remains false
-end
-
--- Force reset all lip blendshapes on an actor (instant, no smooth transition)
--- Used by ResetState to fix any NPCs with stuck lip sync
-function ForceResetBlendshapes(actor)
-    if not actor then return end
-    local valid = false
-    pcall(function() valid = actor:IsValid() end)
-    if not valid then return end
-
-    local blendshapes = {
-        "lwr_lip_funl_l", "lwr_lip_funl_r", "upr_lip_funl_r", "upr_lip_funl_l",
-        "jaw_drop", "lips_up_l", "lwr_lip_dn_l", "lwr_lip_dn_r",
-        "dimple_l", "dimple_r", "smile_l", "smile_r",
-        "mouth_mov_r", "mouth_mov_l", "lips_up_r"
-    }
-    for _, name in ipairs(blendshapes) do
-        CallSetBlendshape(actor, name, 0)
-    end
-end
-
--- Reset lips on all nearby NPCs (used by F8 reset to fix stuck blendshapes)
-function ResetNearbyNPCLips()
-    print("[Sonorus] Resetting lips on nearby NPCs...")
-    local npcResult = GetNearbyNPCs(2000, 0.9)
-
-    if not npcResult or not npcResult.nearbyList then
-        print("[Sonorus] No nearby NPCs found")
-        return
-    end
-
-    -- Collect valid actors
-    local actors = {}
-    for _, entry in ipairs(npcResult.nearbyList) do
-        if entry.actor then
-            table.insert(actors, entry.actor)
-        end
-    end
-
-    if #actors == 0 then
-        print("[Sonorus] No valid NPC actors found")
-        return
-    end
-
-    -- Loop reset over multiple frames to overcome Blueprint lerping
-    local iterations = 0
-    local maxIterations = 20
-    local resetHandle
-    resetHandle = LoopInGameThreadAfterFrames(1, function()
-        iterations = iterations + 1
-        for _, actor in ipairs(actors) do
-            ForceResetBlendshapes(actor)
-        end
-        if iterations >= maxIterations then
-            CancelDelayedAction(resetHandle)
-            print("[Sonorus] Reset blendshapes on " .. #actors .. " nearby NPCs (complete)")
-        end
-    end)
-    print("[Sonorus] Started lip reset loop for " .. #actors .. " NPCs")
-end
-
-function LoadVisemes()
-    local data = _G.VisemeData
-
-    -- Throttle file reads to every 250ms (file I/O is expensive ~6-8ms)
-    local now = os.clock()
-    if data.lastReadTime and (now - data.lastReadTime) < 0.25 then
-        return data.loaded  -- Use cached data
-    end
-    data.lastReadTime = now
-
-    local content = ReadFile("sonorus\\visemes.txt")
-    if content == "" then
-        return false
-    end
-
-    -- Check if file changed (by length) - skip reparse if same
-    local contentLen = #content
-    if contentLen == data.lastContentLen and data.loaded then
-        return true  -- No change, keep existing data
-    end
-    data.lastContentLen = contentLen
-
-    -- Reparse the file
-    data.frames = {}
-    local foundStart = false
-
-    for line in string.gmatch(content, "[^\r\n]+") do
-        -- Parse START:timestamp
-        local startTime = string.match(line, "^START:([%d%.]+)")
-        if startTime then
-            -- Only set localStartTime once per conversation
-            if not data.syncPrinted then
-                data.startTime = tonumber(startTime) or 0
-                data.localStartTime = os.clock()
-                print("[Sonorus] Viseme sync started")
-                data.syncPrinted = true
-            end
-            foundStart = true
-        elseif line ~= "END" then
-            -- Parse time:jaw,smile,funnel
-            local t, jaw, smile, funnel = string.match(line, "^([%d%.]+):([%d%.]+),([%d%.]+),([%d%.]+)")
-            if t then
-                table.insert(data.frames, {
-                    t = tonumber(t) or 0,
-                    jaw = tonumber(jaw) or 0,
-                    smile = tonumber(smile) or 0,
-                    funnel = tonumber(funnel) or 0,
-                })
-            end
-        end
-    end
-
-    data.loaded = foundStart and #data.frames > 0
-    return data.loaded
-end
-
-function GetVisemeAtTime(elapsed)
-    local data = _G.VisemeData
-    if not data.loaded or #data.frames == 0 then
-        return {jaw = 0, smile = 0, funnel = 0}
-    end
-
-    local frames = data.frames
-
-    -- Before first frame
-    if elapsed <= frames[1].t then
-        return frames[1]
-    end
-
-    -- After last frame
-    if elapsed >= frames[#frames].t then
-        return frames[#frames]
-    end
-
-    -- Find surrounding frames and interpolate
-    for i = 1, #frames - 1 do
-        if elapsed >= frames[i].t and elapsed < frames[i + 1].t then
-            local f1 = frames[i]
-            local f2 = frames[i + 1]
-            local alpha = (elapsed - f1.t) / (f2.t - f1.t)
-
-            return {
-                jaw = f1.jaw + (f2.jaw - f1.jaw) * alpha,
-                smile = f1.smile + (f2.smile - f1.smile) * alpha,
-                funnel = f1.funnel + (f2.funnel - f1.funnel) * alpha,
-            }
-        end
-    end
-
-    return frames[#frames]
-end
-
--- Debug: throttle lipsync debug logs
-local _lastLipsyncDebugTime = 0
-local _lastDetailedLipsyncLog = 0  -- For timing diagnosis
-
--- Get detailed frame info for diagnostic logging
-function GetCurrentFrameInfo(elapsed)
-    local data = _G.VisemeData
-    if not data.loaded or #data.frames == 0 then
-        return { index = 0, total = 0, t = 0, jaw = 0 }
-    end
-
-    local frames = data.frames
-
-    -- Before first frame
-    if elapsed <= frames[1].t then
-        return { index = 1, total = #frames, t = frames[1].t, jaw = frames[1].jaw }
-    end
-
-    -- After last frame
-    if elapsed >= frames[#frames].t then
-        return { index = #frames, total = #frames, t = frames[#frames].t, jaw = frames[#frames].jaw }
-    end
-
-    -- Find current frame
-    for i = 1, #frames - 1 do
-        if elapsed >= frames[i].t and elapsed < frames[i + 1].t then
-            return { index = i, total = #frames, t = frames[i].t, jaw = frames[i].jaw }
-        end
-    end
-
-    return { index = #frames, total = #frames, t = frames[#frames].t, jaw = frames[#frames].jaw }
-end
-
-function AnimateLips()
-    local perfStart = os.clock()
-    local perfThreshold = 0.005  -- 5ms warning threshold
-    local perfTimes = {}
-
-    -- Get actor from queue (no fallback)
-    local t0 = os.clock()
-    local actor = GetCurrentSpeakerActor()
-    perfTimes.getActor = os.clock() - t0
-    if not actor then
-        -- Debug: log if actor is nil (throttled)
-        if (os.clock() - _lastLipsyncDebugTime) > 2 then
-            _lastLipsyncDebugTime = os.clock()
-            print("[AnimateLips] No actor from GetCurrentSpeakerActor")
-        end
-        return
-    end
-
-    -- Store actor for CloseLips (survives cache clears)
-    _G.LastSpeakerActorForClosing = actor
-
-    -- Cache modActor once for all blendshape calls (avoid 8+ lookups)
-    local modActor = GetSonorusModActor()
-    if not modActor then
-        print("[AnimateLips] No modActor from GetSonorusModActor")
-        return
-    end
-
-    local data = _G.VisemeData
-    -- Visemes already loaded outside game thread
-
-    -- Target values
-    local targetJaw, targetSmile, targetFunnel = 0, 0, 0
-
-    -- If no visemes yet, use fallback animation
-    if not data.loaded or #data.frames == 0 then
-        -- Fallback: simple sine wave
-        local t = os.clock()
-        targetJaw = 0.4 * math.abs(math.sin(2 * math.pi * 0.8 * t))
-    else
-        -- Calculate elapsed time since audio start
-        -- Apply audioOffset for drift correction (from audio_sync messages)
-        local elapsed = os.clock() - data.localStartTime + (data.audioOffset or 0)
-
-        -- Get interpolated viseme from timeline
-        local v = GetVisemeAtTime(elapsed)
-
-        -- Detailed timing diagnostic (every 500ms)
-        if _G.SonorusDevMode and (os.clock() - _lastDetailedLipsyncLog) > 0.5 then
-            _lastDetailedLipsyncLog = os.clock()
-            local frameInfo = GetCurrentFrameInfo(elapsed)
-            -- Log format: elapsed (Lua time), frame index, frame timestamp, frame jaw, applied jaw
-            _G.DevPrint(string.format(
-                "[LipsyncTiming] elapsed=%.3fs, frame=%d/%d, frameT=%.3fs, frameJaw=%.2f, sysTime=%.3f",
-                elapsed,
-                frameInfo.index,
-                frameInfo.total,
-                frameInfo.t,
-                frameInfo.jaw,
-                os.clock()
-            ))
-        end
-
-        -- Simple scaling
-        targetJaw = v.jaw * 2.5
-        targetSmile = v.smile * 1.0
-        targetFunnel = v.funnel * 1.0
-    end
-
-    -- Smooth lerp toward target (higher = snappier)
-    local lerpSpeed = 0.6
-    data.currentJaw = data.currentJaw + (targetJaw - data.currentJaw) * lerpSpeed
-    data.currentSmile = data.currentSmile + (targetSmile - data.currentSmile) * lerpSpeed
-    data.currentFunnel = data.currentFunnel + (targetFunnel - data.currentFunnel) * lerpSpeed
-
-    -- Apply blendshapes with per-character scale
-    local scale = data.scale or 1.0
-    local jaw = data.currentJaw * scale
-    local smile = data.currentSmile * scale
-    local funnel = data.currentFunnel * scale
-
-    -- Debug: log jaw value periodically
-    if _G.SonorusDevMode and (os.clock() - _lastLipsyncDebugTime) > 1 then
-        _lastLipsyncDebugTime = os.clock()
-        local scaleStr = scale ~= 1.0 and string.format(" (scale=%.2f)", scale) or ""
-        _G.DevPrint(string.format("[Lipsync] jaw=%.2f, frames=%d, loaded=%s%s", jaw, #data.frames, tostring(data.loaded), scaleStr))
-    end
-
-    t0 = os.clock()
-
-    -- Jaw opening
-    CallSetBlendshape(actor, "jaw_drop", jaw, modActor)
-
-    -- Smile/wide mouth (E, I sounds)
-    CallSetBlendshape(actor, "smile_l", smile, modActor)
-    CallSetBlendshape(actor, "smile_r", smile, modActor)
-
-    -- Lip rounding/funnel (O, U sounds)
-    CallSetBlendshape(actor, "lwr_lip_funl_l", funnel, modActor)
-    CallSetBlendshape(actor, "lwr_lip_funl_r", funnel, modActor)
-    CallSetBlendshape(actor, "upr_lip_funl_l", funnel * 0.7, modActor)
-    CallSetBlendshape(actor, "upr_lip_funl_r", funnel * 0.7, modActor)
-
-    -- Lower lip follows jaw slightly
-    CallSetBlendshape(actor, "lwr_lip_dn_l", jaw * 0.3, modActor)
-    CallSetBlendshape(actor, "lwr_lip_dn_r", jaw * 0.3, modActor)
-
-    perfTimes.blendshapes = os.clock() - t0
-
-    -- Perf warning if any section is slow
-    local totalTime = os.clock() - perfStart
-    if totalTime > perfThreshold then
-        print(string.format("[Perf] AnimateLips: %.1fms (actor:%.1f, blend:%.1f)",
-            totalTime * 1000,
-            perfTimes.getActor * 1000,
-            perfTimes.blendshapes * 1000))
-    end
-end
+_G.ResetNearbyNPCLips = LipSync.ResetNearbyNPCLips  -- Also in _G for module access
 
 -- ============================================
 -- Position Writing (for 3D audio)
@@ -3032,6 +3621,38 @@ function WritePositions()
     if not turnId then return end
 
     local npc = _G.TurnActorCache and _G.TurnActorCache[turnId]
+
+    -- Check if cached actor is still valid (may become invalid after location change)
+    if npc and not SafeIsValid(npc) then
+        -- Actor became invalid - try to re-find by speakerId
+        local speakerId = nil
+        local pState = _G.PlaybackState
+        if pState and pState.queue then
+            for _, item in ipairs(pState.queue) do
+                if item.turnId == turnId then
+                    speakerId = item.speakerId
+                    break
+                end
+            end
+        end
+
+        if speakerId and speakerId ~= "player" and GetSpeakerActor then
+            local newActor = GetSpeakerActor(speakerId)
+            if newActor and SafeIsValid(newActor) then
+                -- Found valid actor - update cache
+                _G.TurnActorCache[turnId] = newActor
+                npc = newActor
+                print(string.format("[WritePos] Re-acquired actor for %s (location change recovery)", speakerId))
+            else
+                -- Could not re-find actor
+                npc = nil
+                print(string.format("[WritePos] Actor invalid and re-lookup failed for %s", tostring(speakerId)))
+            end
+        else
+            npc = nil
+        end
+    end
+
     if not npc then
         if _lastNoActorLogTurn ~= turnId then
             _lastNoActorLogTurn = turnId
@@ -3063,7 +3684,7 @@ function WritePositions()
             camPitch = camRot.Pitch,
             npcX = npcPos.X,
             npcY = npcPos.Y,
-            npcZ = npcPos.Z
+            npcZ = npcPos.Z + 60  -- Head height offset (~60cm above center)
         })
     end
 end
@@ -3077,57 +3698,55 @@ local NPC_CLASS_PATHS = {
 -- Register NPC spawn hooks (idempotent - only registers once)
 Cache.RegisterSpawnHook("NPC", NPC_CLASS_PATHS)
 
--- Static cache refresh function
-local function RefreshStaticData(data)
-    data.playerController = FindFirstOf("PlayerController")
-    if data.playerController then
-        local valid = false
-        pcall(function() valid = data.playerController:IsValid() end)
-        if valid then
-            pcall(function() data.cameraManager = data.playerController.PlayerCameraManager end)
+-- NOTE: RefreshStaticData, GetCachedNPCs, GetStaticCache are defined earlier
+-- (exported to _G for LipSync module and other cross-module access)
+
+-- ============================================
+-- Significant NPC Check (synced from Python)
+-- ============================================
+
+--- Check if an NPC name is significant (has voice reference on Python side)
+--- Uses data synced from Python via sync_significant_npcs message
+--- @param name string The NPC's name (accepts both voice IDs and display names)
+--- @return boolean isSignificant true if NPC is significant
+function IsSignificantNPC(name)
+    if not name or name == "" then
+        return false
+    end
+
+    -- Player is always significant (check voice name variants)
+    local lower = name:lower()
+    if lower == "player" or lower == "playermale" or lower == "playerfemale" then
+        return true
+    end
+
+    -- Player is always significant (check actual player display name)
+    local playerName = _G.SonorusState and _G.SonorusState.playerName
+    if playerName and playerName ~= "" and name == playerName then
+        return true
+    end
+
+    -- Check blacklist prefixes (T3, MidRes, etc.)
+    -- These prefixes apply to voice names, not display names, but check anyway
+    local prefixes = _G.InsignificantPrefixes or {"t3", "midres"}
+    for _, prefix in ipairs(prefixes) do
+        if lower:sub(1, #prefix) == prefix then
+            return false
         end
     end
 
-    data.player = FindFirstOf("Biped_Player")
-    if data.player then
-        local valid = false
-        pcall(function() valid = data.player:IsValid() end)
-        if valid then
-            pcall(function() data.playerFullName = data.player:GetFullName() end)
-        end
+    -- Check if in significant NPCs set (synced from Python)
+    -- Set contains BOTH voice names AND display names
+    local significant = _G.SignificantNPCs or {}
+    if significant[name] or significant[lower] then
+        return true
     end
 
-    data.bpLibrary = StaticFindObject("/Script/Phoenix.Default__PhoenixBPLibrary")
-    data.gearScreen = StaticFindObject("/Script/Phoenix.Default__GearScreen")
-    data.npcComponentClass = StaticFindObject("/Script/Phoenix.NPC_Component")
-    data.audioStatics = StaticFindObject("/Script/Phoenix.Default__AvaAudioGameplayStatics")
-    data.akComponentClass = StaticFindObject("/Script/AkAudio.AkComponent")
-    data.facialComponentClass = StaticFindObject("/Script/AvaAnimation.FacialComponent")
-    data.companionManager = FindFirstOf("CompanionManager")
-    data.gearManager = FindFirstOf("GearManager")
-    data.populationManager = FindFirstOf("PopulationManager")
-
-    -- Mark primary object for validity checks
-    data._primary = data.playerController
+    return false
 end
 
--- Get cached NPCs (initializes on first call, cleans periodically)
-local function GetCachedNPCs()
-    -- Initialize if needed (one-time FindAllOf)
-    if not Cache.IsEntityCacheReady("NPC") then
-        Cache.InitEntities("NPC", "NPC_Character")
-    end
-
-    -- Cleanup invalid entries periodically (every 5s)
-    Cache.CleanEntities("NPC", 5)
-
-    return Cache.GetEntities("NPC")
-end
-
--- Get static cache (refreshes every 30s or when invalid)
-local function GetStaticCache()
-    return Cache.GetStatic(RefreshStaticData, 30)
-end
+-- Export globally
+_G.IsSignificantNPC = IsSignificantNPC
 
 -- ============================================
 -- Get Nearby NPCs (single iteration, returns list + looked-at)
@@ -3147,6 +3766,7 @@ function GetNearbyNPCs(maxDistance, lookDotThreshold)
     local pcValid = false
     if pc then pcall(function() pcValid = pc:IsValid() end) end
     if not pcValid then
+        print("[GetNearbyNPCs] EMPTY: PlayerController invalid")
         return { nearbyList = {}, lookedAtNpc = nil, playerInStealth = false }
     end
 
@@ -3154,6 +3774,7 @@ function GetNearbyNPCs(maxDistance, lookDotThreshold)
     local camValid = false
     if cam then pcall(function() camValid = cam:IsValid() end) end
     if not camValid then
+        print("[GetNearbyNPCs] EMPTY: CameraManager invalid")
         return { nearbyList = {}, lookedAtNpc = nil, playerInStealth = false }
     end
 
@@ -3164,6 +3785,7 @@ function GetNearbyNPCs(maxDistance, lookDotThreshold)
         camFOV = cam:GetFOVAngle()  -- Get camera field of view
     end)
     if not camLoc or not camRot then
+        print("[GetNearbyNPCs] EMPTY: Camera location/rotation nil")
         return { nearbyList = {}, lookedAtNpc = nil, playerInStealth = false }
     end
 
@@ -3180,35 +3802,61 @@ function GetNearbyNPCs(maxDistance, lookDotThreshold)
     -- Check player stealth status (Disillusionment charm)
     local playerInStealth = false
     local player = staticData.player
+    local playerLoc = nil
     if player then
         pcall(function() playerInStealth = player.InStealthMode or false end)
+        pcall(function() playerLoc = player:K2_GetActorLocation() end)
     end
 
     -- Use reactive NPC cache (no FindAllOf after first load)
     local npcs = GetCachedNPCs()
     if not npcs or #npcs == 0 then
+        local cacheReady = Cache.IsEntityCacheReady("NPC")
+        print("[GetNearbyNPCs] EMPTY: NPC cache has 0 entries (initialized=" .. tostring(cacheReady) .. ")")
         return { nearbyList = {}, lookedAtNpc = nil, playerInStealth = playerInStealth }
     end
 
-    -- Calculate forward vector from camera rotation
-    local pitch = math.rad(camRot.Pitch)
-    local yaw = math.rad(camRot.Yaw)
+    -- Calculate forward vector from camera rotation (+ VR headset offset if active)
+    local vrOff = _G.VROffset
+    local pitch = math.rad(camRot.Pitch + (vrOff and vrOff.pitch or 0))
+    local yaw = math.rad(camRot.Yaw + (vrOff and vrOff.yaw or 0))
     local forward = {
         X = math.cos(pitch) * math.cos(yaw),
         Y = math.cos(pitch) * math.sin(yaw),
         Z = math.sin(pitch)
     }
 
+    -- Gaze origin: VR = player head position, flat = camera position
+    local gazeOrigin = camLoc
+    if vrOff and playerLoc then
+        local playerHalfHeight = 88
+        pcall(function()
+            local capsule = player.CapsuleComponent
+            if capsule and capsule.CapsuleHalfHeight then
+                playerHalfHeight = capsule.CapsuleHalfHeight
+            end
+        end)
+        gazeOrigin = { X = playerLoc.X, Y = playerLoc.Y, Z = playerLoc.Z + playerHalfHeight * 2 }
+    end
+
     local nearbyList = {}
     local lookedAtNpc = nil
     local bestDot = lookDotThreshold
 
+    -- Tracking stats for logging
+    local stats = {
+        total = #npcs,
+        invalid = 0,
+        outOfRange = 0,
+        insignificant = 0,
+        inRange = 0,
+        insignificantNames = {}  -- Track first few filtered names for debugging
+    }
+
     -- Single iteration through all NPCs
     for _, npc in pairs(npcs) do
         -- Wrap validity check in pcall - corrupted references crash on :IsValid() call
-        local isValid = false
-        pcall(function() isValid = npc:IsValid() end)
-        if isValid then
+        if SafeIsValid(npc) then
             local fullName = nil
             pcall(function() fullName = npc:GetFullName() end)
             if fullName and fullName ~= playerFullName then
@@ -3216,30 +3864,42 @@ function GetNearbyNPCs(maxDistance, lookDotThreshold)
                 pcall(function() npcLoc = npc:K2_GetActorLocation() end)
                 if not npcLoc then goto continue end
 
-                -- Vector from camera to NPC
+                -- Distance from PLAYER to NPC (not camera - camera is behind player in 3rd person)
+                local distOrigin = playerLoc or camLoc
+                local dx = npcLoc.X - distOrigin.X
+                local dy = npcLoc.Y - distOrigin.Y
+                local dz = npcLoc.Z - distOrigin.Z
+                local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+
+                -- Vector from gaze origin to NPC (for looked-at/on-screen checks)
+                -- VR: player head position, flat: camera position
                 local toNpc = {
-                    X = npcLoc.X - camLoc.X,
-                    Y = npcLoc.Y - camLoc.Y,
-                    Z = npcLoc.Z - camLoc.Z
+                    X = npcLoc.X - gazeOrigin.X,
+                    Y = npcLoc.Y - gazeOrigin.Y,
+                    Z = npcLoc.Z - gazeOrigin.Z
                 }
-                local dist = math.sqrt(toNpc.X * toNpc.X + toNpc.Y * toNpc.Y + toNpc.Z * toNpc.Z)
+                local camDist = math.sqrt(toNpc.X * toNpc.X + toNpc.Y * toNpc.Y + toNpc.Z * toNpc.Z)
 
                 if dist > 0 and dist <= maxDistance then
-                    -- Get NPC name
-                    local npcName = "Unknown"
-                    if lib then
-                        pcall(function()
-                            local nameResult = lib:GetActorName(npc)
-                            if nameResult then
-                                pcall(function() npcName = nameResult:ToString() end)
-                            end
-                        end)
+                    -- Get NPC id
+                    local npcId = Utils.GetActorVoiceId(npc, staticData) or "Unknown"
+
+                    -- Filter out insignificant NPCs (generic students, townspeople, etc.)
+                    -- Checks against display names synced from Python (from voice references)
+                    if not IsSignificantNPC(npcId) then
+                        stats.insignificant = stats.insignificant + 1
+                        if #stats.insignificantNames < 5 then
+                            table.insert(stats.insignificantNames, npcId)
+                        end
+                        goto continue
                     end
 
-                    -- Normalize direction vector
-                    toNpc.X = toNpc.X / dist
-                    toNpc.Y = toNpc.Y / dist
-                    toNpc.Z = toNpc.Z / dist
+                    stats.inRange = stats.inRange + 1
+
+                    -- Normalize direction vector (using camera distance for look direction)
+                    toNpc.X = toNpc.X / camDist
+                    toNpc.Y = toNpc.Y / camDist
+                    toNpc.Z = toNpc.Z / camDist
 
                     -- Dot product with forward (1.0 = perfectly aligned with camera)
                     local dot = forward.X * toNpc.X + forward.Y * toNpc.Y + forward.Z * toNpc.Z
@@ -3251,23 +3911,36 @@ function GetNearbyNPCs(maxDistance, lookDotThreshold)
                     local isLookedAt = false
                     if dot > bestDot then
                         bestDot = dot
-                        lookedAtNpc = { name = npcName, actor = npc, distance = dist }
+                        lookedAtNpc = { name = npcId, actor = npc, distance = dist }
                         isLookedAt = true
                     end
 
                     -- Add to nearby list
                     table.insert(nearbyList, {
-                        name = npcName,
+                        name = npcId,
                         distance = dist,
                         actor = npc,
                         isLookedAt = isLookedAt,
                         onScreen = onScreen
                     })
+                else
+                    stats.outOfRange = stats.outOfRange + 1
                 end
             end
+        else
+            stats.invalid = stats.invalid + 1
         end
         ::continue::
     end
+
+    -- Log NPC filtering stats
+    local afterDedup = #nearbyList
+    local insignificantStr = ""
+    if #stats.insignificantNames > 0 then
+        insignificantStr = " [" .. table.concat(stats.insignificantNames, ", ") .. (stats.insignificant > 5 and "..." or "") .. "]"
+    end
+    print(string.format("[GetNearbyNPCs] Cache:%d | InRange:%d | Insignificant:%d%s | OutOfRange:%d | Invalid:%d",
+        stats.total, stats.inRange, stats.insignificant, insignificantStr, stats.outOfRange, stats.invalid))
 
     -- Sort by distance (closest first)
     table.sort(nearbyList, function(a, b) return a.distance < b.distance end)
@@ -3291,8 +3964,48 @@ function GetNearbyNPCs(maxDistance, lookDotThreshold)
         end
     end
 
+    -- Filter out NPCs behind walls using line traces
+    if #nearbyList > 0 then
+        local visibilityResults = CheckNPCVisibility(nearbyList)
+        local visibleList = {}
+        for _, entry in ipairs(nearbyList) do
+            if visibilityResults[entry.name] then
+                table.insert(visibleList, entry)
+            else
+                print(string.format("[Sonorus] NPC excluded (behind wall): %s (%.0fm)", entry.name, entry.distance / 100))
+            end
+        end
+        nearbyList = visibleList
+
+        -- Update lookedAtNpc if it was filtered out
+        if lookedAtNpc and not visibilityResults[lookedAtNpc.name] then
+            lookedAtNpc = nil
+            -- Find new best looked-at from remaining visible NPCs
+            for _, entry in ipairs(nearbyList) do
+                if entry.isLookedAt then
+                    lookedAtNpc = { name = entry.name, actor = entry.actor, distance = entry.distance }
+                    break
+                end
+            end
+        end
+    end
+
+    -- Log final result
+    if #nearbyList == 0 and stats.inRange > 0 then
+        print("[GetNearbyNPCs] WARNING: All " .. stats.inRange .. " in-range NPCs were filtered (check visibility)")
+    elseif #nearbyList > 0 then
+        local names = {}
+        for i, entry in ipairs(nearbyList) do
+            if i <= 5 then table.insert(names, entry.name) end
+        end
+        print("[GetNearbyNPCs] Result: " .. #nearbyList .. " NPCs [" .. table.concat(names, ", ") .. (#nearbyList > 5 and "..." or "") .. "]")
+    end
+
     return { nearbyList = nearbyList, lookedAtNpc = lookedAtNpc, playerInStealth = playerInStealth }
 end
+
+-- Export globally for LipSync module
+_G.GetNearbyNPCs = GetNearbyNPCs
 
 -- Legacy wrapper for compatibility
 function GetLookedAtNPC(minDot, maxDistance)
@@ -3307,22 +4020,20 @@ end
 -- Line Trace Visibility Check (for Vision LLM)
 -- Returns list of NPC names that are actually visible (not occluded)
 -- ============================================
+--- Check if NPCs are visible (not blocked by walls)
+--- Uses multi-ray traces ignoring all characters to detect only world geometry
+--- @param npcList table List of NPC data with .actor and .name
+--- @return table Map of npcName -> boolean (true = visible, false = behind wall)
 function CheckNPCVisibility(npcList)
     if not npcList or #npcList == 0 then
         return {}
     end
 
-    local UEHelpers = require("UEHelpers")
-    local KismetSystem = nil
-    local KismetMath = nil
-
-    pcall(function()
-        KismetSystem = UEHelpers.GetKismetSystemLibrary()
-        KismetMath = UEHelpers.GetKismetMathLibrary()
-    end)
+    local staticData = GetStaticCache()
+    local KismetSystem = staticData and staticData.kismetSystem
+    local KismetMath = staticData and staticData.kismetMath
 
     if not KismetSystem or not KismetMath then
-        print("[Sonorus] CheckNPCVisibility: Kismet libraries not available")
         -- Return all as visible if we can't do traces
         local result = {}
         for _, npc in ipairs(npcList) do
@@ -3331,29 +4042,51 @@ function CheckNPCVisibility(npcList)
         return result
     end
 
-    -- Get camera position
-    local staticData = GetStaticCache()
-    local cam = staticData and staticData.cameraManager
-    if not cam then
-        print("[Sonorus] CheckNPCVisibility: No camera manager")
+    -- Get player position (trace from above player's head)
+    local player = staticData and staticData.player
+    local KismetMathLib = KismetMath
+
+    if not player then
         return {}
     end
 
-    local camLoc = nil
-    pcall(function() camLoc = cam:GetCameraLocation() end)
-    if not camLoc then
-        print("[Sonorus] CheckNPCVisibility: Could not get camera location")
+    local playerLoc = nil
+    pcall(function() playerLoc = player:K2_GetActorLocation() end)
+    if not playerLoc then
         return {}
     end
 
-    local player = staticData.player
-    local playerPawn = nil
+    -- Get player capsule height
+    local playerHalfHeight = 88
+    pcall(function()
+        local capsule = player.CapsuleComponent
+        if capsule and capsule.CapsuleHalfHeight then
+            playerHalfHeight = capsule.CapsuleHalfHeight
+        end
+    end)
+
+    -- Trace origin: above player's head (full capsule height + 20 units)
+    local traceStart = nil
+    pcall(function()
+        traceStart = KismetMathLib:MakeVector(playerLoc.X, playerLoc.Y, playerLoc.Z + playerHalfHeight * 2 + 20)
+    end)
+    if not traceStart then
+        return {}
+    end
+
+    -- Build ignore list: player + ALL NPCs (so trace only hits world geometry)
+    local ActorsToIgnore = {}
     if player then
-        pcall(function() playerPawn = player end)
+        table.insert(ActorsToIgnore, player)
+    end
+    for _, npcData in ipairs(npcList) do
+        if npcData.actor then
+            table.insert(ActorsToIgnore, npcData.actor)
+        end
     end
 
     -- Trace settings
-    local ETraceTypeQuery_Visibility = 0  -- Visibility channel
+    local ETraceTypeQuery_Visibility = 0
     local EDrawDebugTrace_None = 0
     local TraceColor = { R = 0, G = 0, B = 0, A = 0 }
 
@@ -3368,7 +4101,7 @@ function CheckNPCVisibility(npcList)
             goto continue
         end
 
-        -- Get NPC location (add Z offset for torso/head height ~100 units)
+        -- Get NPC base location
         local npcLoc = nil
         pcall(function() npcLoc = npcActor:K2_GetActorLocation() end)
         if not npcLoc then
@@ -3376,72 +4109,64 @@ function CheckNPCVisibility(npcList)
             goto continue
         end
 
-        -- Offset to aim at torso/head rather than feet
-        local targetLoc = {
-            X = npcLoc.X,
-            Y = npcLoc.Y,
-            Z = npcLoc.Z + 100  -- ~1 meter up from origin (torso height)
+        -- Get NPC height from CapsuleComponent (scales with NPC size)
+        local halfHeight = 88  -- Default adult height
+        pcall(function()
+            local capsule = npcActor.CapsuleComponent
+            if capsule and capsule.CapsuleHalfHeight then
+                halfHeight = capsule.CapsuleHalfHeight
+            end
+        end)
+
+        -- Three trace points: head, chest, low (for sitting NPCs)
+        local traceOffsets = {
+            halfHeight * 2 - 15,  -- Head height (standing)
+            halfHeight,           -- Chest height (standing) / Head (sitting)
+            50                    -- Low point (catches sitting torso)
         }
 
-        -- Build end vector
-        local EndVector = {}
-        pcall(function()
-            EndVector = KismetMath:MakeVector(targetLoc.X, targetLoc.Y, targetLoc.Z)
-        end)
+        local isVisible = false
 
-        -- Actors to ignore (player pawn)
-        local ActorsToIgnore = {}
-        if playerPawn then
-            table.insert(ActorsToIgnore, playerPawn)
-        end
-
-        -- Do line trace
-        local HitResult = {}
-        local WasHit = false
-
-        pcall(function()
-            WasHit = KismetSystem:LineTraceSingle(
-                playerPawn or npcActor,  -- WorldContextObject
-                camLoc,                   -- Start
-                EndVector,                -- End
-                ETraceTypeQuery_Visibility,
-                false,                    -- bTraceComplex
-                ActorsToIgnore,
-                EDrawDebugTrace_None,
-                HitResult,
-                true,                     -- bIgnoreSelf
-                TraceColor,
-                TraceColor,
-                0.0                       -- DrawTime
-            )
-        end)
-
-        if WasHit then
-            -- Check if we hit the NPC or something else
-            local HitActor = nil
+        for _, zOffset in ipairs(traceOffsets) do
+            local EndVector = nil
             pcall(function()
-                -- Handle different UE versions
-                if UnrealVersion:IsBelow(5, 0) then
-                    HitActor = HitResult.Actor:Get()
-                elseif UnrealVersion:IsBelow(5, 4) then
-                    HitActor = HitResult.HitObjectHandle.Actor:Get()
-                else
-                    HitActor = HitResult.HitObjectHandle.ReferenceObject:Get()
-                end
+                EndVector = KismetMath:MakeVector(npcLoc.X, npcLoc.Y, npcLoc.Z + zOffset)
             end)
 
-            if HitActor == npcActor then
-                -- We hit the NPC directly - they're visible
-                visibilityResults[npcName] = true
-            else
-                -- We hit something else first - NPC is occluded
-                visibilityResults[npcName] = false
+            if not EndVector then
+                goto nextRay
             end
-        else
-            -- No hit means clear line of sight (shouldn't happen if NPC is there, but treat as visible)
-            visibilityResults[npcName] = true
+
+            local HitResult = {}
+            local WasHit = false
+
+            pcall(function()
+                WasHit = KismetSystem:LineTraceSingle(
+                    player or npcActor,      -- WorldContextObject
+                    traceStart,               -- Start (above player's head)
+                    EndVector,                -- End (NPC body point)
+                    ETraceTypeQuery_Visibility,
+                    false,                    -- bTraceComplex
+                    ActorsToIgnore,           -- Ignore player + all NPCs
+                    EDrawDebugTrace_None,
+                    HitResult,
+                    true,                     -- bIgnoreSelf
+                    TraceColor,
+                    TraceColor,
+                    0.0
+                )
+            end)
+
+            -- If trace didn't hit anything, line of sight is clear
+            if not WasHit then
+                isVisible = true
+                break  -- One clear ray is enough
+            end
+
+            ::nextRay::
         end
 
+        visibilityResults[npcName] = isVisible
         ::continue::
     end
 
@@ -3454,12 +4179,12 @@ end
 
 -- Static wrapper functions to avoid creating new closures in hot loops
 -- (creating closures at 20Hz corrupts UE4SS Lua registry -> PANIC crash)
-local _animateLipsCallCount = 0
+local _AnimateLipsCallCount = 0
 local function _AnimateLipsWrapper()
-    _animateLipsCallCount = _animateLipsCallCount + 1
+    _AnimateLipsCallCount = _AnimateLipsCallCount + 1
     -- Log every 100 calls (~5 seconds at 20Hz) to track if we're in the right place
-    if _G.DevPrint and _animateLipsCallCount % 100 == 0 then
-        _G.DevPrint("[DEBUG] AnimateLips call #" .. _animateLipsCallCount)
+    if _G.DevPrint and _AnimateLipsCallCount % 100 == 0 then
+        _G.DevPrint("[DEBUG] AnimateLips call #" .. _AnimateLipsCallCount)
     end
     local ok, err = pcall(AnimateLips)
     if not ok then
@@ -3487,7 +4212,7 @@ function OnTick()
             -- Queue items now arrive via socket - no need to poll
 
             -- Check if there are more queue items to play
-            if pState.playing and pState.currentIndex < #pState.queue then
+            if pState.playing and pState.currentIndex < #pState.queue and not _G.SonorusState.pendingIdle then
                 -- More items in queue - advance to next
                 pState.currentIndex = pState.currentIndex + 1
                 pState.currentSegment = 1
@@ -3523,6 +4248,19 @@ function OnTick()
                     return
                 end
 
+                -- Check if preview lock is waiting for server response
+                -- This handles the race condition where player turn finishes before
+                -- the server sends "playing" state for the NPC response
+                local previewLock = _G.ChatPreviewLock or _G.STTPreviewLock
+                if previewLock and previewLock.state == "submitted" then
+                    local now = os.clock()
+                    if not _G.LastPreviewLockWaitPrint or (now - _G.LastPreviewLockWaitPrint) > 2 then
+                        print("[Sonorus] Waiting for server response (preview lock: " .. tostring(previewLock.npcName) .. ")")
+                        _G.LastPreviewLockWaitPrint = now
+                    end
+                    return
+                end
+
                 -- Queue truly complete - reset everything
                 _G.SonorusState.phase = "idle"
                 _G.SonorusState.currentTurnId = nil
@@ -3533,11 +4271,15 @@ function OnTick()
                 _G.TurnActorCache = {}  -- Clear turn-based cache
                 ClearSpeakerCache()     -- Clear legacy cache
                 UnmuteAllSpeakers()
-                ReleaseAllNPCs()        -- Release locked NPCs when conversation ends
+                LingerAllNPCs()         -- NPCs stay frozen ~10s before returning to schedule
                 ResetPlaybackState()
                 -- Hide subtitles now that closing is complete
                 if HideMessage then
                     HideMessage()
+                end
+                -- Time dilation: Restore day/night rate
+                if TimeDilation then
+                    TimeDilation.OnConversationEnd()
                 end
                 print("[Sonorus] Ready for next conversation")
             end
@@ -3581,17 +4323,49 @@ function OnTick()
         end
 
         if currentItem then
-            local npcName = prettifyName(currentItem.speaker or "NPC")
-            local text = currentItem.full_text
-
-            -- Get text from current segment if available
-            if currentItem.segments and currentItem.segments[pState.currentSegment] then
-                text = currentItem.segments[pState.currentSegment].text or text
+            -- Streaming subtitles: defer to subtitle_update messages from Python
+            -- Each sentence is shown individually as TTS plays it
+            if currentItem.streamingSubtitles and not currentItem._subtitleReceived then
+                -- Record when we first tried to show subtitle (for fallback timer)
+                if not currentItem._subtitleDeferredAt then
+                    currentItem._subtitleDeferredAt = os.clock()
+                end
+                -- Fallback: if no subtitle_update arrives within 500ms, show full text
+                if os.clock() - currentItem._subtitleDeferredAt < 0.5 then
+                    -- Still waiting for subtitle_update — skip showing full text
+                    displayMessage = nil
+                else
+                    -- Timeout: show full text as fallback
+                    print("[Sonorus] Streaming subtitle timeout, showing full text")
+                    -- Fall through to legacy behavior below
+                    currentItem.streamingSubtitles = false
+                end
             end
 
-            -- Strip [emotion] tags for display
-            local displayText = string.gsub(text or "", "%[%w+%]%s*", "")
-            displayMessage = npcName .. ": " .. displayText
+            if not currentItem.streamingSubtitles or not currentItem._subtitleDeferredAt then
+                -- Legacy behavior: show full text at once (ElevenLabs, non-streaming, or fallback)
+                local npcName = GetDisplayName(currentItem.speaker or "NPC")
+                local text = currentItem.full_text
+
+                -- Get text from current segment if available
+                if currentItem.segments and currentItem.segments[pState.currentSegment] then
+                    text = currentItem.segments[pState.currentSegment].text or text
+                end
+
+                -- Strip bracketed text like [sighs], [laughing] only when using cloud TTS
+                -- Keep brackets for "none", "pocket" (local TTS can't express emotions well)
+                local displayText = text or ""
+                local ttsProvider = (_G.TtsProvider or ""):lower()
+                local keepBrackets = ttsProvider == "" or ttsProvider == "none"
+                    or ttsProvider == "pocket" or ttsProvider == "pocket_onnx"
+                if not keepBrackets then
+                    displayText = string.gsub(displayText, "%[[^%]]*%]", "")  -- Remove [...] content
+                end
+                displayText = string.gsub(displayText, "%s+", " ")  -- Collapse multiple spaces to single
+                displayText = string.gsub(displayText, "^%s+", "")  -- Trim leading
+                displayText = string.gsub(displayText, "%s+$", "")  -- Trim trailing
+                displayMessage = npcName .. ": " .. displayText
+            end
         end
 
         if displayMessage then
@@ -3646,14 +4420,24 @@ function ResetState()
         _G.SocketClient.send({type = "reset"})
     end
 
-    -- Unmute all speakers
-    UnmuteAllSpeakers()
+    -- Clear muted speakers tracking
+    if _G.SonorusState then
+        _G.SonorusState.mutedSpeakers = {}
+    end
+
+    -- Unmute ALL nearby NPCs (safety net - not just tracked participants)
+    UnmuteAllNearbyNPCs()
 
     -- Release all locked NPCs
     ReleaseAllNPCs()
 
     -- Close lips
     CloseLips()
+
+    -- Time dilation: Restore day/night rate
+    if TimeDilation then
+        TimeDilation.OnConversationEnd()
+    end
 
     print("[Sonorus] Reset complete")
 end
@@ -3721,6 +4505,9 @@ _G.CurrentSonorusTarget = _G.CurrentSonorusTarget or nil
 ---   AudioPriority (ByteProperty) - Audio priority level
 ---   bNonSpatialized (BoolProperty) - Non-spatialized (2D) audio
 function ProcessInitDialogueData(Context, AudioDialogueLineData)
+    -- Skip dialogue tracking when mod is disabled
+    if not _G.SonorusModEnabled then return end
+
     local elem = nil
     pcall(function() elem = Context:get() end)
 
@@ -3776,6 +4563,11 @@ function ProcessInitDialogueData(Context, AudioDialogueLineData)
             if _G.RecordDialogueLine then
                 _G.RecordDialogueLine(voiceName, lineID, duration, "", nil, nil)
             end
+
+            -- Suppress native subtitle in VR (immersive mode)
+            if false and _G.VROffset then
+                pcall(function() elem:SetVisibility(1) end)  -- ESlateVisibility::Collapsed
+            end
         end
     end)
 end
@@ -3820,35 +4612,38 @@ function RecordDialogueLine(voiceName, lineID, duration, subtitleText, speakingA
         if _G.TrackAmbientDialogue == false then
             return
         end
-        
+
         -- Skip all ambient dialogue when AI conversation is active
         local serverState = _G.PlaybackState and _G.PlaybackState.serverState
         if serverState and serverState ~= "idle" then
             return
         end
+
+        -- Track companion callout state for later repeat checking (after we have text)
+        -- Note: actual blocking is deferred until we have subtitle text
+    end
+
+    -- Check if this is a companion callout outside combat/broom (for repeat blocking)
+    local isCompanionCallout = false
+    local inCombat = _G.CombatState and _G.CombatState.active or false
+    local onBroom = _G.BroomState and _G.BroomState.mounted or false
+    if not inCinematic and not inCombat and not onBroom then
+        isCompanionCallout = IsCompanion(speakingActor) or IsCompanion(voiceName)
     end
 
     local timestamp = os.time()
 
     local speakerName = "Unknown"
-    if speakingActor then
-        pcall(function()
-            if speakingActor:IsValid() then
-                local staticData = Cache.GetStaticData()
-                local lib = staticData and staticData.bpLibrary
-                if lib then
-                    local nameResult = lib:GetActorName(speakingActor)
-                    if nameResult then
-                        speakerName = nameResult:ToString()
-                    end
-                end
-            end
-        end)
+    if speakingActor and SafeIsValid(speakingActor) then
+        local actorName = Utils.GetActorDisplayName(speakingActor)
+        if actorName then
+            speakerName = actorName
+        end
     end
 
     -- Fallback to prettified voiceName if speaker is still Unknown
     if speakerName == "Unknown" and voiceName and voiceName ~= "" and voiceName ~= "Unknown" then
-        speakerName = prettifyName(voiceName)
+        speakerName = GetDisplayName(voiceName)
     end
 
     -- Skip logging ambient dialogue from NPCs currently in an AI conversation
@@ -3881,6 +4676,20 @@ function RecordDialogueLine(voiceName, lineID, duration, subtitleText, speakingA
     -- Skip logging if no text content
     if not text or text == "" then
         return
+    end
+
+    -- Block repeated companion callouts within time window (if enabled)
+    -- _G.CompanionCalloutBlockMinutes: 0 = disabled, -1 = never repeat, >0 = block within N game minutes
+    local blockMinutes = _G.CompanionCalloutBlockMinutes or 0
+    if isCompanionCallout and blockMinutes ~= 0 then
+        if IsCompanionCalloutBlocked(voiceName, text, blockMinutes) then
+            -- Stop the dialogue lip sync if we have the actor
+            if StopNPCDialogueLipSync and speakingActor then
+                StopNPCDialogueLipSync(speakingActor)
+            end
+            -- Don't log to history
+            return
+        end
     end
 
     -- Get game time
@@ -3949,13 +4758,179 @@ function RecordDialogueLine(voiceName, lineID, duration, subtitleText, speakingA
         end
     end
 end
+_G.RecordDialogueLine = RecordDialogueLine
 
 -- ============================================
 -- Spell Event Recording
 -- ============================================
 
+-- Hook handler for SpellTool:Start - records spell casts to dialogue history
+-- Called from main.lua hook
+function OnSpellToolStart(Context)
+    local spellTool = Context:get()
+    if not spellTool then return end
+    if not SafeIsValid(spellTool) then return end
+
+    -- Skip during combat (use cached state)
+    if _G.CombatState and _G.CombatState.active then return end
+
+    -- Get the spell class name
+    local spellClass = nil
+    pcall(function()
+        spellClass = spellTool:GetClass():GetFullName()
+    end)
+
+    -- Record the spell cast to dialogue history (checks earshot internally)
+    if spellClass then
+        RecordSpellCast(spellClass)
+    end
+
+    -- Dev mode: additional debug logging
+    if not _G.SonorusDevMode then return end
+
+    print("[Sonorus] === SPELL_CAST EVENT ===")
+    print("[Sonorus] Spell: " .. (spellClass or "Unknown"))
+
+    -- Iterate all ObjectProperty fields to find potential caster references
+    local objectProps = {}
+    pcall(function()
+        local objClass = spellTool:GetClass()
+        while objClass and objClass:IsValid() do
+            objClass:ForEachProperty(function(prop)
+                local propName = nil
+                local propType = nil
+
+                pcall(function() propName = prop:GetFName():ToString() end)
+                pcall(function() propType = prop:GetClass():GetFName():ToString() end)
+
+                -- Only log ObjectProperty types (potential actor references)
+                if propName and propType == "ObjectProperty" then
+                    local valName = "nil"
+                    local valClass = ""
+                    pcall(function()
+                        local val = spellTool[propName]
+                        if val and val:IsValid() then
+                            valName = val:GetName()
+                            valClass = val:GetClass():GetName()
+                        end
+                    end)
+                    if valName ~= "nil" then
+                        table.insert(objectProps, propName .. "=" .. valName .. " (" .. valClass .. ")")
+                    end
+                end
+            end)
+            objClass = objClass:GetSuperStruct()
+        end
+    end)
+
+    -- Print found object properties
+    if #objectProps > 0 then
+        for _, prop in ipairs(objectProps) do
+            print("[Sonorus]   " .. prop)
+        end
+    else
+        print("[Sonorus]   No ObjectProperty refs found")
+    end
+end
+
+-- ============================================
+-- TEST: Death & Damage Hook Handlers
+-- ============================================
+
+-- Helper to dump all properties of an object using ForEachProperty
+local function DumpObjectProperties(obj, label)
+    if not obj then
+        print("[Sonorus] " .. label .. ": nil")
+        return
+    end
+
+    -- Unwrap if needed
+    local unwrapped = obj
+    pcall(function()
+        if obj.get then unwrapped = obj:get() end
+    end)
+
+    if not unwrapped then
+        print("[Sonorus] " .. label .. ": nil after :get()")
+        return
+    end
+
+    -- Check validity
+    if not SafeIsValid(unwrapped) then
+        print("[Sonorus] " .. label .. ": invalid")
+        return
+    end
+
+    -- Get basic info
+    local name, className = "?", "?"
+    pcall(function() name = unwrapped:GetName() end)
+    pcall(function() className = unwrapped:GetClass():GetName() end)
+    print(string.format("[Sonorus] %s: %s (%s)", label, name, className))
+
+    -- Iterate all properties using ForEachProperty
+    pcall(function()
+        local objClass = unwrapped:GetClass()
+        while objClass and objClass:IsValid() do
+            objClass:ForEachProperty(function(prop)
+                local propName = nil
+                local propType = nil
+                local propValue = "?"
+
+                pcall(function() propName = prop:GetFName():ToString() end)
+                pcall(function() propType = prop:GetClass():GetFName():ToString() end)
+
+                -- Try to get value based on type
+                if propName then
+                    pcall(function()
+                        local val = unwrapped[propName]
+                        if val == nil then
+                            propValue = "nil"
+                        elseif propType == "ObjectProperty" or propType == "WeakObjectProperty" then
+                            if val:IsValid() then
+                                propValue = val:GetName()
+                            else
+                                propValue = "invalid"
+                            end
+                        elseif propType == "BoolProperty" then
+                            propValue = val and "true" or "false"
+                        elseif propType == "FloatProperty" or propType == "IntProperty" or propType == "ByteProperty" then
+                            propValue = tostring(val)
+                        elseif propType == "NameProperty" then
+                            propValue = val:ToString()
+                        elseif propType == "StrProperty" then
+                            propValue = val:ToString()
+                        else
+                            propValue = "<" .. propType .. ">"
+                        end
+                    end)
+                end
+
+                if propName then
+                    print(string.format("[Sonorus]   .%s (%s) = %s", propName, propType or "?", propValue))
+                end
+            end)
+            objClass = objClass:GetSuperStruct()
+        end
+    end)
+end
+
+-- Combat hook handlers - delegated to Combat module
+function OnNPCDied(Context)
+    if not _G.SonorusModEnabled then return end
+    Combat.OnNPCDied(Context)
+end
+
+function OnCompanionDamaged(Context, InActor, InInstigator, InDamage, InHit)
+    if not _G.SonorusModEnabled then return end
+    Combat.OnCompanionDamaged(Context, InActor, InInstigator, InDamage, InHit)
+end
+
+function OnEnemyDamaged(Context, InActor, InInstigator, InDamage, InHit)
+    if not _G.SonorusModEnabled then return end
+    Combat.OnEnemyDamaged(Context, InActor, InInstigator, InDamage, InHit)
+end
+
 -- Record a spell cast event to DialogueHistory
--- Called from the SpellTool:Start hook in main.lua
 function RecordSpellCast(blueprintClassName)
     local timestamp = os.time()
     local gameTime = GetTimeOfDay()
@@ -3971,8 +4946,9 @@ function RecordSpellCast(blueprintClassName)
         playerName = _G.SonorusState.playerName
     end
 
-    -- Get earshot witnesses (nearby named NPCs)
+    -- Get earshot witnesses (nearby named NPCs) - skip if no one around
     local earshot = GetEarshotWitnesses("Player")
+    if not earshot or #earshot == 0 then return end
 
     -- Create spell event entry
     local entry = {
@@ -4072,6 +5048,27 @@ function RecordLocationTransition(newLocation)
     -- Get earshot witnesses (nearby named NPCs)
     local earshot = GetEarshotWitnesses("Player")
 
+    -- Get companion if actively following (not in forced wait from quest/puzzle)
+    -- Also ensure companion is in earshot (wall trace can fail at door transitions)
+    local companions = {}
+    local compOk, compErr = pcall(function()
+        local isFollowing, voiceId, displayName = Utils.IsCompanionActivelyFollowing()
+        if isFollowing and displayName and voiceId then
+            table.insert(companions, displayName)
+            -- Companion is always in earshot for location transitions
+            local found = false
+            for _, w in ipairs(earshot) do
+                if w == voiceId then found = true; break end
+            end
+            if not found then
+                table.insert(earshot, voiceId)
+            end
+        end
+    end)
+    if not compOk then
+        print(string.format("[Sonorus] Location: companion lookup failed: %s", tostring(compErr)))
+    end
+
     -- Create location transition entry
     local entry = {
         timestamp = timestamp,
@@ -4087,13 +5084,15 @@ function RecordLocationTransition(newLocation)
         type = "location",  -- Location transition event
         location = newLocation,  -- Store the raw location name
         earshot = earshot,
+        companions = #companions > 0 and companions or nil,
     }
 
     -- Send to Python for persistence
     sendDialogueEntry(entry)
 
     -- Log for debugging
-    print(string.format("[Sonorus] Location: %s entered %s", playerName, newLocation))
+    local compStr = #companions > 0 and (" with " .. table.concat(companions, ", ")) or ""
+    print(string.format("[Sonorus] Location: %s%s entered %s", playerName, compStr, newLocation))
 end
 
 -- ============================================
@@ -4142,7 +5141,6 @@ end
 
 -- Static wrapper for NPC lock check (runs every 1s when NPCs locked)
 local function _NPCLockCheckWrapper()
-    if _G.DevPrint then _G.DevPrint("[DEBUG] NPCLockCheck START") end
     local ok, err = pcall(function()
         -- First check combat/broom
         local canLock, reason = CanLockNPCs()
@@ -4154,11 +5152,14 @@ local function _NPCLockCheckWrapper()
 
         -- Check if any locked NPC needs to re-face their target (angle > 45 degrees)
         -- Collect NPCs that need re-facing first (can't modify table during iteration)
-        -- Skip companions and static locks (portraits, desk NPCs, etc.)
+        -- Skip companions, static locks, and lingering NPCs (they're frozen in place)
+        -- Snap-locked NPCs re-face via direct rotation (no release/re-lock cycle)
         local needsReface = {}
+        local snapReface = {}
         for lockId, data in pairs(_G.LockedNPCs) do
             if data.locked and data.npc and data.targetActor
-               and not data.isCompanionLock and not data.isStaticLock then
+               and not data.isCompanionLock and not data.isStaticLock
+               and not data.lingering then
                 pcall(function()
                     -- Check target is still valid
                     if not data.targetActor:IsValid() then return end
@@ -4189,31 +5190,257 @@ local function _NPCLockCheckWrapper()
 
                     -- If angle > 45 degrees, mark for re-facing
                     if math.abs(diff) > 45 then
-                        table.insert(needsReface, {
-                            lockId = lockId,
-                            npc = data.npc,
-                            target = data.targetActor,
-                            angle = math.floor(diff)
-                        })
+                        if data.isSnapLock then
+                            -- Snap lock: direct rotation, no release/re-lock
+                            table.insert(snapReface, { lockId = lockId, data = data })
+                        else
+                            table.insert(needsReface, {
+                                lockId = lockId,
+                                npc = data.npc,
+                                target = data.targetActor,
+                                angle = math.floor(diff)
+                            })
+                        end
                     end
                 end)
             end
         end
-        -- Now process re-facing outside the iteration loop
+
+        -- Snap re-face: rotate in place instantly (no release/re-lock cycle)
+        for _, item in ipairs(snapReface) do
+            NPCLock.SnapRefaceNPC(item.data)
+            print("[NPCLock] Snap re-face (id=" .. item.lockId .. ")")
+        end
+
+        -- Normal re-face: release and re-lock (animated turn)
         for _, item in ipairs(needsReface) do
             print("[NPCLock] Re-facing NPC (angle=" .. item.angle .. ")")
+
+            -- Check if this is a preview lock before releasing
+            local wasPreviewLock = false
+            local oldLockId = item.lockId
+            if _G.LockedNPCs[oldLockId] and _G.LockedNPCs[oldLockId].isPreviewLock then
+                wasPreviewLock = true
+            end
+
             ReleaseNPC(item.lockId)
-            LockNPCToTarget(item.npc, item.target)
+            local newLockId = LockNPCToTarget(item.npc, item.target)
+
+            -- If it was a preview lock, update the preview lock reference with new lockId
+            if wasPreviewLock and newLockId then
+                -- Mark new lock as preview lock
+                if _G.LockedNPCs[newLockId] then
+                    _G.LockedNPCs[newLockId].isPreviewLock = true
+                end
+
+                -- Update preview lock lockId references so they release the correct lock
+                if _G.ChatPreviewLock and _G.ChatPreviewLock.lockId == oldLockId then
+                    _G.ChatPreviewLock.lockId = newLockId
+                    DevPrint("[NPCLock] Updated ChatPreviewLock lockId: " .. oldLockId .. " -> " .. newLockId)
+                end
+                if _G.STTPreviewLock and _G.STTPreviewLock.lockId == oldLockId then
+                    _G.STTPreviewLock.lockId = newLockId
+                    DevPrint("[NPCLock] Updated STTPreviewLock lockId: " .. oldLockId .. " -> " .. newLockId)
+                end
+            end
         end
     end)
     if not ok then
         print("[Sonorus] NPCLockCheck error: " .. tostring(err))
     end
-    if _G.DevPrint then _G.DevPrint("[DEBUG] NPCLockCheck END") end
+    -- if _G.DevPrint then _G.DevPrint("[DEBUG] NPCLockCheck END") end
 end
 
 _G.UnifiedLoop = _G.UnifiedLoop or { version = 0, lastContextWrite = 0 }
 _G.UnifiedLoop.interval = _G.UnifiedLoop.interval or 100  -- Default 100ms, configurable via config page
+
+-- ============================================
+-- Event Handlers (re-registered on each reload)
+-- ============================================
+-- Events.clear() is called above to prevent duplicate handlers on F11 reload
+
+-- Cinematic: Stop active conversation when entering cinematic
+Events.on("cinematic:start", function(data)
+    print("[Sonorus] Cinematic started - stopping conversation")
+    -- Tell Python to stop conversation immediately (with history trimming)
+    -- Python's stop_conversation will send reset back to Lua, which calls ResetState
+    pcall(function()
+        SocketClient.send({ type = "interrupt_conversation", reason = "cinematic" })
+    end)
+    -- Send state update so Python knows we're in cinematic
+    pcall(function() WriteSelectiveContext({"state"}) end)
+end)
+
+Events.on("cinematic:end", function(data)
+    print("[Sonorus] Cinematic ended")
+    pcall(function() WriteSelectiveContext({"state"}) end)
+    -- Refresh house points after 2s (quests may award points on completion)
+    ExecuteInGameThreadWithDelay(2000, function()
+        RefreshHousePoints()
+    end)
+end)
+
+-- Helper: Get companion if within combat range (no visibility requirement)
+local function GetCompanionInRange(maxDistance)
+    local companionId = nil
+    pcall(function()
+        local _, id = Utils.GetCompanionNameAndId()
+        if not id then return end
+
+        -- Check if companion is within range
+        local staticData = Cache.GetStaticData()
+        local player = staticData and staticData.player
+        local companionMgr = staticData and staticData.companionManager
+        if not player or not companionMgr then return end
+
+        local companionPawn = companionMgr:GetPrimaryCompanionPawn()
+        if not companionPawn or not Utils.SafeIsValid(companionPawn) then return end
+
+        local playerLoc = player:K2_GetActorLocation()
+        local companionLoc = companionPawn:K2_GetActorLocation()
+        if not playerLoc or not companionLoc then return end
+
+        local dx = playerLoc.X - companionLoc.X
+        local dy = playerLoc.Y - companionLoc.Y
+        local dz = playerLoc.Z - companionLoc.Z
+        local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+
+        if dist <= maxDistance then
+            companionId = id
+        end
+    end)
+    return companionId
+end
+
+-- Helper: Get combat witnesses (NPCs via visibility + companion via range only)
+local function GetCombatWitnesses()
+    local witnesses = {}
+    local witnessSet = {}  -- For deduplication
+
+    -- Get NPCs within combat earshot (3x normal, with visibility)
+    local npcWitnesses = GetEarshotWitnesses("Player", 3000)
+    for _, id in ipairs(npcWitnesses) do
+        if not witnessSet[id] then
+            witnessSet[id] = true
+            table.insert(witnesses, id)
+        end
+    end
+
+    -- Add companion if in range (no visibility requirement - they might be behind player)
+    local companionId = GetCompanionInRange(3000)
+    if companionId and not witnessSet[companionId] then
+        witnessSet[companionId] = true
+        table.insert(witnesses, companionId)
+    end
+
+    return witnesses, witnessSet
+end
+
+-- Combat: Track combat stats and create summary entry on end
+Events.on("combat:start", function(data)
+    print("[Sonorus] Combat started")
+
+    -- Check if this should merge with previous combat (within 60s)
+    local isMerge = Combat.ShouldMergeWithPrevious()
+    if isMerge then
+        -- Merge: just reactivate tracking, keep existing stats and witnesses
+        Combat.ReactivateTracking()
+        print("[Combat] Merging with previous combat (within 60s window)")
+    else
+        -- New combat: reset stats (also clears startWitnesses)
+        Combat.ResetStats()
+        print("[Combat] New combat encounter started")
+    end
+
+    -- Capture witnesses at combat START
+    local newWitnesses, newWitnessSet = GetCombatWitnesses()
+
+    if isMerge and _G.CombatStats.startWitnesses then
+        -- Merge new witnesses with existing ones (for continued combat)
+        for _, id in ipairs(_G.CombatStats.startWitnesses) do
+            if not newWitnessSet[id] then
+                newWitnessSet[id] = true
+                table.insert(newWitnesses, id)
+            end
+        end
+    end
+
+    _G.CombatStats.startWitnesses = newWitnesses
+    print(string.format("[Combat] Start witnesses: %d%s", #newWitnesses, isMerge and " (merged)" or ""))
+
+    pcall(function() WriteSelectiveContext({"state"}) end)
+end)
+
+Events.on("combat:end", function(data)
+    print("[Sonorus] Combat ended")
+
+    -- Mark combat as ended
+    Combat.EndCombat()
+
+    -- Create combat entry if there was any activity
+    local stats = Combat.GetStats()
+    local totalDamage = stats.playerDamage + stats.companionDamage
+    local totalKills = stats.playerKills + stats.companionKills
+    if totalDamage > 0 or totalKills > 0 then
+        -- Get witnesses at combat END
+        local endWitnesses, witnessSet = GetCombatWitnesses()
+
+        -- Merge with witnesses from combat START (deduped)
+        local startWitnesses = _G.CombatStats.startWitnesses or {}
+        for _, id in ipairs(startWitnesses) do
+            if not witnessSet[id] then
+                witnessSet[id] = true
+                table.insert(endWitnesses, id)
+            end
+        end
+
+        local entry = Combat.CreateEntry(endWitnesses)
+        -- Use direct socket send (bypass suppression since this IS the combat entry)
+        pcall(function()
+            SocketClient.send({
+                type = "record_dialogue",
+                entry = entry
+            })
+        end)
+        print(string.format("[Combat] Summary: %s (witnesses: %d from start+end)", entry.text, #endWitnesses))
+    else
+        print("[Combat] No combat activity to record")
+    end
+
+    -- Clear start witnesses
+    _G.CombatStats.startWitnesses = nil
+
+    pcall(function() WriteSelectiveContext({"state"}) end)
+end)
+
+-- Broom: Release NPCs when mounting, log events
+-- Note: setState("broom", true) emits broom:start, setState("broom", false) emits broom:end
+Events.on("broom:start", function(data)
+    print("[Sonorus] Player mounted broom")
+    if ReleaseAllNPCs then pcall(ReleaseAllNPCs) end
+    if RecordBroomEvent then pcall(function() RecordBroomEvent("mounted") end) end
+end)
+
+Events.on("broom:end", function(data)
+    print("[Sonorus] Player dismounted broom")
+    if RecordBroomEvent then pcall(function() RecordBroomEvent("dismounted") end) end
+
+    -- Delay context update to let floo mod restore companion
+    ExecuteWithDelay(500, function()
+        pcall(function() WriteSelectiveContext({"companion"}) end)
+    end)
+end)
+
+-- Stealth: Log state changes, send context updates
+Events.on("stealth:start", function(data)
+    print("[Sonorus] Player entered stealth/disillusionment")
+    pcall(function() WriteSelectiveContext({"state"}) end)
+end)
+
+Events.on("stealth:end", function(data)
+    print("[Sonorus] Player left stealth/disillusionment")
+    pcall(function() WriteSelectiveContext({"state"}) end)
+end)
 
 -- Function to start/restart the unified loop with current interval
 -- Called on init and when interval changes via config
@@ -4244,14 +5471,25 @@ function _G.StartUnifiedLoop(newInterval)
         if devMode then t1 = os.clock() end
 
         -- Socket update EVERY tick - handles reconnection and message processing
-        -- This is CRITICAL - socket must update frequently for responsive chat input
+        -- This is CRITICAL - socket must update frequently even when mod is disabled
         -- NOTE: Pure LuaSocket, no UObjects
-        if _G.SocketClient then
-            pcall(_G.SocketClient.update)
-        else
-            print("No socket client!")
+        -- Skip if fast poll loop is active AND we're connected (it handles socket updates at 25ms)
+        -- Always run here when disconnected so reconnection logic isn't blocked
+        local fp = _G._FastPoll
+        local fastPollActive = fp and fp.handle and os.clock() < fp.expiry
+        if not fastPollActive or not (_G.SocketClient and _G.SocketClient.isConnected()) then
+            if _G.SocketClient then
+                pcall(_G.SocketClient.update)
+            else
+                print("No socket client!")
+            end
         end
         if devMode then t2 = os.clock() end
+
+        -- Skip all mod functionality when disabled (except socket communication above)
+        if not _G.SonorusModEnabled then
+            return  -- Early exit - only socket update runs when mod disabled
+        end
 
         -- Process chat input display (already on game thread, call directly)
         if _G.ChatInputState and _G.ChatInputState.dirty then
@@ -4259,8 +5497,14 @@ function _G.StartUnifiedLoop(newInterval)
         end
         if devMode then t3 = os.clock() end
 
-        -- REMOVED: Periodic context writing - now on-demand via handshake
-        -- Python requests context when needed via request_context message
+        -- Send lightweight time + zone updates every 5 seconds (for config page display + location tracking)
+        _G.UnifiedLoop.lastTimeUpdate = _G.UnifiedLoop.lastTimeUpdate or 0
+        if (now - _G.UnifiedLoop.lastTimeUpdate) >= 5.0 then
+            _G.UnifiedLoop.lastTimeUpdate = now
+            pcall(RefreshTimeCache)
+            pcall(function() WriteSelectiveContext({"time", "zone"}) end)
+            pcall(function() Events.emit("timeUpdated") end)
+        end
         if devMode then t4 = os.clock() end
 
         -- Broom state polling every 2 seconds (replaces ReceiveTick hooks)
@@ -4276,65 +5520,48 @@ function _G.StartUnifiedLoop(newInterval)
                     onBroom = gearScreen:IsPlayerOnBroom() or false
                 end
             end)
-            -- Detect state change
-            local prevMounted = _G.BroomState and _G.BroomState.mounted or false
-            if onBroom ~= prevMounted then
+            -- Update state - events fire automatically on change
+            -- Uses "broom" state with mount/dismount mapping to :start/:end
+            if Events.setState("broom", onBroom) then
+                -- Also update legacy _G.BroomState for compatibility
                 _G.BroomState = _G.BroomState or {}
                 _G.BroomState.mounted = onBroom
-                if onBroom then
-                    print("[Sonorus] Player mounted broom (polled)")
-                    if ReleaseAllNPCs then pcall(ReleaseAllNPCs) end
-                    if RecordBroomEvent then pcall(function() RecordBroomEvent("mounted") end) end
-                else
-                    print("[Sonorus] Player dismounted broom (polled)")
-                    if RecordBroomEvent then pcall(function() RecordBroomEvent("dismounted") end) end
-                end
             end
         end
 
-        -- Cinematic and combat state polling every 1 second
+        -- Cinematic, combat, and stealth state polling every 1 second
         _G.UnifiedLoop.lastStateCheck = _G.UnifiedLoop.lastStateCheck or 0
         if (now - _G.UnifiedLoop.lastStateCheck) >= 1.0 then
             _G.UnifiedLoop.lastStateCheck = now
 
             local inCinematic = false
             local inCombat = false
+            local inStealth = false
             pcall(function()
                 local staticData = GetStaticCache()
                 local player = staticData.player
                 if player then
                     inCinematic = player.InCinematic or false
                     inCombat = player.bInCombatMode or false
+                    inStealth = player.InStealthMode or false
                 end
             end)
 
-            -- Cinematic state change - stop conversations
-            local prevCinematic = _G.CinematicState and _G.CinematicState.active or false
-            if inCinematic ~= prevCinematic then
+            -- Update states - events fire automatically on change
+            -- Also update legacy _G.*State for compatibility with existing code
+            if Events.setState("cinematic", inCinematic) then
                 _G.CinematicState = _G.CinematicState or {}
                 _G.CinematicState.active = inCinematic
-                if inCinematic then
-                    print("[Sonorus] Cinematic started - stopping conversation")
-                    if ResetState then pcall(ResetState) end
-                else
-                    print("[Sonorus] Cinematic ended")
-                end
-                -- Send state-only context update (cheap)
-                pcall(function() WriteSelectiveContext({"state"}) end)
             end
 
-            -- Combat state change - block new conversations
-            local prevCombat = _G.CombatState and _G.CombatState.active or false
-            if inCombat ~= prevCombat then
+            if Events.setState("combat", inCombat) then
                 _G.CombatState = _G.CombatState or {}
                 _G.CombatState.active = inCombat
-                if inCombat then
-                    print("[Sonorus] Combat started")
-                else
-                    print("[Sonorus] Combat ended")
-                end
-                -- Send state-only context update (cheap)
-                pcall(function() WriteSelectiveContext({"state"}) end)
+            end
+
+            if Events.setState("stealth", inStealth) then
+                _G.StealthState = _G.StealthState or {}
+                _G.StealthState.active = inStealth
             end
         end
 
@@ -4406,12 +5633,55 @@ function _G.StartUnifiedLoop(newInterval)
             -- Already on game thread, call directly
             _NPCLockCheckWrapper()
         end
+
+        -- Preview lock timeout check every 1 second
+        -- Release locks stuck in 'submitted' or 'processing' state for over 15 seconds
+        _G.UnifiedLoop.lastPreviewLockCheck = _G.UnifiedLoop.lastPreviewLockCheck or 0
+        if (now - _G.UnifiedLoop.lastPreviewLockCheck) >= 1.0 then
+            _G.UnifiedLoop.lastPreviewLockCheck = now
+            local PREVIEW_LOCK_TIMEOUT = 15  -- seconds
+
+            -- Check ChatPreviewLock timeout
+            if _G.ChatPreviewLock and _G.ChatPreviewLock.startTime then
+                local elapsed = now - _G.ChatPreviewLock.startTime
+                local lockState = _G.ChatPreviewLock.state
+                -- Only timeout transitioning states (submitted), not typing state
+                if lockState == "submitted" and elapsed > PREVIEW_LOCK_TIMEOUT then
+                    print("[Chat] Preview lock timeout (" .. string.format("%.0f", elapsed) .. "s) - releasing")
+                    if ReleaseNPC and _G.ChatPreviewLock.lockId then
+                        pcall(function() ReleaseNPC(_G.ChatPreviewLock.lockId) end)
+                    end
+                    _G.ChatPreviewLock = nil
+                end
+            end
+
+            -- Check STTPreviewLock timeout
+            if _G.STTPreviewLock and _G.STTPreviewLock.startTime then
+                local elapsed = now - _G.STTPreviewLock.startTime
+                local lockState = _G.STTPreviewLock.state
+                -- Only timeout transitioning states (processing), not speaking state
+                if lockState == "processing" and elapsed > PREVIEW_LOCK_TIMEOUT then
+                    print("[STT] Preview lock timeout (" .. string.format("%.0f", elapsed) .. "s) - releasing")
+                    if ReleaseNPC and _G.STTPreviewLock.lockId then
+                        pcall(function() ReleaseNPC(_G.STTPreviewLock.lockId) end)
+                    end
+                    _G.STTPreviewLock = nil
+                end
+            end
+        end
+
+        -- Time dilation: Check for day/night transitions every 5 seconds
+        _G.UnifiedLoop.lastTimeDilationCheck = _G.UnifiedLoop.lastTimeDilationCheck or 0
+        if TimeDilation and TimeDilation.IsActive() and (now - _G.UnifiedLoop.lastTimeDilationCheck) >= 5.0 then
+            _G.UnifiedLoop.lastTimeDilationCheck = now
+            TimeDilation.OnTick()
+        end
         if devMode then t5 = os.clock() end
 
         -- Log timing when devMode enabled (times in ms)
         if true and devMode and t0 then
             local total = (t5 - t0) * 1000
-            if total >= 20 then  -- Only log if tick took > 1ms
+            if total >= 100 then  -- Only log if tick took > 1ms
                 print(string.format("[Perf] Tick: %.2fms (clock:%.2f socket:%.2f chat:%.2f context:%.2f rest:%.2f)",
                     total,
                     (t1 - t0) * 1000,
@@ -4448,10 +5718,7 @@ end
 
 -- Helper to safely get spell name from SpellTool (uses nested pcall per CLAUDE.md)
 local function GetSpellName(spellTool)
-    if not spellTool then return "unknown" end
-    local isValid = false
-    pcall(function() isValid = spellTool:IsValid() end)
-    if not isValid then return "unknown" end
+    if not SafeIsValid(spellTool) then return "unknown" end
 
     local spellName = "unknown"
     pcall(function()
@@ -4466,9 +5733,7 @@ end
 -- Helper to safely get actor name (uses nested pcall per CLAUDE.md)
 local function GetActorName(actor)
     if not actor then return "nil" end
-    local isValid = false
-    pcall(function() isValid = actor:IsValid() end)
-    if not isValid then return "invalid" end
+    if not SafeIsValid(actor) then return "invalid" end
 
     local name = "unknown"
     pcall(function()
@@ -4481,6 +5746,46 @@ local function GetActorName(actor)
         end
     end)
     return name
+end
+
+-- ============================================
+-- Station Exit Hook (for GracefulStationExit detection)
+-- ============================================
+_G.StationExitWatchers = _G.StationExitWatchers or {}
+if not _G.StationExitHookRegistered then
+    local hookOk, hookErr = pcall(function()
+        RegisterHook("/Script/Phoenix.NPC_Character:OnStationOnFinishedExit", function(Context)
+            local actor = Context:get()
+            if not actor then return end
+            local fullName = nil
+            pcall(function() fullName = actor:GetFullName() end)
+            if not fullName then return end
+
+            local watcher = _G.StationExitWatchers[fullName]
+            if watcher then
+                _G.StationExitWatchers[fullName] = nil
+                local elapsed = os.clock() - watcher.startTime
+                print(string.format("[StationExit] HOOK fired: %s (%.1fs)",
+                    fullName:match("([^%.]+)$") or fullName, elapsed))
+                if ShowHint then ShowHint(string.format("EXIT HOOK %.1fs", elapsed), 3) end
+                if watcher.timeoutHandle then
+                    pcall(function() CancelDelayedAction(watcher.timeoutHandle) end)
+                end
+                if watcher.callback then pcall(watcher.callback) end
+            else
+                -- Log ANY exit event for research (even if we're not watching this NPC)
+                print(string.format("[StationExit] HOOK fired (unwatched): %s",
+                    fullName:match("([^%.]+)$") or fullName))
+            end
+        end)
+    end)
+    if hookOk then
+        _G.StationExitHookRegistered = true
+        print("[StationExit] RegisterHook OK")
+    else
+        print("[StationExit] RegisterHook FAILED: " .. tostring(hookErr))
+        _G.StationExitHookRegistered = "failed"
+    end
 end
 
 -- ============================================
@@ -4808,19 +6113,64 @@ function CastSpellByName(internalSpellName)
         end
     end
 
-    -- Cast the spell: Cancel -> Activate -> Cast
-    local castOk, castErr = pcall(function()
-        wandTool:CancelCurrentSpell()
-        wandTool:ActivateSpellTool(spellToolRecord, false)
-        wandTool:CastActiveSpell()
+    -- Direct cast: GetSpellTool + CastSpell(tool, true) — immediate, no delay
+    local spellTool = nil
+    pcall(function()
+        spellTool = wandTool:GetSpellTool(spellToolRecord)
     end)
 
-    if not castOk then
-        print("[VoiceSpell] Cast error: " .. tostring(castErr))
+    local toolValid = false
+    if spellTool then
+        pcall(function() toolValid = spellTool:IsValid() end)
+    end
+
+    if toolValid then
+        -- Activate spell tool first so wand has correct effects/animations
+        pcall(function()
+            wandTool:ActivateSpellTool(spellToolRecord, false)
+        end)
+        local castOk, castErr = pcall(function()
+            wandTool:CastSpell(spellTool, true)
+        end)
+        if castOk then
+            print("[VoiceSpell] Cast successful: " .. internalSpellName)
+            return true
+        else
+            print("[VoiceSpell] CastSpell error: " .. tostring(castErr))
+            return false
+        end
+    end
+
+    -- Fallback: old Activate -> delay -> CastActive sequence
+    -- (GetSpellTool can return invalid in some edge cases)
+    print("[VoiceSpell] GetSpellTool invalid, falling back to delayed cast: " .. internalSpellName)
+    if _G.PendingSpellCastHandle then
+        pcall(function() CancelDelayedAction(_G.PendingSpellCastHandle) end)
+        _G.PendingSpellCastHandle = nil
+    end
+
+    local activateOk, activateErr = pcall(function()
+        wandTool:CancelCurrentSpell()
+        wandTool:ActivateSpellTool(spellToolRecord, false)
+    end)
+
+    if not activateOk then
+        print("[VoiceSpell] Activate error: " .. tostring(activateErr))
         return false
     end
 
-    print("[VoiceSpell] Cast successful: " .. internalSpellName)
+    local capturedName = internalSpellName
+    _G.PendingSpellCastHandle = ExecuteInGameThreadWithDelay(200, function()
+        _G.PendingSpellCastHandle = nil
+        local castOk, castErr = pcall(function()
+            wandTool:CastActiveSpell()
+        end)
+        if castOk then
+            print("[VoiceSpell] Cast successful (fallback): " .. capturedName)
+        else
+            print("[VoiceSpell] Cast error (fallback): " .. tostring(castErr))
+        end
+    end)
 
     return true
 end

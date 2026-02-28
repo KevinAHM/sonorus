@@ -19,18 +19,15 @@ import urllib.error
 from typing import Dict, Optional, Callable
 
 import requests  # For proper streaming
-from dotenv import load_dotenv
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from .base import BaseTTSProvider, VoiceCache
+from .voice_utils import parse_hashed_voice_name
 
 # Parent directory (sonorus/) since this module is in services/tts/
 SONORUS_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-# Load .env from sonorus directory
-load_dotenv(os.path.join(SONORUS_DIR, ".env"))
 
 # Data directory for config files
 from utils.settings import DATA_DIR
@@ -75,9 +72,9 @@ def _get_elevenlabs_config():
     elevenlabs_settings = tts_settings.get('elevenlabs', {})
 
     return {
-        "api_url": elevenlabs_settings.get('api_url') or os.getenv("ELEVENLABS_API_URL", "https://api.elevenlabs.io"),
-        "api_key": elevenlabs_settings.get('api_key') or os.getenv("ELEVENLABS_API_KEY", ""),
-        "model": elevenlabs_settings.get('model') or os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5"),
+        "api_url": elevenlabs_settings.get('api_url', "").strip() or "https://api.elevenlabs.io",
+        "api_key": elevenlabs_settings.get('api_key', ""),
+        "model": elevenlabs_settings.get('model', "eleven_v3"),
         "stability": float(elevenlabs_settings.get('stability', 0.5)),
         "similarity_boost": float(elevenlabs_settings.get('similarity_boost', 0.75)),
         "sample_rate": int(elevenlabs_settings.get('sample_rate', 24000)),
@@ -90,7 +87,7 @@ def _get_auth_header():
     config = _get_elevenlabs_config()
     api_key = config["api_key"]
     if not api_key:
-        raise ValueError("ElevenLabs API key not configured (set in Config Page or .env)")
+        raise ValueError("ElevenLabs API key not configured (set in Config Page)")
     return f"{api_key}"
 
 
@@ -219,11 +216,16 @@ def convert_char_to_word_alignment(chars, char_starts, char_ends):
 # ============================================
 class ElevenLabsVoiceCache(VoiceCache):
     """
-    ElevenLabs voice cache - keys by name only (multilingual).
+    ElevenLabs voice cache - keys by name + language.
+
+    Even though ElevenLabs is multilingual, we create language-specific clones
+    (e.g., PlayerMale_DE_DE) so we need language-specific cache keys.
     """
 
     def _make_cache_key(self, name: str, lang: Optional[str] = None) -> str:
-        """Generate cache key - ignore lang for multilingual provider."""
+        """Generate cache key - include language for language-specific clones."""
+        if lang and lang != "EN_US":
+            return f"{name}_{lang}"
         return name
 
     def load(self) -> bool:
@@ -249,6 +251,9 @@ class ElevenLabsVoiceCache(VoiceCache):
             self._voices.clear()
             self._by_id.clear()
 
+            # Track duplicates for cleanup
+            duplicates = {}  # key -> list of (display_name, hash, voice_id)
+
             for voice in voices:
                 display_name = voice.get("name", "")
                 voice_id = voice.get("voice_id", "")
@@ -260,12 +265,61 @@ class ElevenLabsVoiceCache(VoiceCache):
                     "labels": voice.get("labels", {}),
                 }
 
-                self._voices[display_name] = voice_dict
+                # Parse voice name to extract original name, language suffix, and hash
+                # e.g., "PlayerMale_DE_DE_a1b2c3d4" -> ("PlayerMale", "DE_DE", "a1b2c3d4")
+                original_name, detected_lang, ref_hash = parse_hashed_voice_name(display_name)
+
+                # Store hash in voice dict for later comparison
+                if ref_hash:
+                    voice_dict["referenceHash"] = ref_hash
+
+                # Use _make_cache_key to get the correct key
+                cache_key = self._make_cache_key(original_name, detected_lang)
+
+                # Check for duplicates
+                if cache_key in self._voices:
+                    existing = self._voices[cache_key]
+                    existing_hash = existing.get("referenceHash")
+                    existing_name = existing.get("displayName", "")
+
+                    if cache_key not in duplicates:
+                        duplicates[cache_key] = [(existing_name, existing_hash, existing.get("voiceId"))]
+                    duplicates[cache_key].append((display_name, ref_hash, voice_id))
+
+                    # Check which hash matches the current reference file
+                    from .voice_utils import find_voice_reference, compute_reference_hash
+                    ref_path = find_voice_reference(original_name, "15s", language=detected_lang or "EN_US")
+                    if ref_path:
+                        current_hash = compute_reference_hash(ref_path)
+                        if current_hash and ref_hash == current_hash and existing_hash != current_hash:
+                            # New voice matches current reference, replace existing
+                            print(f"[ElevenLabs] Duplicate {cache_key}: keeping {display_name} (hash {ref_hash} matches reference)")
+                            self._voices[cache_key] = voice_dict
+                            if voice_id:
+                                self._by_id[voice_id] = voice_dict
+                    continue
+
+                self._voices[cache_key] = voice_dict
                 if voice_id:
                     self._by_id[voice_id] = voice_dict
 
+            # Track duplicates for cleanup by provider
+            self._duplicates_to_delete = []
+            if duplicates:
+                print(f"[ElevenLabs] WARNING: Found {len(duplicates)} duplicate voice(s):")
+                for key, entries in duplicates.items():
+                    kept_voice = self._voices.get(key)
+                    kept_name = kept_voice.get("displayName", "unknown") if kept_voice else "unknown"
+                    kept_hash = kept_voice.get("referenceHash", "no-hash") if kept_voice else "no-hash"
+                    kept_id = kept_voice.get("voiceId") if kept_voice else None
+                    print(f"[ElevenLabs]   {key}: kept={kept_name} (hash={kept_hash})")
+                    for dn, hv, vid in entries:
+                        if vid and vid != kept_id:
+                            print(f"[ElevenLabs]     duplicate: {dn} (hash={hv or 'none'}, id={vid})")
+                            self._duplicates_to_delete.append((vid, dn))
+
             self._loaded = True
-            print(f"[ElevenLabs] Loaded {len(self._voices)} voices")
+            print(f"[ElevenLabs] Loaded {len(self._voices)} unique voices (from {len(voices)} total)")
             return True
 
         except urllib.error.HTTPError as e:
@@ -296,6 +350,14 @@ def _get_voice_cache() -> ElevenLabsVoiceCache:
     if _voice_cache is None:
         _voice_cache = ElevenLabsVoiceCache()
     return _voice_cache
+
+
+def clear_voice_cache():
+    """Clear the module-level voice cache."""
+    global _voice_cache
+    if _voice_cache is not None:
+        print("[ElevenLabs] Clearing voice cache")
+        _voice_cache = None
 
 
 class ElevenLabsProvider(BaseTTSProvider):
@@ -329,6 +391,44 @@ class ElevenLabsProvider(BaseTTSProvider):
         """Track usage for LRU deletion."""
         if voice.get("category") == "cloned":
             update_voice_usage("elevenlabs", voice.get("displayName", ""))
+
+    def delete_voice(self, voice_id: str) -> bool:
+        """
+        Delete a specific voice by ID.
+
+        Args:
+            voice_id: ElevenLabs voice ID to delete
+
+        Returns:
+            True if deleted successfully, False otherwise
+        """
+        config = _get_elevenlabs_config()
+        api_url = config["api_url"].rstrip('/')
+
+        headers = {
+            "xi-api-key": _get_auth_header(),
+        }
+
+        delete_url = f"{api_url}/v1/voices/{voice_id}"
+
+        try:
+            print(f"[ElevenLabs] Deleting voice: {voice_id}")
+            delete_req = urllib.request.Request(delete_url, headers=headers, method="DELETE")
+            with urllib.request.urlopen(delete_req, timeout=30) as response:
+                print(f"[ElevenLabs] Voice deleted: {voice_id}")
+
+                # Remove from cache
+                cache = self.get_voice_cache()
+                if voice_id in cache._by_id:
+                    del cache._by_id[voice_id]
+
+                return True
+        except urllib.error.HTTPError as e:
+            print(f"[ElevenLabs] Delete failed: {e.code} {e.reason}")
+            return False
+        except Exception as e:
+            print(f"[ElevenLabs] Delete failed: {e}")
+            return False
 
     def _delete_oldest_cloned_voice(self) -> bool:
         """
@@ -380,9 +480,13 @@ class ElevenLabsProvider(BaseTTSProvider):
             with urllib.request.urlopen(delete_req, timeout=30) as response:
                 pass  # 200 OK means success
 
-            # Remove from cache
-            if voice_name in cache._voices:
-                del cache._voices[voice_name]
+            # Remove from cache - need to use proper cache key
+            # voice_name from API is "PlayerMale_DE_DE_a1b2c3d4", need to detect language and hash
+            original_name, detected_lang, _ = parse_hashed_voice_name(voice_name)
+
+            cache_key = cache._make_cache_key(original_name, detected_lang)
+            if cache_key in cache._voices:
+                del cache._voices[cache_key]
             if voice_id in cache._by_id:
                 del cache._by_id[voice_id]
 
@@ -480,8 +584,8 @@ class ElevenLabsProvider(BaseTTSProvider):
                     "category": "cloned",
                 }
 
-                cache._voices[display_name] = voice_dict
-                cache._by_id[voice_id] = voice_dict
+                # NOTE: Do NOT add to cache here - base class handles it with correct key
+                # (we clone as "PlayerMale_DE_DE" but cache under "PlayerMale")
 
                 print(f"[ElevenLabs] Voice cloned: {display_name} -> {voice_id}")
                 return voice_dict, None
@@ -581,7 +685,8 @@ class ElevenLabsProvider(BaseTTSProvider):
             return None
 
     def synthesize_stream(self, text: str, voice_id: str,
-                          on_chunk: Callable[[bytes, Optional[Dict]], None]) -> bool:
+                          on_chunk: Callable[[bytes, Optional[Dict]], None],
+                          speaker_id: Optional[str] = None) -> bool:
         """
         Stream TTS synthesis from ElevenLabs API.
 
@@ -589,6 +694,7 @@ class ElevenLabsProvider(BaseTTSProvider):
             text: Text to synthesize
             voice_id: ElevenLabs voice ID
             on_chunk: Callback function(pcm_bytes, word_timing)
+            speaker_id: Optional speaker ID (unused, for API compatibility)
 
         Returns:
             True on success, False on error
@@ -596,7 +702,7 @@ class ElevenLabsProvider(BaseTTSProvider):
         config = self.get_config()
         api_url = config["api_url"].rstrip('/')
         sample_rate = config["sample_rate"]
-        model_id = config["model"]
+        model_id = self.resolve_model_override(config["model"], speaker_id)
         stability = config["stability"]
         similarity_boost = config["similarity_boost"]
 
@@ -641,65 +747,142 @@ class ElevenLabsProvider(BaseTTSProvider):
             accumulated_chars = []
             accumulated_starts = []
             accumulated_ends = []
+            # Track emitted words to send only incremental data (not cumulative)
+            # We only emit "complete" words (followed by whitespace) since the last
+            # word might be partial until more characters arrive
+            last_emitted_word_count = 0
 
-            # Stream lines as they arrive (newline-delimited JSON)
-            for line in response.iter_lines():
-                if not line:
+            # Use iter_content() with manual line buffering for reliable NDJSON streaming
+            # (iter_lines() can prematurely terminate on partial chunks)
+            line_buffer = b""
+            for raw_chunk in response.iter_content(chunk_size=None):
+                if not raw_chunk:
                     continue
 
+                line_buffer += raw_chunk
+
+                # Process all complete lines in buffer
+                while b"\n" in line_buffer:
+                    line, line_buffer = line_buffer.split(b"\n", 1)
+                    if not line:
+                        continue
+
+                    try:
+                        chunk_recv_time = time.time()
+                        data = json.loads(line.decode("utf-8"))
+
+                        # Raw API uses audio_base64 (not audio_base_64 like SDK)
+                        audio_b64 = data.get("audio_base64", "")
+
+                        if audio_b64:
+                            audio_bytes = base64.b64decode(audio_b64)
+
+                            if len(audio_bytes) > 0:
+                                chunks_received += 1
+                                total_audio_bytes += len(audio_bytes)
+                                chunk_recv_times.append(chunk_recv_time)
+
+                                elapsed = chunk_recv_time - stream_start_time
+                                inter_chunk_gap = 0
+                                if len(chunk_recv_times) > 1:
+                                    inter_chunk_gap = chunk_recv_time - chunk_recv_times[-2]
+
+                                print(f"[ElevenLabs] Chunk {chunks_received}: {len(audio_bytes)} bytes, "
+                                      f"gap={inter_chunk_gap*1000:.0f}ms, elapsed={elapsed:.2f}s")
+
+                                if len(audio_bytes) % 2 != 0:
+                                    print(f"[ElevenLabs] WARNING: PCM size {len(audio_bytes)} is ODD")
+
+                                # Process character alignment data
+                                word_alignment = None
+                                alignment = data.get("alignment")
+                                if alignment:
+                                    # Raw API field names
+                                    chars = alignment.get("characters", [])
+                                    starts = alignment.get("character_start_times_seconds", [])
+                                    ends = alignment.get("character_end_times_seconds", [])
+
+                                    if chars:
+                                        accumulated_chars.extend(chars)
+                                    if starts:
+                                        accumulated_starts.extend(starts)
+                                    if ends:
+                                        accumulated_ends.extend(ends)
+
+                                    # Convert all accumulated chars to words
+                                    full_alignment = convert_char_to_word_alignment(
+                                        accumulated_chars,
+                                        accumulated_starts,
+                                        accumulated_ends
+                                    )
+
+                                    # Emit only NEW complete words (incremental, not cumulative)
+                                    # This matches Inworld's behavior for consistent handling
+                                    # A word is "complete" if followed by whitespace or sentence punctuation
+                                    if full_alignment:
+                                        all_words = full_alignment.get("words", [])
+                                        all_starts = full_alignment.get("wordStartTimeSeconds", [])
+                                        all_ends = full_alignment.get("wordEndTimeSeconds", [])
+
+                                        # Check if last word is complete (chars end with whitespace/punctuation)
+                                        last_char = accumulated_chars[-1] if accumulated_chars else ""
+                                        last_word_complete = (
+                                            last_char.isspace() or
+                                            last_char in '.!?,;:"\''
+                                        )
+
+                                        # Emit all words if last is complete, otherwise hold back the last word
+                                        emit_count = len(all_words) if last_word_complete else max(0, len(all_words) - 1)
+
+                                        if emit_count > last_emitted_word_count:
+                                            word_alignment = {
+                                                "words": all_words[last_emitted_word_count:emit_count],
+                                                "wordStartTimeSeconds": all_starts[last_emitted_word_count:emit_count],
+                                                "wordEndTimeSeconds": all_ends[last_emitted_word_count:emit_count]
+                                            }
+                                            last_emitted_word_count = emit_count
+
+                                on_chunk(audio_bytes, word_alignment)
+
+                    except json.JSONDecodeError as e:
+                        print(f"[ElevenLabs] JSON error: {e}")
+                        continue
+
+            # Process any remaining data in buffer (final line without trailing newline)
+            if line_buffer.strip():
                 try:
-                    chunk_recv_time = time.time()
-                    data = json.loads(line.decode("utf-8"))
-
-                    # Raw API uses audio_base64 (not audio_base_64 like SDK)
+                    data = json.loads(line_buffer.decode("utf-8"))
                     audio_b64 = data.get("audio_base64", "")
-
                     if audio_b64:
                         audio_bytes = base64.b64decode(audio_b64)
-
                         if len(audio_bytes) > 0:
                             chunks_received += 1
                             total_audio_bytes += len(audio_bytes)
-                            chunk_recv_times.append(chunk_recv_time)
+                            print(f"[ElevenLabs] Chunk {chunks_received} (final): {len(audio_bytes)} bytes")
+                            on_chunk(audio_bytes, None)
+                except json.JSONDecodeError:
+                    pass
 
-                            elapsed = chunk_recv_time - stream_start_time
-                            inter_chunk_gap = 0
-                            if len(chunk_recv_times) > 1:
-                                inter_chunk_gap = chunk_recv_time - chunk_recv_times[-2]
+            # Emit any remaining words that were held back (stream ended, so last word is complete)
+            if accumulated_chars:
+                final_alignment = convert_char_to_word_alignment(
+                    accumulated_chars,
+                    accumulated_starts,
+                    accumulated_ends
+                )
+                if final_alignment:
+                    all_words = final_alignment.get("words", [])
+                    all_starts = final_alignment.get("wordStartTimeSeconds", [])
+                    all_ends = final_alignment.get("wordEndTimeSeconds", [])
 
-                            print(f"[ElevenLabs] Chunk {chunks_received}: {len(audio_bytes)} bytes, "
-                                  f"gap={inter_chunk_gap*1000:.0f}ms, elapsed={elapsed:.2f}s")
-
-                            if len(audio_bytes) % 2 != 0:
-                                print(f"[ElevenLabs] WARNING: PCM size {len(audio_bytes)} is ODD")
-
-                            # Process character alignment data
-                            word_alignment = None
-                            alignment = data.get("alignment")
-                            if alignment:
-                                # Raw API field names
-                                chars = alignment.get("characters", [])
-                                starts = alignment.get("character_start_times_seconds", [])
-                                ends = alignment.get("character_end_times_seconds", [])
-
-                                if chars:
-                                    accumulated_chars.extend(chars)
-                                if starts:
-                                    accumulated_starts.extend(starts)
-                                if ends:
-                                    accumulated_ends.extend(ends)
-
-                                word_alignment = convert_char_to_word_alignment(
-                                    accumulated_chars,
-                                    accumulated_starts,
-                                    accumulated_ends
-                                )
-
-                            on_chunk(audio_bytes, word_alignment)
-
-                except json.JSONDecodeError as e:
-                    print(f"[ElevenLabs] JSON error: {e}")
-                    continue
+                    if len(all_words) > last_emitted_word_count:
+                        final_word_alignment = {
+                            "words": all_words[last_emitted_word_count:],
+                            "wordStartTimeSeconds": all_starts[last_emitted_word_count:],
+                            "wordEndTimeSeconds": all_ends[last_emitted_word_count:]
+                        }
+                        # Send with empty audio since audio already sent
+                        on_chunk(b"", final_word_alignment)
 
             # Streaming summary
             total_stream_time = time.time() - stream_start_time

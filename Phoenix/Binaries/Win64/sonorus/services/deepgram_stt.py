@@ -20,6 +20,10 @@ SPELL_KEYTERMS = [
     "Wingardium Leviosa",
     "Arresto Momentum",
     "Petrificus Totalus",
+    "Expecto Patronum",
+    "Animagus Form",
+    "Bat Bogey",
+    "Fiend Fyre",
     # Latin-derived spells
     "Levioso",
     "Accio",
@@ -46,8 +50,16 @@ SPELL_KEYTERMS = [
     "Episkey",
     "Evanesco",
     "Conjuration",
-    "Transformation",
-    "Disillusionment",
+    "Alohomora",
+    "Reducio",
+    "Reducto",
+    "Apparition",
+    "Bombarda",
+    # Character names (commonly misheard by STT)
+    "Ominis",
+    "Deek",
+    # Location names
+    "Hogsmeade"
 ]
 
 
@@ -119,8 +131,6 @@ def transcribe(audio_data: bytes, sample_rate: int = 16000) -> dict:
         result = response.results.channels[0].alternatives[0]
         text = result.transcript.strip()
         confidence = result.confidence if hasattr(result, 'confidence') else 1.0
-
-        print(f"[STT/Deepgram] Transcribed: \"{text}\" (conf: {confidence:.2f})")
 
         return {
             "success": True,

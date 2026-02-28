@@ -8,7 +8,7 @@ Usage:
   python extract_localization.py --both   # Extract both
   python extract_localization.py --language DE_DE  # Extract German
 
-Supported languages: EN_US, DE_DE, ES_ES, ES_MX, FR_FR, IT_IT, JA_JP, KO_KR, PL_PL, PT_BR, RU_RU, ZH_CN, ZH_TW, AR_AE
+Supported languages: EN_US, DE_DE, ES_MX, ES_MX, FR_FR, IT_IT, JA_JP, KO_KR, PL_PL, PT_BR, RU_RU, ZH_CN, ZH_TW, AR_AE
 """
 import os
 import sys
@@ -34,19 +34,32 @@ def get_lang_code(language=None):
     return "enUS"
 
 
-def get_file_configs(lang_code):
-    """Get file configurations for the given language code."""
+def get_file_configs(lang_code, language="EN_US"):
+    """Get file configurations for the given language code.
+
+    Args:
+        lang_code: Pak file format like "enUS", "deDE"
+        language: Original language code like "EN_US", "DE_DE" for output naming
+
+    Returns:
+        Dict with SUB and MAIN configs. Output filenames use suffix for non-English:
+        - EN_US: subtitles.json, main_localization.json (backward compat)
+        - DE_DE: subtitles_de_de.json, main_localization_de_de.json
+    """
+    # Suffix for non-English output files
+    suffix = "" if language == "EN_US" else f"_{language.lower()}"
+
     return {
         "SUB": {
             "bin_path": f"Phoenix/Content/Localization/WIN64/SUB-{lang_code}.bin",
             "extracted_bin": os.path.join(SONORUS_DIR, f"SUB-{lang_code}.bin"),
-            "output_json": os.path.join(DATA_DIR, "subtitles.json"),
+            "output_json": os.path.join(DATA_DIR, f"subtitles{suffix}.json"),
             "description": "Subtitles"
         },
         "MAIN": {
             "bin_path": f"Phoenix/Content/Localization/WIN64/MAIN-{lang_code}.bin",
             "extracted_bin": os.path.join(SONORUS_DIR, f"MAIN-{lang_code}.bin"),
-            "output_json": os.path.join(DATA_DIR, "main_localization.json"),
+            "output_json": os.path.join(DATA_DIR, f"main_localization{suffix}.json"),
             "description": "Main Localization"
         }
     }
@@ -252,8 +265,9 @@ def extract_localization(file_type, lang_code, file_configs, search_term=None):
 
 def run_extraction(language=None, extract_sub=True, extract_main=True, search_term=None):
     """Run the extraction process. Returns (success, error_message)."""
+    language = language or "EN_US"
     lang_code = get_lang_code(language)
-    file_configs = get_file_configs(lang_code)
+    file_configs = get_file_configs(lang_code, language)
 
     print("=" * 60)
     print("Hogwarts Legacy Localization Extractor")

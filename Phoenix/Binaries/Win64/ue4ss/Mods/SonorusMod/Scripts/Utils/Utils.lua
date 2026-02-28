@@ -311,9 +311,9 @@ function Utils.GetZoneLocation()
 end
 
 ---Gets the current mission/quest info from the MissionBanner HUD widget
----@return table mission Table with questName, objective, status fields (empty strings if unavailable)
+---@return table mission Table with questName, objective, status, shortObjectives fields (empty strings/table if unavailable)
 function Utils.GetCurrentMission()
-    local mission = { questName = "", objective = "", status = "" }
+    local mission = { questName = "", objective = "", status = "", shortObjectives = {} }
 
     -- Get HUD (auto-invalidates dependents if HUD changed)
     local hud = Cache.Get("HUD", function()
@@ -337,7 +337,368 @@ function Utils.GetCurrentMission()
     mission.objective = ReadTextWidget(descWidget)
     mission.status = ReadTextWidget(headerWidget)
 
+    -- Read short objectives from objectiveList (the on-screen checklist items)
+    -- These are the actionable tasks like "Follow Professor Weasley"
+    pcall(function()
+        local objectiveList = banner.objectiveList
+        if not objectiveList then return end
+
+        local childCount = objectiveList:GetChildrenCount()
+        for i = 0, childCount - 1 do
+            pcall(function()
+                local child = objectiveList:GetChildAt(i)
+                if child then
+                    local checkboxText = child.CheckboxText
+                    if checkboxText then
+                        local text = ReadTextWidget(checkboxText)
+                        if text and text ~= "" then
+                            table.insert(mission.shortObjectives, text)
+                        end
+                    end
+                end
+            end)
+        end
+    end)
+
     return mission
+end
+
+---Gets the current companion's display name and voice ID
+---@return string|nil displayName The companion's display name (or nil if no companion)
+---@return string|nil voiceId The companion's internal voice ID (or nil if no companion)
+function Utils.GetCompanionNameAndId()
+    local displayName, voiceId = nil, nil
+    pcall(function()
+        local staticData = Cache.GetStaticData()
+        local companionMgr = staticData and staticData.companionManager
+        if not companionMgr then return end
+
+        local companionPawn = companionMgr:GetPrimaryCompanionPawn()
+        if not companionPawn then return end
+
+        voiceId = Utils.GetActorVoiceId(companionPawn, staticData)
+        if voiceId and voiceId ~= "" then
+            if _G.GetDisplayName then
+                displayName = _G.GetDisplayName(voiceId)
+            else
+                print("[Utils] WARNING: GetDisplayName not loaded - using voice ID as fallback")
+                displayName = voiceId
+            end
+        end
+    end)
+    return displayName, voiceId
+end
+
+---Gets companion internal ID from pawn actor
+---@param companionPawn userdata The companion pawn actor
+---@return string|nil companionId Internal ID like "NellieOggspire" or nil if failed
+function Utils.GetCompanionId(companionPawn)
+    if not companionPawn then return nil end
+    if not Utils.SafeIsValid(companionPawn) then return nil end
+
+    local staticData = Cache.GetStaticData()
+    return Utils.GetActorVoiceId(companionPawn, staticData)
+end
+
+---Gets distance from player to companion
+---@param staticData table|nil Optional cached static data (will fetch if nil)
+---@return number|nil distance Distance in UE units, or nil if no companion/error
+function Utils.GetCompanionDistance(staticData)
+    local distance = nil
+    pcall(function()
+        staticData = staticData or Cache.GetStaticData()
+        local player = staticData and staticData.player
+        local companionMgr = staticData and staticData.companionManager
+        if not player or not companionMgr then return end
+
+        local companionPawn = companionMgr:GetPrimaryCompanionPawn()
+        if not companionPawn or not Utils.SafeIsValid(companionPawn) then return end
+
+        local playerLoc = player:K2_GetActorLocation()
+        local companionLoc = companionPawn:K2_GetActorLocation()
+        if not playerLoc or not companionLoc then return end
+
+        local dx = playerLoc.X - companionLoc.X
+        local dy = playerLoc.Y - companionLoc.Y
+        local dz = playerLoc.Z - companionLoc.Z
+        distance = math.sqrt(dx*dx + dy*dy + dz*dz)
+    end)
+    return distance
+end
+
+---Check if a companion pawn is in forced wait state (quest/puzzle hold position).
+---@param companionPawn userdata The companion pawn actor
+---@param companionMgr userdata|nil Optional CompanionManager (fetched from cache if nil)
+---@return boolean isWaiting true if companion is in forced wait
+function Utils.IsCompanionForcedWaiting(companionPawn, companionMgr)
+    if not companionPawn then return false end
+    local isWaiting = false
+    pcall(function()
+        if not companionMgr then
+            local staticData = Cache.GetStaticData()
+            companionMgr = staticData and staticData.companionManager
+        end
+        if companionMgr then
+            local waitLoc = {}
+            isWaiting = companionMgr:IsCompanionWaitingBP(companionPawn, waitLoc)
+        end
+    end)
+    return isWaiting
+end
+
+---Check if the companion is actively following the player (not in forced wait from quest/puzzle).
+---@param companionPawn userdata|nil Optional pawn (fetched from CompanionManager if nil)
+---@return boolean isFollowing true if companion exists and is NOT in forced wait
+---@return string|nil voiceId companion voice ID if following
+---@return string|nil displayName companion display name if following
+function Utils.IsCompanionActivelyFollowing(companionPawn)
+    local isFollowing = false
+    local voiceId, displayName = nil, nil
+    pcall(function()
+        local staticData = Cache.GetStaticData()
+        local companionMgr = staticData and staticData.companionManager
+        if not companionMgr then return end
+
+        if not companionPawn then
+            companionPawn = companionMgr:GetPrimaryCompanionPawn()
+        end
+        if not companionPawn or not Utils.SafeIsValid(companionPawn) then return end
+
+        if Utils.IsCompanionForcedWaiting(companionPawn, companionMgr) then return end
+
+        voiceId = Utils.GetActorVoiceId(companionPawn, staticData)
+        if voiceId and voiceId ~= "" then
+            if _G.GetDisplayName then
+                displayName = _G.GetDisplayName(voiceId)
+            else
+                displayName = voiceId
+            end
+            isFollowing = true
+        end
+    end)
+    return isFollowing, voiceId, displayName
+end
+
+---Safely convert FString to Lua string
+---Handles UE4SS quirk requiring nested pcall for FString:ToString()
+---@param fstring userdata|nil The FString to convert
+---@return string|nil str The string value or nil if failed/empty
+function Utils.SafeFStringToString(fstring)
+    if not fstring then return nil end
+    local str = nil
+    pcall(function() str = fstring:ToString() end)
+    return (str and str ~= "") and str or nil
+end
+
+---Safely call a no-arg method that returns FString and convert result to string
+---Combines outer pcall for method call + inner pcall for ToString (per CLAUDE.md)
+---@param obj userdata The object to call method on
+---@param methodName string The method name to call
+---@return string|nil str The string value or nil if failed/empty
+function Utils.SafeMethodToString(obj, methodName)
+    if not obj then return nil end
+    local result = nil
+    pcall(function()
+        local fstring = obj[methodName](obj)
+        if fstring then
+            pcall(function() result = fstring:ToString() end)
+        end
+    end)
+    return (result and result ~= "") and result or nil
+end
+
+---Safe IsValid check for UObjects
+---Wraps IsValid in pcall since stale/invalid objects can crash
+---@param obj userdata|nil The object to check
+---@return boolean valid True if object is valid
+function Utils.SafeIsValid(obj)
+    if not obj then return false end
+    local valid = false
+    pcall(function() valid = obj:IsValid() end)
+    return valid
+end
+
+---Get raw voice ID for an actor using PhoenixBPLibrary
+---Returns the internal voice ID (e.g., "neridaroberts"), NOT the display name.
+---Use GetActorDisplayName() if you need the localized display name (e.g., "Nerida Roberts").
+---@param actor userdata The actor to get voice ID for
+---@param staticData table|nil Optional cached static data (avoids re-fetch)
+---@return string|nil voiceId The internal voice ID or nil if not available
+function Utils.GetActorVoiceId(actor, staticData)
+    if not actor then return nil end
+    staticData = staticData or Cache.GetStaticData()
+    local lib = staticData and staticData.bpLibrary
+    if not lib then return nil end
+
+    local name = nil
+    pcall(function()
+        local nameResult = lib:GetActorName(actor)
+        if nameResult then
+            pcall(function() name = nameResult:ToString() end)
+        end
+    end)
+    return (name and name ~= "") and name or nil
+end
+
+---Get the localized display name for an actor (e.g., "Nerida Roberts")
+---This is the proper human-readable name from localization data.
+---@param actor userdata The actor to get name for
+---@param staticData table|nil Optional cached static data (avoids re-fetch)
+---@return string|nil displayName Localized display name or nil
+function Utils.GetActorDisplayName(actor, staticData)
+    local voiceId = Utils.GetActorVoiceId(actor, staticData)
+    if not voiceId then return nil end
+
+    -- Get localized display name (e.g., "NeridaRoberts" -> "Nerida Roberts")
+    if _G.GetDisplayName then
+        return _G.GetDisplayName(voiceId)
+    end
+
+    return voiceId  -- Fallback to ID
+end
+
+---Gets companion info (ID, swimming, broom state) with floo mod fallback
+---@param staticData table Cached static data
+---@param isPlayerOnBroom boolean Whether player is on broom
+---@param isPlayerInStealth boolean Whether player is in stealth
+---@param IsCompanionOnBroom function Function to check if actor is on broom
+---@param GetNearbyNPCs function Function to get nearby NPCs
+---@return table|nil companionInfo Table with hasCompanion, companionId, companionInStealth, companionIsSwimming, companionIsOnBroom or nil
+function Utils.GetCompanionInfo(staticData, isPlayerOnBroom, isPlayerInStealth, IsCompanionOnBroom, GetNearbyNPCs)
+    local companionMgr = staticData and staticData.companionManager
+    if not companionMgr then return nil end
+
+    local companionPawn = companionMgr:GetPrimaryCompanionPawn()
+    if companionPawn and Utils.SafeIsValid(companionPawn) then
+        -- Valid companion
+        local info = {
+            hasCompanion = true,
+            companionInStealth = isPlayerInStealth,
+            companionIsSwimming = false,
+            companionIsOnBroom = false,
+            companionId = nil
+        }
+
+        -- Swimming check
+        pcall(function()
+            local npcCompClass = staticData.npcComponentClass
+            if npcCompClass then
+                local npcComp = companionPawn:GetComponentByClass(npcCompClass)
+                if npcComp then
+                    info.companionIsSwimming = npcComp:IsSwimming() or false
+                end
+            end
+        end)
+
+        -- Broom check (only if player is on broom)
+        if isPlayerOnBroom and IsCompanionOnBroom then
+            pcall(function()
+                info.companionIsOnBroom = IsCompanionOnBroom(companionPawn, staticData)
+            end)
+        end
+
+        -- Get companion ID
+        local companionId = Utils.GetCompanionId(companionPawn)
+        if companionId then
+            info.companionId = companionId
+        end
+
+        return info
+    elseif isPlayerOnBroom and GetNearbyNPCs and IsCompanionOnBroom then
+        -- Floo mod fallback: scan nearby NPCs for flying companion
+        local npcResult = GetNearbyNPCs(2000, 0.9)
+        if npcResult and npcResult.nearbyList then
+            for _, npcEntry in ipairs(npcResult.nearbyList) do
+                local isFlying = false
+                pcall(function()
+                    isFlying = IsCompanionOnBroom(npcEntry.actor, staticData)
+                end)
+                if isFlying then
+                    return {
+                        hasCompanion = true,
+                        companionId = npcEntry.name,
+                        companionIsOnBroom = true,
+                        companionInStealth = isPlayerInStealth,
+                        companionIsSwimming = false
+                    }
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+--- Get an NPC's current schedule info (location, activity) from the PopulationManager.
+--- Works even when the NPC is not streamed in.
+--- @param voiceId string - entity name (e.g. "SebastianSallow", "PhineasBlack")
+--- @param staticData table|nil - optional static cache (will fetch if nil)
+--- @return table|nil - { locationName, locationDesc, activity, activityType, isInTransit, inFlesh } or nil
+function Utils.GetNPCScheduleInfo(voiceId, staticData)
+    if not voiceId or voiceId == "" then return nil end
+
+    staticData = staticData or (GetStaticCache and GetStaticCache())
+    local popManager = staticData and staticData.populationManager
+    if not popManager or not Utils.SafeIsValid(popManager) then return nil end
+
+    local se = nil
+    local ok = pcall(function()
+        se = popManager:GetScheduledEntityFromName(voiceId)
+    end)
+    if not ok or not se then return nil end
+
+    local seValid = false
+    pcall(function() seValid = se:IsValid() end)
+    if not seValid then return nil end
+
+    local info = {
+        locationName = nil,
+        locationDesc = nil,
+        activity = nil,
+        activityType = nil,
+        isInTransit = false,
+        inFlesh = false,
+        scheduledEntity = se,
+    }
+
+    pcall(function() info.inFlesh = se:CurrentlyInFlesh() end)
+    pcall(function() info.isInTransit = se:IsInTransit() end)
+
+    -- Read current activity
+    pcall(function()
+        local out = {}
+        local out2 = {}
+        se:GetCurrentActivity(out, out2)
+        if out.ActivityIsValid then
+            pcall(function() info.activity = out.Activity:ToString() end)
+            pcall(function() info.activityType = out.ActivityType:ToString() end)
+
+            local locKey = nil
+            pcall(function() locKey = out.LocationKey:ToString() end)
+
+            if locKey and locKey ~= "" and GetLocationDisplayName then
+                info.locationName = GetLocationDisplayName(locKey)
+                -- Also try to get description
+                if _G.Locations then
+                    local entry = _G.Locations[locKey]
+                    if not entry then
+                        local bestLen = 0
+                        for key, value in pairs(_G.Locations) do
+                            if #key > bestLen and locKey:sub(1, #key) == key then
+                                bestLen = #key
+                                entry = value
+                            end
+                        end
+                    end
+                    if entry and type(entry) == "table" and entry.desc then
+                        info.locationDesc = entry.desc
+                    end
+                end
+            end
+        end
+    end)
+
+    return info
 end
 
 return Utils

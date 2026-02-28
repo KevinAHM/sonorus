@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Manifest Builder - Sonorus</title>
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Crimson+Text:wght@400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/voice-manager/static/voice-builder.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="header-content">
+                <h1 class="app-title">Voice Manifest Builder</h1>
+                <p class="app-subtitle">Prepare multi-language voice cloning references</p>
+            </div>
+            <div class="header-controls">
+                <label class="language-label" for="analyzerSelect">Analyzer:</label>
+                <select id="analyzerSelect" class="language-select">
+                    <option value="deepgram">Deepgram</option>
+                    <option value="parakeet">Parakeet (Local)</option>
+                </select>
+                <label class="language-label" for="languageSelect">Language:</label>
+                <select id="languageSelect" class="language-select">
+                    <option value="">Loading...</option>
+                </select>
+            </div>
+        </header>
+
+        <!-- Config Warning Banner -->
+        <div id="configWarning" class="config-warning" style="display: none;">
+            <i data-lucide="alert-triangle" class="warning-icon"></i>
+            <span id="configWarningText"></span>
+            <a href="/config.html#stt" class="warning-link" id="configWarningLink" style="display: none;">Open Settings</a>
+        </div>
+
+        <!-- Main Content -->
+        <main class="app-main">
+            <!-- Left Panel: Characters -->
+            <aside class="characters-panel">
+                <div class="panel-toolbar">
+                    <input type="text" id="characterSearch" class="search-input" placeholder="Search characters...">
+                </div>
+
+                <div class="batch-buttons">
+                    <button id="autoBuildBtn" class="btn-batch btn-batch-primary">
+                        <i data-lucide="zap" class="btn-icon"></i>
+                        <span>Auto-Build All</span>
+                    </button>
+                    <button id="extractAllBtn" class="btn-batch">
+                        <i data-lucide="download" class="btn-icon"></i>
+                        <span>Extract All</span>
+                    </button>
+                    <button id="analyzeAllBtn" class="btn-batch">
+                        <i data-lucide="search" class="btn-icon"></i>
+                        <span>Analyze All</span>
+                    </button>
+                    <button id="autoSelectAllBtn" class="btn-batch">
+                        <i data-lucide="check" class="btn-icon"></i>
+                        <span>Auto-Select</span>
+                    </button>
+                </div>
+
+                <div class="characters-list" id="characterList">
+                    <div class="loading-state">Loading characters...</div>
+                </div>
+
+                <div class="panel-footer">
+                    <div class="progress-text" id="progressSummary">
+                        <span id="completeCount">0</span> / <span id="totalCount">0</span> ready
+                    </div>
+                </div>
+            </aside>
+
+            <!-- Right Panel: Samples -->
+            <section class="samples-panel">
+                <div class="samples-header">
+                    <div class="character-info">
+                        <h2 id="selectedCharacterName" class="character-name">Select a character</h2>
+                        <div id="characterStats" class="character-stats"></div>
+                    </div>
+                </div>
+
+                <div class="samples-content">
+                    <!-- Action Buttons -->
+                    <div id="sampleActions" class="action-buttons" style="display: none;">
+                        <button id="extractBtn" class="btn-action btn-primary">
+                            <i data-lucide="download" class="btn-icon"></i>
+                            <span>Extract from Game</span>
+                        </button>
+                        <button id="analyzeBtn" class="btn-action btn-primary">
+                            <i data-lucide="search" class="btn-icon"></i>
+                            <span>Analyze Checked</span>
+                        </button>
+                        <button id="autoSelectBtn" class="btn-action btn-primary">
+                            <i data-lucide="check" class="btn-icon"></i>
+                            <span>Auto-Select Best</span>
+                        </button>
+                        <button id="clearSelectionBtn" class="btn-action btn-secondary">
+                            <span>Clear Selection</span>
+                        </button>
+                    </div>
+
+                    <!-- Readiness Indicators -->
+                    <div id="readinessSection" class="readiness-section" style="display: none;">
+                        <div class="readiness-grid">
+                            <div class="readiness-card" id="readiness10s">
+                                <div class="readiness-header">
+                                    <i data-lucide="target" class="readiness-icon"></i>
+                                    <span class="readiness-label">10s Target</span>
+                                </div>
+                                <div class="readiness-status">Not met</div>
+                                <div class="readiness-detail"></div>
+                            </div>
+                            <div class="readiness-card" id="readiness15s">
+                                <div class="readiness-header">
+                                    <i data-lucide="target" class="readiness-icon"></i>
+                                    <span class="readiness-label">15s Target</span>
+                                </div>
+                                <div class="readiness-status">Not met</div>
+                                <div class="readiness-detail"></div>
+                            </div>
+                            <div class="readiness-card" id="readiness60s">
+                                <div class="readiness-header">
+                                    <i data-lucide="target" class="readiness-icon"></i>
+                                    <span class="readiness-label">60s Target</span>
+                                </div>
+                                <div class="readiness-status">Optional</div>
+                                <div class="readiness-detail"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Selected Samples -->
+                    <div id="selectedSection" class="selected-section" style="display: none;">
+                        <div class="section-header">
+                            <h3>Selected for Voice Cloning</h3>
+                            <div class="selection-summary">
+                                <span id="selectionDuration">0.0s</span>
+                                <span class="summary-separator">·</span>
+                                <span id="selectionCount">0 samples</span>
+                            </div>
+                        </div>
+                        <div class="selected-list" id="selectedList"></div>
+                        <div class="playback-controls">
+                            <button id="playPreviewBtn" class="btn-playback">
+                                <i data-lucide="play" class="btn-icon"></i>
+                                <span>Play All</span>
+                            </button>
+                            <button id="stopPreviewBtn" class="btn-playback" style="display: none;">
+                                <i data-lucide="square" class="btn-icon"></i>
+                                <span>Stop</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Available Samples -->
+                    <div id="availableSection" class="available-section" style="display: none;">
+                        <div class="section-header">
+                            <h3>Available Samples</h3>
+                        </div>
+                        <div class="available-list" id="availableList"></div>
+                    </div>
+
+                    <!-- Empty State -->
+                    <div id="emptyState" class="empty-state">
+                        <i data-lucide="mic" class="empty-icon"></i>
+                        <p class="empty-message">Select a character to view voice samples</p>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer class="app-footer">
+            <div class="export-controls">
+                <button id="exportBtn" class="btn-export" disabled>
+                    <i data-lucide="save" class="btn-icon"></i>
+                    <span>Export Manifest</span>
+                </button>
+                <span id="exportStatus" class="export-status"></span>
+            </div>
+        </footer>
+
+        <!-- Progress Modal -->
+        <div id="progressModal" class="modal" style="display: none;">
+            <div class="modal-backdrop"></div>
+            <div class="modal-content">
+                <h3 id="progressTitle" class="modal-title">Processing...</h3>
+                <div class="progress-bar">
+                    <div id="progressFill" class="progress-fill" style="width: 0%"></div>
+                </div>
+                <p id="progressText" class="progress-message">Starting...</p>
+                <button id="cancelTaskBtn" class="btn-modal">Cancel</button>
+            </div>
+        </div>
+
+        <!-- Audio Player -->
+        <audio id="audioPlayer" style="display: none;"></audio>
+    </div>
+
+    <script src="/voice-manager/static/lucide.min.js"></script>
+    <script src="/voice-manager/static/wavesurfer.min.js"></script>
+    <script src="/voice-manager/static/voice-builder.js"></script>
+    <script>
+        // Initialize Lucide icons
+        lucide.createIcons();
+    </script>
+</body>
+</html>

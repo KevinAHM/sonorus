@@ -29,7 +29,7 @@ except ImportError:
 
 # Toggle for amplitude-based gap filling (for vocal bursts like [laughs], [sighs])
 # Set to False to disable gap-filling entirely
-AMPLITUDE_GAP_FILL_ENABLED = False  # Toggle: True = enabled, False = disabled
+AMPLITUDE_GAP_FILL_ENABLED = True  # Amplitude visemes fill gaps in word coverage
 
 # Gruut for phoneme conversion
 try:
@@ -70,86 +70,96 @@ def get_language():
 # IPA Phoneme → Viseme Mapping
 # Gruut outputs IPA phonemes
 # ============================================
-# Viseme values: jaw (0-1), smile (0-1), funnel (0-1)
+# Viseme channels:
+#   jaw (0-1)      - jaw_drop via Blueprint
+#   smile (0-1)    - smile_l/r via Blueprint (minor accents)
+#   funnel (0-1)   - lwr/upr_lip_funl_l/r via Blueprint (minor accents)
+#   press (0-1)    - mouth_press direct (M, B, P - lips pressed)
+#   lip_up (0-1)   - upr_lip_up_l/r direct (F, V - upper lip raises)
+#   ee (0-1)       - ee direct (E/I vowels - wide mouth)
+#   o_shape (0-1)  - o direct (O/U vowels - rounded mouth)
+#   shh (0-1)      - shh direct (SH, CH, ZH - hushing shape)
 
 VISEME_MAP = {
-    # Vowels - Open jaw (A sounds)
-    "ɑ": {"jaw": 0.5, "smile": 0.0, "funnel": 0.0},   # father
-    "æ": {"jaw": 0.4, "smile": 0.2, "funnel": 0.0},   # cat
-    "ʌ": {"jaw": 0.4, "smile": 0.0, "funnel": 0.0},   # cup
-    "ɔ": {"jaw": 0.4, "smile": 0.0, "funnel": 0.2},   # thought
-    "a": {"jaw": 0.5, "smile": 0.0, "funnel": 0.0},   # general a
+    # =============================================
+    # Dedicated morph targets = PRIMARY shape, no jaw
+    # These morph targets ARE the complete mouth shape
+    # =============================================
 
-    # Vowels - E/I sounds (wide/smile)
-    "ɛ": {"jaw": 0.25, "smile": 0.3, "funnel": 0.0},  # bed
-    "e": {"jaw": 0.2, "smile": 0.35, "funnel": 0.0},  # bay
-    "ɪ": {"jaw": 0.15, "smile": 0.35, "funnel": 0.0}, # bit
-    "i": {"jaw": 0.1, "smile": 0.4, "funnel": 0.0},   # bee
-    "ɨ": {"jaw": 0.15, "smile": 0.3, "funnel": 0.0},  # roses
+    # EE shape — wide mouth (ee morph target)
+    "i": {"ee": 0.45},                                  # bee
+    "ɪ": {"ee": 0.3},                                   # bit
+    "e": {"ee": 0.25},                                  # bay
+    "ɛ": {"ee": 0.15},                                  # bed
+    "ɨ": {"ee": 0.25},                                  # roses
 
-    # Vowels - O/U sounds (rounded/funnel)
-    "o": {"jaw": 0.3, "smile": 0.0, "funnel": 0.35},  # go
-    "ɔ": {"jaw": 0.35, "smile": 0.0, "funnel": 0.25}, # thought
-    "ʊ": {"jaw": 0.2, "smile": 0.0, "funnel": 0.4},   # book
-    "u": {"jaw": 0.15, "smile": 0.0, "funnel": 0.5},  # boot
-    "ə": {"jaw": 0.2, "smile": 0.0, "funnel": 0.1},   # about (schwa)
-    "ɚ": {"jaw": 0.2, "smile": 0.0, "funnel": 0.15},  # butter
+    # O shape — rounded mouth (o morph target)
+    "u": {"o_shape": 0.4},                              # boot
+    "ʊ": {"o_shape": 0.3},                              # book
+    "o": {"o_shape": 0.25},                             # go
+    "ɔ": {"o_shape": 0.2},                              # thought
 
-    # Diphthongs
-    "aɪ": {"jaw": 0.4, "smile": 0.2, "funnel": 0.0},  # my
-    "aʊ": {"jaw": 0.4, "smile": 0.0, "funnel": 0.2},  # now
-    "ɔɪ": {"jaw": 0.35, "smile": 0.15, "funnel": 0.2},# boy
-    "eɪ": {"jaw": 0.25, "smile": 0.3, "funnel": 0.0}, # say
-    "oʊ": {"jaw": 0.3, "smile": 0.0, "funnel": 0.35}, # go
+    # Press — lips together (mouth_press morph target)
+    "m": {"press": 0.4},
+    "p": {"press": 0.35},
+    "b": {"press": 0.3},
 
-    # Bilabial stops/nasals - Closed lips
-    "p": {"jaw": 0.0, "smile": 0.0, "funnel": 0.0},
-    "b": {"jaw": 0.0, "smile": 0.0, "funnel": 0.0},
-    "m": {"jaw": 0.0, "smile": 0.0, "funnel": 0.0},
+    # Shh — hushing shape (shh morph target)
+    "ʃ": {"shh": 0.3},                                  # ship
+    "ʒ": {"shh": 0.25},                                 # measure
+    "tʃ": {"shh": 0.2},                                 # chip
+    "dʒ": {"shh": 0.2},                                 # judge
 
-    # Labiodental - Lower lip tucked
-    "f": {"jaw": 0.05, "smile": 0.0, "funnel": 0.0},
-    "v": {"jaw": 0.05, "smile": 0.0, "funnel": 0.0},
+    # Semivowels — use dedicated shapes
+    "w": {"o_shape": 0.3},                              # we
+    "j": {"ee": 0.25},                                  # yes
+    "ʍ": {"o_shape": 0.5},                              # which
 
-    # Dental/Alveolar
-    "θ": {"jaw": 0.1, "smile": 0.0, "funnel": 0.0},   # think
-    "ð": {"jaw": 0.1, "smile": 0.0, "funnel": 0.0},   # this
-    "t": {"jaw": 0.1, "smile": 0.0, "funnel": 0.0},
-    "d": {"jaw": 0.1, "smile": 0.0, "funnel": 0.0},
-    "n": {"jaw": 0.1, "smile": 0.0, "funnel": 0.0},
-    "s": {"jaw": 0.05, "smile": 0.1, "funnel": 0.0},
-    "z": {"jaw": 0.05, "smile": 0.1, "funnel": 0.0},
-    "l": {"jaw": 0.15, "smile": 0.0, "funnel": 0.0},
-    "ɹ": {"jaw": 0.1, "smile": 0.0, "funnel": 0.15},  # r sound
-    "r": {"jaw": 0.1, "smile": 0.0, "funnel": 0.15},
+    # =============================================
+    # No dedicated morph target = jaw only
+    # =============================================
 
-    # Postalveolar
-    "ʃ": {"jaw": 0.1, "smile": 0.0, "funnel": 0.2},   # ship
-    "ʒ": {"jaw": 0.1, "smile": 0.0, "funnel": 0.2},   # measure
-    "tʃ": {"jaw": 0.1, "smile": 0.0, "funnel": 0.15}, # chip
-    "dʒ": {"jaw": 0.1, "smile": 0.0, "funnel": 0.15}, # judge
+    # Open vowels — jaw
+    "ɑ": {"jaw": 0.5},                                  # father
+    "æ": {"jaw": 0.4},                                  # cat
+    "ʌ": {"jaw": 0.4},                                  # cup
+    "a": {"jaw": 0.5},                                  # general a
+    "ə": {"jaw": 0.2},                                  # about (schwa)
+    "ɚ": {"jaw": 0.2},                                  # butter
 
-    # Velar
-    "k": {"jaw": 0.15, "smile": 0.0, "funnel": 0.0},
-    "ɡ": {"jaw": 0.15, "smile": 0.0, "funnel": 0.0},
-    "g": {"jaw": 0.15, "smile": 0.0, "funnel": 0.0},
-    "ŋ": {"jaw": 0.1, "smile": 0.0, "funnel": 0.0},   # sing
+    # Diphthongs — start shape (jaw for open, shape for target)
+    "aɪ": {"jaw": 0.3, "ee": 0.1},                      # my
+    "aʊ": {"jaw": 0.3, "o_shape": 0.15},                # now
+    "ɔɪ": {"o_shape": 0.2, "ee": 0.15},                 # boy
+    "eɪ": {"ee": 0.2},                                  # say
+    "oʊ": {"o_shape": 0.4},                             # go
 
-    # Glottal
-    "h": {"jaw": 0.2, "smile": 0.0, "funnel": 0.0},
-    "ʔ": {"jaw": 0.1, "smile": 0.0, "funnel": 0.0},   # glottal stop
-
-    # Semivowels
-    "w": {"jaw": 0.1, "smile": 0.0, "funnel": 0.4},
-    "j": {"jaw": 0.1, "smile": 0.3, "funnel": 0.0},   # yes
-    "ʍ": {"jaw": 0.1, "smile": 0.0, "funnel": 0.4},   # which (some dialects)
+    # Consonants — jaw only
+    "f": {"jaw": 0.1},
+    "v": {"jaw": 0.1},
+    "θ": {"jaw": 0.1},                                  # think
+    "ð": {"jaw": 0.1},                                  # this
+    "t": {"jaw": 0.1},
+    "d": {"jaw": 0.1},
+    "n": {"jaw": 0.1},
+    "s": {"jaw": 0.05},
+    "z": {"jaw": 0.05},
+    "l": {"jaw": 0.15},
+    "ɹ": {"jaw": 0.15},                                 # r sound
+    "r": {"jaw": 0.15},
+    "k": {"jaw": 0.15},
+    "ɡ": {"jaw": 0.15},
+    "g": {"jaw": 0.15},
+    "ŋ": {"jaw": 0.1},                                  # sing
+    "h": {"jaw": 0.2},
+    "ʔ": {"jaw": 0.1},                                  # glottal stop
 }
 
 # Default viseme for unknown phonemes
-DEFAULT_VISEME = {"jaw": 0.15, "smile": 0.0, "funnel": 0.0}
+DEFAULT_VISEME = {"jaw": 0.15}
 
 # Silence/rest viseme
-REST_VISEME = {"jaw": 0.0, "smile": 0.0, "funnel": 0.0}
+REST_VISEME = {"jaw": 0.0}
 
 # ============================================
 # Amplitude-based Gap Filling
@@ -218,11 +228,13 @@ def amplitude_visemes_for_audio(pcm_data: bytes, sample_rate: int = 44100,
             rms = float(np.sqrt(np.mean(window ** 2)))  # Convert to native Python float
 
             # Scale RMS to jaw (0-1), with threshold for silence
+            # Log curve compresses loud peaks while preserving quiet detail;
+            # per-character viseme scale in Lua multiplies on top of this
             if rms < 0.02:
                 jaw = 0.0
             else:
-                jaw = min(1.0, (rms - 0.02) * 4.0)
-                jaw = jaw ** 0.7  # Soften curve for more natural movement
+                linear = min(1.0, (rms - 0.02) * 2.0)
+                jaw = np.log1p(linear * 4.0) / np.log1p(4.0) * 0.5  # log compression + 50% cap
 
             visemes.append({
                 't': round(float(i / sample_rate), 3),  # Ensure native float
@@ -480,6 +492,60 @@ def phoneme_to_viseme(phoneme):
     return DEFAULT_VISEME
 
 
+def debug_visemes(text, lang=None):
+    """Debug: show phoneme → viseme mapping for a text string.
+
+    Call from Python console or import:
+        from sonorus.audio.lipsync import debug_visemes
+        debug_visemes("Hello, my name is Sebastian")
+    """
+    if not GRUUT_AVAILABLE:
+        print("[debug_visemes] Gruut not available")
+        return
+
+    lang = lang or get_language()
+    print(f"\n{'='*70}")
+    print(f"TEXT: {text}")
+    print(f"{'='*70}")
+
+    words = text.split()
+    for word in words:
+        phonemes = word_to_phonemes(word.strip('.,!?;:'), lang)
+        if not phonemes:
+            print(f"\n  {word}: (no phonemes)")
+            continue
+
+        print(f"\n  {word}: [{' '.join(phonemes)}]")
+        for ph in phonemes:
+            vis = phoneme_to_viseme(ph)
+            channels = ', '.join(f"{k}={v}" for k, v in vis.items() if v != 0)
+            print(f"    {ph:>4s} → {channels}")
+
+    # Also show what the full frame sequence would look like with fake timing
+    print(f"\n{'='*70}")
+    print("FRAME SEQUENCE (fake 300ms/word timing):")
+    print(f"{'='*70}")
+    print(f"  {'t':>6s}  {'jaw':>5s}  {'smil':>5s}  {'funl':>5s}  {'pres':>5s}  {'lipu':>5s}  {'ee':>5s}  {'o':>5s}  {'shh':>5s}  word/phoneme")
+    print(f"  {'':->6s}  {'':->5s}  {'':->5s}  {'':->5s}  {'':->5s}  {'':->5s}  {'':->5s}  {'':->5s}  {'':->5s}  {'':->10s}")
+
+    t_ms = 0
+    for word in words:
+        clean = word.strip('.,!?;:')
+        frames = process_word_timing(clean, t_ms, t_ms + 300, lang)
+        for f_time, vis, w in frames:
+            jaw = vis.get('jaw', 0)
+            smile = vis.get('smile', 0)
+            funnel = vis.get('funnel', 0)
+            press = vis.get('press', 0)
+            lip_up = vis.get('lip_up', 0)
+            ee = vis.get('ee', 0)
+            o_shape = vis.get('o_shape', 0)
+            shh = vis.get('shh', 0)
+            # Show which phoneme this frame represents
+            print(f"  {f_time:6.3f}  {jaw:5.2f}  {smile:5.2f}  {funnel:5.2f}  {press:5.2f}  {lip_up:5.2f}  {ee:5.2f}  {o_shape:5.2f}  {shh:5.2f}  {w}")
+        t_ms += 320  # 300ms word + 20ms gap
+
+
 def process_word_timing(word, start_ms, end_ms, lang=None):
     """
     Convert a word with timing into viseme frames.
@@ -502,10 +568,22 @@ def process_word_timing(word, start_ms, end_ms, lang=None):
     phoneme_duration = duration_ms / len(phonemes)
 
     frames = []
+
+    # Add opening rest frame at word start - keeps mouth closed until word begins
+    # Prevents premature mouth movement during gaps between words
+    frames.append((start_ms / 1000.0, REST_VISEME, word))
+
+    # Small offset so first phoneme comes slightly after the rest frame
+    phoneme_offset = 20  # 20ms after word start (in ms, matching start_ms/end_ms units)
+
     for i, phoneme in enumerate(phonemes):
-        t = start_ms + (i * phoneme_duration)
+        t = start_ms + phoneme_offset + (i * phoneme_duration * 0.9)  # Compress phonemes slightly
         viseme = phoneme_to_viseme(phoneme)
         frames.append((t / 1000.0, viseme, word))
+
+    # Add closing frame at word end - allows mouth to close between words
+    # This prevents the "floor effect" where jaw interpolates word-to-word without returning to 0
+    frames.append((end_ms / 1000.0, REST_VISEME, word))
 
     return frames
 
@@ -528,7 +606,9 @@ def send_visemes(frames):
     for frame in frames:
         t = frame[0]
         v = frame[1]
-        socket_frames.append([t, v.get("jaw", 0), v.get("smile", 0), v.get("funnel", 0)])
+        socket_frames.append([t, v.get("jaw", 0), v.get("smile", 0), v.get("funnel", 0),
+                              v.get("press", 0), v.get("lip_up", 0), v.get("ee", 0),
+                              v.get("o_shape", 0), v.get("shh", 0)])
     _lua_socket.send_visemes(socket_frames)
     print(f"[Lipsync] Sent {len(socket_frames)} frames via socket")
 
@@ -595,27 +675,26 @@ def process_word_alignment(word_alignment, lang=None, auto_send=True,
             "t": t,
             "jaw": v.get("jaw", 0),
             "smile": v.get("smile", 0),
-            "funnel": v.get("funnel", 0)
+            "funnel": v.get("funnel", 0),
+            "press": v.get("press", 0),
+            "lip_up": v.get("lip_up", 0),
+            "ee": v.get("ee", 0),
+            "o_shape": v.get("o_shape", 0),
+            "shh": v.get("shh", 0),
         })
 
-    # Gap filling with amplitude visemes - ONLY when burst tags detected
+    # Gap filling: amplitude visemes fill any gaps in word coverage
     gap_filled = False
     amplitude_count = 0
-
-    # First check for burst tags - only gap-fill if we find one
     burst = detect_audio_burst_tag(text) if text else None
 
-    if burst and pcm_data and NUMPY_AVAILABLE and AMPLITUDE_GAP_FILL_ENABLED:
-        print(f"[Lipsync] Burst tag detected: '{burst}' - enabling amplitude gap-fill")
-
+    if pcm_data and NUMPY_AVAILABLE and AMPLITUDE_GAP_FILL_ENABLED:
         # Calculate audio duration for this chunk
         chunk_duration = len(pcm_data) / 2 / sample_rate  # 16-bit = 2 bytes/sample
         audio_end = base_time + chunk_duration
-        print(f"[Lipsync] Chunk: base_time={base_time:.3f}s, duration={chunk_duration:.3f}s, end={audio_end:.3f}s")
 
         # Generate amplitude visemes for entire audio chunk (relative to chunk start)
         amp_visemes = amplitude_visemes_for_audio(pcm_data, sample_rate)
-        print(f"[Lipsync] Generated {len(amp_visemes)} amplitude visemes from audio")
 
         # Offset amplitude timestamps by base_time (they're chunk-relative, need absolute)
         for v in amp_visemes:
@@ -624,44 +703,28 @@ def process_word_alignment(word_alignment, lang=None, auto_send=True,
         # Filter word visemes to only those within this chunk's time range
         chunk_word_visemes = [v for v in word_visemes
                              if base_time <= v.get('t', 0) <= audio_end]
-        print(f"[Lipsync] Word visemes in chunk: {len(chunk_word_visemes)} of {len(word_visemes)} total")
-
-        # Log word viseme timestamps for debugging
-        if chunk_word_visemes:
-            word_times_str = ", ".join([f"{v.get('t', 0):.3f}" for v in chunk_word_visemes[:10]])
-            if len(chunk_word_visemes) > 10:
-                word_times_str += f"... (+{len(chunk_word_visemes) - 10} more)"
-            print(f"[Lipsync] Word viseme times: [{word_times_str}]")
 
         # Find gaps in word viseme coverage (within this chunk's time range)
         gaps = find_coverage_gaps(chunk_word_visemes, audio_end, audio_start=base_time)
-        print(f"[Lipsync] Found {len(gaps)} gap(s) in coverage")
 
         if gaps:
             # Fill gaps with amplitude visemes (word visemes preserved exactly)
             combined = fill_gaps_with_amplitude(word_visemes, amp_visemes, gaps, burst)
 
-            # Apply burst modifiers (smile/funnel based on burst type)
-            combined = apply_burst_modifiers(combined, burst)
-            print(f"[Lipsync] Applied '{burst}' modifiers to amplitude visemes")
+            # Apply burst modifiers if burst tag detected (smile/funnel for laughs etc)
+            if burst:
+                combined = apply_burst_modifiers(combined, burst)
 
             # Count how many amplitude visemes were added
             amplitude_count = sum(1 for v in combined if v.get('_amplitude'))
             if amplitude_count > 0:
                 gap_filled = True
-                print(f"[Lipsync] Gap-fill complete: {amplitude_count} amplitude visemes added")
 
             # Clean up internal markers
             for v in combined:
                 v.pop('_amplitude', None)
 
             word_visemes = combined
-        else:
-            print(f"[Lipsync] No gaps found for burst '{burst}' - word visemes cover entire audio")
-    elif burst:
-        print(f"[Lipsync] Burst tag '{burst}' detected but gap-fill disabled or no audio data")
-    else:
-        print(f"[Lipsync] No burst tag in text - skipping amplitude gap-fill")
 
     # Add smooth mouth closure frames (200ms, 4 steps) AFTER gap filling
     # Only add closure for the FINAL chunk, not intermediate chunks
@@ -670,7 +733,8 @@ def process_word_alignment(word_alignment, lang=None, auto_send=True,
         last_time = last_viseme.get('t', 0)
 
         # Check if mouth is already nearly closed
-        max_val = max(last_viseme.get("jaw", 0), last_viseme.get("smile", 0), last_viseme.get("funnel", 0))
+        all_channels = ["jaw", "smile", "funnel", "press", "lip_up", "ee", "o_shape", "shh"]
+        max_val = max(last_viseme.get(ch, 0) for ch in all_channels)
 
         if max_val > 0.05:  # Only add closure if mouth is open
             closure_steps = 4
@@ -683,10 +747,9 @@ def process_word_alignment(word_alignment, lang=None, auto_send=True,
                 # Lerp from last_viseme to REST_VISEME (all zeros)
                 frame = {
                     "t": t,
-                    "jaw": round(last_viseme.get("jaw", 0) * (1 - alpha), 2),
-                    "smile": round(last_viseme.get("smile", 0) * (1 - alpha), 2),
-                    "funnel": round(last_viseme.get("funnel", 0) * (1 - alpha), 2),
                 }
+                for ch in all_channels:
+                    frame[ch] = round(last_viseme.get(ch, 0) * (1 - alpha), 2)
                 word_visemes.append(frame)
                 # Also add to all_frames for debug output
                 all_frames.append((t - base_time, frame, "[closure]"))
@@ -696,10 +759,8 @@ def process_word_alignment(word_alignment, lang=None, auto_send=True,
     if word_visemes:
         # Ensure all values are native Python types (not numpy) for JSON serialization
         for v in word_visemes:
-            v['t'] = float(v.get('t', 0))
-            v['jaw'] = float(v.get('jaw', 0))
-            v['smile'] = float(v.get('smile', 0))
-            v['funnel'] = float(v.get('funnel', 0))
+            for key in ['t', 'jaw', 'smile', 'funnel', 'press', 'lip_up', 'ee', 'o_shape', 'shh']:
+                v[key] = float(v.get(key, 0))
 
         # Legacy behavior: auto-send to Lua
         if auto_send:

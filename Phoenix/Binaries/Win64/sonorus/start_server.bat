@@ -2,56 +2,75 @@
 :: ============================================
 :: Sonorus Mod - Server Launcher
 :: ============================================
-:: This is part of the Sonorus mod installation for Hogwarts Legacy.
-:: It starts the Python server that powers AI conversations with NPCs.
-::
-:: When the server is ready, your web browser will automatically open
-:: to the configuration interface where you can set up your API keys
-:: and customize the mod settings.
+:: This script is launched automatically by the game.
+:: Do not run it manually.
 :: ============================================
+
+:: Debug mode - skip game check and heartbeat for standalone testing
+set DEBUG_MODE=0
+if "%~1"=="--debug" set DEBUG_MODE=1
+
+:: Verify launched by the game (passes --from-game flag)
+if not "%~1"=="--from-game" if "%DEBUG_MODE%"=="0" (
+    echo.
+    echo  ===================================================
+    echo   Do not run this file directly.
+    echo   The game will start the server automatically
+    echo   on launch if Sonorus is installed correctly.
+    echo.
+    echo   Use --debug flag to run standalone for testing.
+    echo   If you need help, join our Discord:
+    echo   https://discord.gg/YXhJy3pA7b
+    echo  ===================================================
+    echo.
+    pause
+    exit /b 0
+)
 
 cd /d "%~dp0"
 
-:: Write initial lock and clear stop signal
-echo %time% > server.lock
-del server.lock.stop 2>nul
+set PYTHON=python\python.exe
 
-:: Start background heartbeat - writes current time every 5s, checks for stop signal frequently
-start /b cmd /v:on /c "for /l %%x in () do (if exist server.lock.stop (del server.lock.stop 2>nul & exit /b) else (echo !time! > server.lock & ping -n 6 127.0.0.1 >nul))"
-
-echo ============================================
-echo   Sonorus Mod - Starting Server
-echo ============================================
-echo.
-
-:: Check if python folder exists, if not extract from python.zip
-if not exist "python\" (
-    if exist "python.zip" (
-        echo First-time setup: Extracting Python environment...
-        echo This may take a moment...
-        echo.
-        powershell -Command "Expand-Archive -Path 'python.zip' -DestinationPath '.' -Force"
-        if exist "python\" (
-            echo Extraction complete. Cleaning up...
-            del "python.zip"
-            echo.
-        ) else (
-            echo ERROR: Extraction failed.
-            echo. > server.lock.stop
-            del server.lock 2>nul
-            pause
-            exit /b 1
-        )
-    ) else (
-        echo ERROR: Python folder not found and python.zip is missing.
-        echo. > server.lock.stop
-        del server.lock 2>nul
-        pause
-        exit /b 1
-    )
+:: Detect Wine/Proton - native C extensions (numpy etc.) crash under Wine,
+:: so we must run the server with native Linux Python instead.
+reg query "HKLM\Software\Wine" >nul 2>&1
+if not errorlevel 1 (
+    echo Detected Wine/Proton - using native Linux Python...
+    echo.
+    :: Launch native bash - Z: drive maps to Linux root
+    Z:\bin\bash start_server.sh
+    echo. > server.lock.stop
+    del server.lock 2>nul
+    exit
 )
 
-set PYTHON=python\python.exe
+:: Write initial lock and clear stale files
+echo %time% > server.lock
+del server.lock.stop 2>nul
+del server.heartbeat 2>nul
+
+:: Start background heartbeat (skip in debug mode)
+if "%DEBUG_MODE%"=="0" (
+    start /b "" python\python.exe heartbeat.py
+)
+
+echo      *    .  *  .    *    .  *  .    *
+echo     .                                 .
+echo                S O N O R U S
+echo             ~~~~~~~~~~~~~~~~~~~
+echo               Hogwarts Legacy
+echo                   AI Mod
+echo             ~~~~~~~~~~~~~~~~~~~
+echo     .                                 .
+echo      *    .  *  .    *    .  *  .    *
+if "%DEBUG_MODE%"=="1" (
+    echo.
+    echo             --- DEBUG MODE ---
+    echo      Server will stay open without the game.
+    echo      Press Ctrl+C to stop.
+)
+echo.
+
 
 :: Create bin directory if it doesn't exist
 if not exist "bin" mkdir bin
@@ -115,7 +134,7 @@ if errorlevel 1 (
 )
 
 :: Check if dependencies are installed
-"%PYTHON%" -c "import flask" >nul 2>&1
+"%PYTHON%" -c "import sys; import importlib.util; sys.exit(0 if all(importlib.util.find_spec(m) is not None for m in ['onnx_asr', 'websocket', 'diskcache', 'posthog', 'dotenv']) else 1)" >nul 2>&1
 if errorlevel 1 (
     echo Installing Python dependencies...
     "%PYTHON%" -m pip install setuptools wheel --no-warn-script-location -q
@@ -129,8 +148,29 @@ if errorlevel 1 (
     )
 )
 
-:: Let heartbeat keep running - Python's server.heartbeat will take over
-:: The background heartbeat will exit when the batch file exits
+:: Copy tkinter module to site-packages (tkinter can't be installed via pip on Windows)
+if not exist "python\Lib\site-packages\tkinter" (
+    if exist "voice_manager\tkinter" (
+        echo Installing tkinter module...
+        robocopy "voice_manager\tkinter" "python\Lib\site-packages\tkinter" /E /NFL /NDL /NJH /NJS /NC /NS /NP >nul 2>&1 & if errorlevel 8 echo WARNING: Failed to copy tkinter module
+    )
+)
+
+:: heartbeat.py exits when server.py creates server.heartbeat, or when we write server.lock.stop
+
+:: Pre-download ONNX models (VAD + turn detection)
+if not exist "models\silero_vad.onnx" (
+    echo Downloading VAD model...
+    if not exist "models" mkdir models
+    powershell -Command "Invoke-WebRequest -Uri 'https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx' -OutFile 'models\silero_vad.onnx'"
+)
+if not exist "models\smart-turn-v3.2-cpu.onnx" (
+    echo Downloading turn detection model...
+    if not exist "models" mkdir models
+    powershell -Command "Invoke-WebRequest -Uri 'https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-cpu.onnx' -OutFile 'models\smart-turn-v3.2-cpu.onnx'"
+)
+
+if "%DEBUG_MODE%"=="1" set SONORUS_DEBUG=1
 
 echo Starting Sonorus server...
 echo The web interface will open in your browser shortly.

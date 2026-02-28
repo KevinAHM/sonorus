@@ -23,6 +23,9 @@ Usage:
     python extract_voices.py --search <pattern>  # Search for audio files in pak
     python extract_voices.py --explore           # Process ALL voices from manifest
     python extract_voices.py --from-manifest     # Rebuild using only manifest files
+    python extract_voices.py --from-manifest --language DE_DE  # Rebuild for German
+
+Supported languages: EN_US, DE_DE, ES_ES, ES_MX, FR_FR, IT_IT, JA_JP, KO_KR, PL_PL, PT_BR, RU_RU, ZH_CN, ZH_TW, AR_AE
 """
 
 import json
@@ -43,10 +46,34 @@ GAME_DIR = SONORUS_DIR.parent.parent.parent  # Phoenix folder
 PAKS_DIR = GAME_DIR / "Content" / "Paks"
 
 EXTRACTED_AUDIO_DIR = SONORUS_DIR / "extracted_audio"
-COMBINED_AUDIO_DIR = SONORUS_DIR / "voice_references"
-MANIFEST_FILE = DATA_DIR / "voice_manifest.json"
 TARGET_DURATIONS = [10.0, 15.0, 60.0]  # seconds - generate multiple reference lengths
 MAX_EXTRACTED_PER_VOICE = 500  # limit extraction - increased for Player which has many short clips
+
+
+def get_language_paths(language: str = "EN_US") -> Dict[str, Path]:
+    """Get language-specific paths for voice manifest and output folder.
+
+    Args:
+        language: Language code like EN_US, DE_DE, FR_FR, etc.
+
+    Returns:
+        Dict with 'manifest' and 'output_dir' paths
+        - EN_US uses voice_manifest.json and voice_references/ (backward compat)
+        - Other languages use voice_manifest_xx_xx.json and voice_references/xx_xx/
+    """
+    if language == "EN_US":
+        # Backward compatibility - English uses root paths
+        return {
+            "manifest": DATA_DIR / "voice_manifest.json",
+            "output_dir": SONORUS_DIR / "voice_references"
+        }
+    else:
+        # Non-English uses language-specific paths
+        lang_suffix = language.lower()  # EN_US -> en_us, DE_DE -> de_de
+        return {
+            "manifest": DATA_DIR / f"voice_manifest_{lang_suffix}.json",
+            "output_dir": SONORUS_DIR / "voice_references" / lang_suffix
+        }
 
 # Tool paths (in sonorus/bin/)
 BIN_DIR = SONORUS_DIR / "bin"
@@ -536,13 +563,23 @@ def extract_voice(voice_name: str, wem_filter: Optional[Set[str]] = None) -> tup
     return wem_locations, wem_to_name
 
 
-def combine_voice(voice_name: str, target_durations: List[float] = None, cleanup: bool = True) -> List[str]:
+def combine_voice(voice_name: str, target_durations: List[float] = None, cleanup: bool = True,
+                  language: str = "EN_US", transcripts: Optional[Dict[str, str]] = None) -> List[str]:
     """Combine extracted samples for a voice at multiple target durations.
+
+    Args:
+        voice_name: Name of the voice to combine
+        target_durations: List of target durations in seconds
+        cleanup: Whether to delete source files after combining
+        language: Language code for output path selection
+        transcripts: Optional dict mapping wem_id -> transcript text
 
     Returns: List of selected WAV filenames (stems, which correspond to wem IDs) from longest version
     """
     if target_durations is None:
         target_durations = TARGET_DURATIONS
+    if transcripts is None:
+        transcripts = {}
 
     voice_wav_dir = EXTRACTED_AUDIO_DIR / voice_name / "wav"
     voice_dir = EXTRACTED_AUDIO_DIR / voice_name
@@ -562,16 +599,35 @@ def combine_voice(voice_name: str, target_durations: List[float] = None, cleanup
 
     all_selected_ids = []
 
+    # Get language-specific output directory
+    lang_paths = get_language_paths(language)
+    output_dir = lang_paths["output_dir"]
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     # Generate a reference file for each target duration
     for target_duration in sorted(target_durations):
         suffix = f"_{int(target_duration)}s"
-        output_file = COMBINED_AUDIO_DIR / f"{voice_name}_reference{suffix}.wav"
+        output_file = output_dir / f"{voice_name}_reference{suffix}.wav"
         success, selected_files = combine_wav_files(wav_files, output_file, target_duration)
 
         if success:
             selected_ids = [f.stem for f in selected_files]
             if len(selected_ids) > len(all_selected_ids):
                 all_selected_ids = selected_ids
+
+            # Write transcript file if we have transcripts
+            if transcripts:
+                transcript_file = output_dir / f"{voice_name}_reference{suffix}.txt"
+                transcript_lines = []
+                for f in selected_files:
+                    wem_id = f.stem
+                    if wem_id in transcripts:
+                        transcript_lines.append(transcripts[wem_id])
+
+                if transcript_lines:
+                    transcript_text = " ".join(transcript_lines)
+                    transcript_file.write_text(transcript_text, encoding='utf-8')
+                    print(f"  Saved transcript: {transcript_file.name}")
 
     # Clean up source files after successful combination
     if all_selected_ids and cleanup:
@@ -696,15 +752,30 @@ def explore_all():
         print(f"  python extract_voices.py --from-manifest")
 
 
-def from_manifest():
+def from_manifest(language: str = "EN_US"):
     """Extract and combine voices using only the files specified in the manifest.
+
+    Args:
+        language: Language code (EN_US, DE_DE, etc.) for manifest and output paths
 
     Returns: (success: bool, error_message: str or None)
     """
-    if not MANIFEST_FILE.exists():
-        return False, f"Voice manifest not found. Ensure voice_manifest.json exists in the sonorus folder."
+    # Get language-specific paths
+    lang_paths = get_language_paths(language)
+    manifest_file = lang_paths["manifest"]
+    output_dir = lang_paths["output_dir"]
 
-    with open(MANIFEST_FILE, 'r', encoding='utf-8') as f:
+    if not manifest_file.exists():
+        if language == "EN_US":
+            return False, f"Voice manifest not found. Ensure {manifest_file.name} exists in the data folder."
+        else:
+            return False, (
+                f"Voice manifest not found for {language}. "
+                f"You need to build the voice manifest for this language first. "
+                f"Visit the Voice Manager at http://localhost:5000/voice-manager/ to extract and build {manifest_file.name}."
+            )
+
+    with open(manifest_file, 'r', encoding='utf-8') as f:
         manifest = json.load(f)
 
     voices = manifest.get("voices", {})
@@ -713,6 +784,9 @@ def from_manifest():
 
     print(f"\n{'='*60}")
     print(f"FROM MANIFEST: Processing {len(voices)} voices")
+    print(f"Language: {language}")
+    print(f"Manifest: {manifest_file}")
+    print(f"Output: {output_dir}")
     print(f"Target durations: {TARGET_DURATIONS}")
     print(f"{'='*60}")
 
@@ -722,8 +796,8 @@ def from_manifest():
     audio_pak_cache = None  # Cache which pak contains audio files
 
     for voice_name, voice_data in voices.items():
-        # Check if reference already exists
-        ref_file = COMBINED_AUDIO_DIR / f"{voice_name}_reference_60s.wav"
+        # Check if reference already exists (use language-specific output dir)
+        ref_file = output_dir / f"{voice_name}_reference_60s.wav"
         if ref_file.exists():
             print(f"\n[SKIP] {voice_name} - reference already exists")
             skipped += 1
@@ -734,6 +808,7 @@ def from_manifest():
         print(f"{'='*60}")
 
         wem_paths = voice_data.get("wem_paths", {})
+        wem_transcripts = voice_data.get("wem_transcripts", {})
         if not wem_paths:
             print(f"[SKIP] No wem paths in manifest for {voice_name}")
             continue
@@ -797,7 +872,7 @@ def from_manifest():
             pass
 
         # Combine (uses all target durations) - this cleans wav files and voice_dir
-        result = combine_voice(voice_name, cleanup=True)
+        result = combine_voice(voice_name, cleanup=True, language=language, transcripts=wem_transcripts)
 
         # Final cleanup - ensure voice_dir is removed if still exists
         try:
@@ -877,6 +952,8 @@ def main():
                         help="Process ALL voices, combine, and create manifest")
     parser.add_argument("--from-manifest", action="store_true",
                         help="Rebuild voices using only files from manifest")
+    parser.add_argument("--language", type=str, default="EN_US",
+                        help="Language code (EN_US, DE_DE, FR_FR, etc.) - affects manifest and output paths")
     parser.add_argument("--keep-sources", action="store_true",
                         help="Keep source WAV files after combining (default: delete them)")
 
@@ -891,13 +968,14 @@ def main():
         return 1
 
     cleanup = not args.keep_sources
+    language = args.language
 
     if args.search:
         search_audio(args.search)
     elif args.explore:
         explore_all()
     elif getattr(args, 'from_manifest', False):
-        success, error = from_manifest()
+        success, error = from_manifest(language=language)
         if not success:
             print(f"[ERROR] {error}")
             return 1

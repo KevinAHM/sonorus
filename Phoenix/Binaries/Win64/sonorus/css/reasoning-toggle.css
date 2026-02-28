@@ -1,0 +1,159 @@
+/* ============================================
+   Reasoning Toggle Styles
+   Per-model extended thinking toggle for model inputs
+   ============================================ */
+
+/* Wrapper for input + toggle */
+.input-with-toggle {
+    display: flex;
+    align-items: stretch;
+    flex-wrap: wrap;
+    gap: 0;
+}
+
+/* Thinking hint - appears below input when active */
+.input-with-toggle .thinking-hint {
+    width: 100%;
+    margin-top: var(--space-xs);
+    margin-bottom: 0;
+}
+
+.input-with-toggle input[type="text"] {
+    flex: 1;
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+    border-right: none;
+}
+
+/* Mini Switch Toggle */
+.reasoning-toggle-switch {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    padding: 0 var(--space-sm);
+    background: var(--parchment-dark);
+    border: 2px solid var(--parchment-dark);
+    border-left: 1px solid rgba(0,0,0,0.1);
+    border-radius: 0 3px 3px 0;
+    cursor: pointer;
+    user-select: none;
+}
+
+.reasoning-toggle-switch .switch-label {
+    font-family: var(--font-display);
+    font-size: 0.65rem;
+    letter-spacing: 0.03em;
+    color: var(--leather-border);
+    text-transform: uppercase;
+    opacity: 0.7;
+}
+
+.reasoning-toggle-switch .mini-switch {
+    width: 28px;
+    height: 14px;
+    background: var(--leather-mid);
+    border-radius: 7px;
+    position: relative;
+    transition: all 0.25s ease;
+}
+
+.reasoning-toggle-switch .mini-switch::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 10px;
+    height: 10px;
+    background: var(--parchment-mid);
+    border-radius: 50%;
+    transition: all 0.25s ease;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+}
+
+/* Active state */
+.reasoning-toggle-switch.active .mini-switch {
+    background: var(--gold-dark);
+}
+
+.reasoning-toggle-switch.active .mini-switch::after {
+    left: 16px;
+    background: var(--gold-bright);
+    box-shadow: 0 0 6px var(--gold-glow);
+}
+
+.reasoning-toggle-switch.active .switch-label {
+    color: var(--gold-dark);
+    opacity: 1;
+}
+
+/* Disabled state - model doesn't support reasoning */
+.reasoning-toggle-switch.disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+.reasoning-toggle-switch.disabled .switch-label {
+    color: var(--leather-border);
+    opacity: 0.5;
+}
+
+.reasoning-toggle-switch.disabled .mini-switch {
+    background: var(--parchment-dark);
+}
+
+.reasoning-toggle-switch.disabled .mini-switch::after {
+    background: var(--leather-border);
+    opacity: 0.4;
+    box-shadow: none;
+}
+
+/* Master disabled state - provider-level reasoning is OFF */
+.reasoning-toggle-switch.master-disabled {
+    cursor: not-allowed;
+    opacity: 0.35;
+    filter: grayscale(0.5);
+}
+
+.reasoning-toggle-switch.master-disabled .switch-label {
+    color: var(--leather-border);
+}
+
+.reasoning-toggle-switch.master-disabled .mini-switch {
+    background: var(--parchment-dark);
+}
+
+.reasoning-toggle-switch.master-disabled .mini-switch::after {
+    background: var(--leather-border);
+    opacity: 0.5;
+    box-shadow: none;
+}
+
+/* Reasoning Toast */
+.toast.reasoning {
+    border-left: 4px solid var(--gold-bright);
+    background: linear-gradient(135deg, var(--parchment-light) 0%, var(--parchment-mid) 100%);
+}
+
+.toast.reasoning .toast-icon {
+    font-size: 1.1rem;
+}
+
+.toast.reasoning .toast-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.toast.reasoning .toast-title {
+    font-family: var(--font-display);
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--ink-brown);
+    letter-spacing: 0.02em;
+}
+
+.toast.reasoning .toast-desc {
+    font-size: 0.75rem;
+    color: var(--ink-brown);
+    opacity: 0.8;
+}

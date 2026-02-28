@@ -6,30 +6,66 @@ Detects when Hogwarts Legacy closes and shuts down the server.
 import os
 import sys
 import time
-import subprocess
 import threading
+import ctypes
+
+from constants import GAME_WINDOW_TITLE
 
 GAME_PROCESS_NAME = "HogwartsLegacy.exe"
 _game_check_interval = 5.0  # Check every 5 seconds
 _game_monitor_running = False
 
 
-def is_game_running():
-    """Check if Hogwarts Legacy is running by looking for the process."""
+def _find_window_by_title(title):
+    """Check if a window containing the given title exists."""
+    found = [False]
+
+    def enum_callback(hwnd, _):
+        try:
+            length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+            if length > 0:
+                buffer = ctypes.create_unicode_buffer(length + 1)
+                ctypes.windll.user32.GetWindowTextW(hwnd, buffer, length + 1)
+                if buffer.value.strip() == title:
+                    found[0] = True
+                    return False  # Stop enumeration
+        except:
+            pass
+        return True  # Continue enumeration
+
     try:
-        # Use tasklist on Windows (works regardless of game language)
-        result = subprocess.run(
-            ['tasklist', '/FI', f'IMAGENAME eq {GAME_PROCESS_NAME}', '/NH'],
-            capture_output=True,
-            text=True,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-        )
-        # tasklist returns the process name if found
-        return GAME_PROCESS_NAME.lower() in result.stdout.lower()
-    except Exception as e:
-        print(f"[GameMonitor] Error checking process: {e}")
-        # If we can't check, assume game is running to avoid false shutdowns
-        return True
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        ctypes.windll.user32.EnumWindows(WNDENUMPROC(enum_callback), 0)
+        return found[0]
+    except Exception:
+        return True  # Assume exists on error to avoid false shutdown
+
+
+def is_game_running():
+    """Check if Hogwarts Legacy is running by looking for window first (fast), then process."""
+    # Fast check: look for game window
+    if not _find_window_by_title(GAME_WINDOW_TITLE):
+        print(f"[GameMonitor] Window '{GAME_WINDOW_TITLE}' not found - game closed")
+        return False
+
+    # Window exists, game is running
+    return True
+
+
+def _kill_process_tree():
+    """Force kill the entire process tree using taskkill."""
+    import subprocess
+    pid = os.getpid()
+    print(f"[GameMonitor] Killing process tree (PID {pid})")
+    sys.stdout.flush()
+    # taskkill /F = force, /T = tree (kill children too), /PID = process ID
+    # This kills cmd.exe, python, and any child processes
+    subprocess.Popen(
+        f'taskkill /F /T /PID {pid}',
+        shell=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
 
 
 def start_game_monitor():
@@ -37,6 +73,11 @@ def start_game_monitor():
     global _game_monitor_running
 
     if _game_monitor_running:
+        return
+
+    # Debug mode - skip game monitoring entirely
+    if os.environ.get("SONORUS_DEBUG"):
+        print("[GameMonitor] Debug mode - game monitoring disabled")
         return
 
     # Initial check - don't start server if game isn't running
@@ -49,20 +90,54 @@ def start_game_monitor():
 
     def monitor_loop():
         global _game_monitor_running
-        consecutive_failures = 0
+        check_count = 0
 
         while _game_monitor_running:
             time.sleep(_game_check_interval)
+            check_count += 1
+
+            # Debug output every 12 checks (~60 seconds) to confirm monitor is running
+            if check_count % 12 == 0:
+                print(f"[GameMonitor] Still monitoring (check #{check_count})")
 
             if not is_game_running():
-                consecutive_failures += 1
-                if consecutive_failures >= 2:  # Require 2 consecutive failures to avoid false positives
-                    print(f"\n[GameMonitor] {GAME_PROCESS_NAME} no longer running")
-                    print("[GameMonitor] Shutting down server...")
-                    _game_monitor_running = False
-                    os._exit(0)
-            else:
-                consecutive_failures = 0
+                # Force flush to ensure logs are written before any termination
+                import datetime
+                timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                print(f"\n[GameMonitor {timestamp}] {GAME_PROCESS_NAME} no longer running")
+                print(f"[GameMonitor {timestamp}] Shutting down server...")
+                sys.stdout.flush()
+                sys.stderr.flush()
+                _game_monitor_running = False
+
+                # Gracefully shutdown memory processing before exit
+                try:
+                    from .memory_queue import graceful_shutdown
+                    graceful_shutdown(max_wait=300.0)  # 5 minutes
+                except Exception as e:
+                    print(f"[GameMonitor] Error during graceful shutdown: {e}")
+
+                # Delete lock files so Lua doesn't wait 60s thinking server is starting
+                script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                for lock_file in ["server.lock", "server.heartbeat"]:
+                    try:
+                        lock_path = os.path.join(script_dir, lock_file)
+                        if os.path.exists(lock_path):
+                            os.remove(lock_path)
+                            print(f"[GameMonitor] Deleted {lock_file}")
+                    except Exception as e:
+                        print(f"[GameMonitor] Could not delete {lock_file}: {e}")
+
+                # Force flush before termination
+                sys.stdout.flush()
+                sys.stderr.flush()
+
+                # Kill entire process tree via taskkill
+                _kill_process_tree()
+
+                # Give taskkill a moment to work, then force exit
+                time.sleep(0.5)
+                os._exit(0)
 
     monitor_thread = threading.Thread(target=monitor_loop, daemon=True)
     monitor_thread.start()

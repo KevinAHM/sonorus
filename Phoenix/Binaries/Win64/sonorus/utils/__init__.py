@@ -16,22 +16,33 @@ from .settings import (
     get_setting,
     read_file,
     write_file,
+    is_dev_mode,
+    set_dev_mode,
+    dev_print,
 )
 
 from .text_utils import (
     split_into_sentences,
+    remove_unpaired_double_quotes,
     sanitize_name,
     parse_target_result,
     filter_npcs_by_earshot,
     validate_speaker_in_nearby,
     detect_spell_in_text,
+    correct_spell_names_in_text,
+    is_significant_npc,
+    strip_parentheses,
+    extract_director_prefix,
 )
 
 from .localization import (
-    MAIN_LOCALIZATION_FILE,
+    get_localization_path,
+    get_subtitles_path,
+    invalidate_cache as invalidate_localization_cache,
     load_localization,
     get_display_name,
     get_reverse_localization,
+    get_lowercase_map,
     id_from_name,
     find_npc_id_by_name,
 )
@@ -51,13 +62,16 @@ from .landmarks import (
 
 from .dialogue import (
     load_dialogue_history,
-    save_dialogue_history,
+    replace_dialogue_history,  # Bulk operations only - see docstring
+    save_dialogue_history,     # Alias for backwards compatibility
     collapse_consecutive_duplicate,
     collapse_consecutive_spells,
     filter_dialogue_history,
     prettify_voice_name,
     format_dialogue_entry,
     format_dialogue_history,
+    get_time_since_last_interaction,
+    format_time_gap,
     is_named_npc,
 )
 
@@ -73,14 +87,21 @@ from .prompts import (
 from .llm_utils import (
     LOGS_DIR,
     log_llm,
+    LLM_ERROR_FALLBACK,
     call_llm,
+    call_llm_stream,
+    stream_sentences,
     parse_action,
+    parse_actions,
     strip_action_tag,
 )
 
 from .agents import (
     run_target_selection_agent,
     run_interjection_agent,
+    run_move_classifier,
+    run_input_correction_agent,
+    run_prompt_parser_agent,
 )
 
 from .conversation import (
@@ -96,4 +117,20 @@ from .game_monitor import (
     GAME_PROCESS_NAME,
     is_game_running,
     start_game_monitor,
+)
+
+from .profiler import (
+    Profiler,
+    profiler,
+)
+
+from .memory_queue import (
+    queue_npcs_for_processing,
+    get_queue_status,
+    ensure_worker_running,
+    stop_worker,
+    is_processing,
+    graceful_shutdown,
+    reset_npc_state,
+    retry_failed_chapters,
 )

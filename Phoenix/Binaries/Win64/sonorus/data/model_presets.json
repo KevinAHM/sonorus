@@ -1,0 +1,51 @@
+{
+  "_comment": "Model presets per LLM provider. Used by both Python (upgrade fixes) and JavaScript (UI provider switching).",
+  "_model_fields": {
+    "chat": "conversation.chat_model",
+    "vision": "agents.vision.llm.model",
+    "target": "conversation.target_selection_model",
+    "interjection": "conversation.interjection_model",
+    "inputCorrection": "conversation.input_correction_model",
+    "chapter": "memory.chapter_model",
+    "prose": "memory.prose_model",
+    "graphiti": "memory.graphiti_model",
+    "graphitiSmall": "memory.graphiti_small_model",
+    "reranker": "memory.reranker_model"
+  },
+  "gemini": {
+    "chat": "gemini-3-flash",
+    "vision": "gemini-2.5-flash-lite",
+    "target": "gemini-2.5-flash-lite",
+    "interjection": "gemini-2.5-flash-lite",
+    "inputCorrection": "gemini-2.5-flash-lite",
+    "chapter": "gemini-2.5-flash-lite",
+    "prose": "gemini-2.5-flash-lite",
+    "graphiti": "gemini-2.5-flash-lite",
+    "graphitiSmall": "gemini-2.5-flash-lite",
+    "reranker": "gemini-2.5-flash-lite"
+  },
+  "openrouter": {
+    "chat": "google/gemini-3-flash",
+    "vision": "google/gemini-2.5-flash-lite:nitro",
+    "target": "meta-llama/llama-4-scout:nitro",
+    "interjection": "x-ai/grok-4.1-fast",
+    "inputCorrection": "meta-llama/llama-3.1-8b-instruct:nitro",
+    "chapter": "x-ai/grok-4.1-fast",
+    "prose": "x-ai/grok-4.1-fast",
+    "graphiti": "x-ai/grok-4.1-fast",
+    "graphitiSmall": "google/gemini-2.5-flash-lite:nitro",
+    "reranker": "meta-llama/llama-3.1-8b-instruct:nitro"
+  },
+  "openai": {
+    "chat": "gpt-5-mini",
+    "vision": "gpt-5-nano",
+    "target": "gpt-5-nano",
+    "interjection": "gpt-5-nano",
+    "inputCorrection": "gpt-4.1-nano",
+    "chapter": "gpt-5-nano",
+    "prose": "gpt-5-nano",
+    "graphiti": "gpt-5-nano",
+    "graphitiSmall": "gpt-5-nano",
+    "reranker": "gpt-4.1-nano"
+  }
+}

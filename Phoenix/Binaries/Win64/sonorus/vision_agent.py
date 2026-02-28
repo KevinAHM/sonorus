@@ -1,10 +1,8 @@
 """
-Vision Agent - Background agent that captures screenshots and generates scene descriptions.
+Vision Agent - Captures screenshots and generates scene descriptions.
 
-Runs independently on the server, triggered by:
-- Player movement (distance threshold)
-- Time elapsed (max interval)
-With a minimum cooldown between captures.
+Triggered when the player initiates conversation (opens chat or starts speaking with mic).
+Has a minimum cooldown between captures.
 """
 
 import os
@@ -26,58 +24,116 @@ except ImportError:
     MSS_AVAILABLE = False
     print("[VisionAgent] Warning: mss or pillow not installed. Run: pip install mss pillow")
 
-# Windows foreground check
-try:
-    import win32gui
-    WIN32_AVAILABLE = True
-except ImportError:
-    WIN32_AVAILABLE = False
-    print("[VisionAgent] Warning: pywin32 not installed. Run: pip install pywin32")
+# Windows API via ctypes (no pywin32 dependency)
+import ctypes
+from ctypes import wintypes
 
-GAME_WINDOW_TITLE = "Hogwarts Legacy"
+user32 = ctypes.windll.user32
+
+from constants import GAME_WINDOW_TITLE
+from utils.localization import get_display_name
+
+try:
+    from vr import is_vr_active
+except ImportError:
+    def is_vr_active():
+        return False
+
+
+def _get_window_text(hwnd):
+    """Get window title text using ctypes."""
+    length = user32.GetWindowTextLengthW(hwnd) + 1
+    buf = ctypes.create_unicode_buffer(length)
+    user32.GetWindowTextW(hwnd, buf, length)
+    return buf.value
 
 
 def is_game_foreground():
     """Check if Hogwarts Legacy is the foreground window"""
-    if not WIN32_AVAILABLE:
-        return True
     try:
-        hwnd = win32gui.GetForegroundWindow()
-        title = win32gui.GetWindowText(hwnd)
+        hwnd = user32.GetForegroundWindow()
+        title = _get_window_text(hwnd)
         return GAME_WINDOW_TITLE in title
     except:
         return True
 
 
+def get_game_monitor():
+    """Get the monitor rect where the game window is displayed (for fullscreen fallback)."""
+    try:
+        hwnd = user32.FindWindowW(None, GAME_WINDOW_TITLE)
+        if not hwnd:
+            return None
+
+        MONITOR_DEFAULTTONEAREST = 2
+        hmonitor = user32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+        if not hmonitor:
+            return None
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        mi = MONITORINFO()
+        mi.cbSize = ctypes.sizeof(MONITORINFO)
+
+        if not user32.GetMonitorInfoW(hmonitor, ctypes.byref(mi)):
+            return None
+
+        rc = mi.rcMonitor
+        return {
+            "left": rc.left,
+            "top": rc.top,
+            "width": rc.right - rc.left,
+            "height": rc.bottom - rc.top,
+        }
+    except Exception as e:
+        print(f"[VisionAgent] Monitor detection error: {e}")
+        return None
+
+
 def get_game_window_rect():
     """Get the game window rect. Returns None if game not found or not in foreground."""
-    if not WIN32_AVAILABLE:
-        return None
     try:
         # Find exact match only
-        hwnd = win32gui.FindWindow(None, GAME_WINDOW_TITLE)
+        hwnd = user32.FindWindowW(None, GAME_WINDOW_TITLE)
         if not hwnd:
             return None  # Game not running or wrong title
 
         # Must be foreground
-        if win32gui.GetForegroundWindow() != hwnd:
+        if user32.GetForegroundWindow() != hwnd:
             return None  # Game not in foreground, skip capture
 
         # Must not be minimized
-        if win32gui.IsIconic(hwnd):
+        if user32.IsIconic(hwnd):
             return None
 
         # Get client area
-        client_rect = win32gui.GetClientRect(hwnd)
-        left, top = win32gui.ClientToScreen(hwnd, (0, 0))
-        width = client_rect[2]
-        height = client_rect[3]
+        class RECT(ctypes.Structure):
+            _fields_ = [("left", wintypes.LONG), ("top", wintypes.LONG),
+                        ("right", wintypes.LONG), ("bottom", wintypes.LONG)]
+
+        class POINT(ctypes.Structure):
+            _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+        rect = RECT()
+        user32.GetClientRect(hwnd, ctypes.byref(rect))
+
+        point = POINT(0, 0)
+        user32.ClientToScreen(hwnd, ctypes.byref(point))
+
+        width = rect.right - rect.left
+        height = rect.bottom - rect.top
 
         if width < 640 or height < 480:
             print(f"[VisionAgent] Window too small ({width}x{height}), skipping")
             return None
 
-        return {"left": left, "top": top, "width": width, "height": height}
+        return {"left": point.x, "top": point.y, "width": width, "height": height}
 
     except Exception as e:
         print(f"[VisionAgent] Window error: {e}")
@@ -117,21 +173,20 @@ VISION_PROMPT = """You are describing what is currently visible in this Hogwarts
 {nearby_landmarks_section}
 ## CORE INSTRUCTIONS:
 
-**Perspective:** Third-person view following the player character.
+**Perspective:** {perspective}
+
+**Location accuracy:** Use the location name provided above EXACTLY. Do not add "classroom", "corridor", or other qualifiers unless you can clearly see that specific room type. "Defence Against the Dark Arts Tower" is the tower area, not necessarily the classroom. Describe what you SEE, not what you assume the space is.
 
 **Description Priorities:**
 
-1. **The Player Character** (IMPORTANT):
-   - The player character is the figure the camera follows (typically center or slightly off-center)
-   - Use the player info above to identify them - describe what they're doing, their pose, position in the scene
-   - Example: "Harry stands near the entrance, his Gryffindor robes visible beneath his dark cloak"
-
+{player_priority}
 2. **Environment & Objects** (ESSENTIAL - be specific and descriptive):
+   - **Magical elements FIRST** (this is a magical world - these are the most eye-catching): floating/enchanted objects, self-playing instruments, moving portraits, ghosts, magical creatures, spell effects, enchanted ceiling/sky, Floo Flames, flying books, animated suits of armor, glowing runes, candles floating without holders, stairs that move. If something supernatural is happening (e.g. violins playing themselves mid-air), it MUST be described prominently.
    - Spatial scale and overall layout
    - Architecture: materials, style, condition (weathered stone, polished wood, ornate carvings)
    - **Notable objects deserve rich detail**: If there's a fireplace, describe its style, carvings, what's on the mantle, the quality of the flames. If there's a painting, describe its subject and frame. If there's a desk, note what's on it.
+   - Animals and creatures: owls, cats, dogs, spiders, hippogriffs, phoenixes, house-elves, or any other creatures visible in the scene. Describe what they're doing and where they are.
    - Decorative elements: tapestries (what they depict), suits of armor (style/condition), statues (who/what), candles/torches (lit/unlit), plants
-   - Magical elements: floating candles, moving portraits, enchanted objects, Floo Flames, House banners, magical creatures, potion ingredients, spell effects
    - Colors and color schemes - dominant hues, contrasts
    - Object states: doors open/closed, books open/stacked, cauldrons bubbling/empty
 
@@ -159,9 +214,7 @@ VISION_PROMPT = """You are describing what is currently visible in this Hogwarts
 
 **Scene:** [4-6 sentences. Describe the space and its contents with enough detail that someone could comment on specific elements. What would catch someone's eye? What makes this space distinctive? Include materials, colors, decorative details.]
 
-**Player:** [1-2 sentences describing where {player_name} is positioned in the scene and what they appear to be doing. Reference their attire if distinctive.]
-
-**Notable details:** [2-3 specific elements worth mentioning - an interesting object, decoration, or feature. Describe each with 1-2 sentences of vivid detail. These are things someone might point at and say "look at that" or ask about.]
+{player_output}**Notable details:** [2-3 specific elements worth mentioning. PRIORITIZE magical/supernatural/unusual things first (enchanted objects, self-playing instruments, floating items, magical creatures, moving paintings) over mundane architecture. Describe each with 1-2 sentences of vivid detail. These are things someone would point at and say "look at that!" or ask about.]
 
 **Visible characters:** [For each visible NPC (not the player), 1-2 sentences on what is clearly visible - their name (if name tag visible), pose, clothing, position, apparent activity. Skip if none visible besides the player.]
 
@@ -394,6 +447,7 @@ class VisionAgent:
         settings = get_vision_settings()
 
         if not settings['enabled']:
+            print("[VisionAgent] Skipping capture - vision disabled")
             return
 
         # Skip if capture already in progress
@@ -414,6 +468,8 @@ class VisionAgent:
         self._capture_in_progress = True
         self._capture_complete.clear()
 
+        print("[VisionAgent] Starting capture")
+
         # Run capture in background thread to not block input
         threading.Thread(target=self._do_capture_async, daemon=True).start()
 
@@ -428,7 +484,7 @@ class VisionAgent:
             if _lua_socket:
                 game_context = _lua_socket.request_context_refresh(
                     groups=["position", "state", "time", "zone", "player", "gear", "npcs", "vision"],
-                    timeout=0.5
+                    timeout=1.0
                 )
             else:
                 game_context = {}
@@ -560,9 +616,13 @@ class VisionAgent:
                 if monitor:
                     print(f"[VisionAgent] Capturing window: {monitor['width']}x{monitor['height']}")
                 else:
-                    # Fullscreen mode - capture primary monitor
-                    monitor = sct.monitors[1]
-                    print(f"[VisionAgent] Fullscreen mode - capturing: {monitor['width']}x{monitor['height']}")
+                    # Fullscreen mode - find which monitor the game is on
+                    monitor = get_game_monitor()
+                    if monitor:
+                        print(f"[VisionAgent] Fullscreen - game monitor: {monitor['width']}x{monitor['height']}")
+                    else:
+                        monitor = sct.monitors[1]
+                        print(f"[VisionAgent] Fallback - primary monitor: {monitor['width']}x{monitor['height']}")
 
                 # Capture
                 screenshot = sct.grab(monitor)
@@ -641,9 +701,9 @@ class VisionAgent:
         if visible:
             npc_lines.append("## Characters VISIBLE (confirmed on-screen, look for their name tags):")
             for npc in visible[:5]:
-                name = npc.get('name', 'Unknown')
+                name = get_display_name(npc.get('name', 'Unknown'))
                 distance = npc.get('distance', 0)
-                npc_lines.append(f"- {name} ({distance:.0f} units away)")
+                npc_lines.append(f"- {name} ({format_distance_meters(distance)} away)")
 
         # Nearby but not visible - either off-screen or occluded
         if nearby:
@@ -652,9 +712,9 @@ class VisionAgent:
             if not_visible:
                 npc_lines.append("## Characters NEARBY but not visible (off-screen or behind walls):")
                 for npc in not_visible[:3]:
-                    name = npc.get('name', 'Unknown')
+                    name = get_display_name(npc.get('name', 'Unknown'))
                     distance = npc.get('distance', 0)
-                    npc_lines.append(f"- {name} ({distance:.0f} units away)")
+                    npc_lines.append(f"- {name} ({format_distance_meters(distance)} away)")
 
         visible_npcs_section = "\n".join(npc_lines) if npc_lines else "## Nearby: (none detected)"
 
@@ -673,6 +733,25 @@ class VisionAgent:
         else:
             nearby_landmarks_section = "\n"
 
+        # VR mode - adjust perspective (cached boolean, no OpenVR ping)
+        t_vr = time.perf_counter()
+        vr_mode = is_vr_active()
+        vr_ms = (time.perf_counter() - t_vr) * 1000
+        print(f"[VisionAgent] VR mode: {vr_mode} ({vr_ms:.3f}ms)")
+
+        if vr_mode:
+            perspective = "First-person view through the player's eyes. The player character is NOT visible in this screenshot."
+            player_priority = "1. **First-person view**: You are seeing through the player's eyes. The player character is NOT visible. Do not describe or mention seeing the player in the scene.\n"
+            player_output = ""
+        else:
+            perspective = "Third-person view following the player character."
+            player_priority = f"""1. **The Player Character** (IMPORTANT):
+   - The player character is the figure the camera follows (typically center or slightly off-center)
+   - Use the player info above to identify them - describe what they're doing, their pose, position in the scene
+   - Example: "{player_name} stands near the entrance, their robes visible beneath a dark cloak"
+"""
+            player_output = f"**Player:** [1-2 sentences describing where {player_name} is positioned in the scene and what they appear to be doing. Reference their attire if distinctive.]\n\n"
+
         # Format prompt
         prompt = VISION_PROMPT.format(
             location=location,
@@ -680,14 +759,17 @@ class VisionAgent:
             player_name=player_name,
             player_section=player_section,
             visible_npcs_section=visible_npcs_section,
-            nearby_landmarks_section=nearby_landmarks_section
+            nearby_landmarks_section=nearby_landmarks_section,
+            perspective=perspective,
+            player_priority=player_priority,
+            player_output=player_output,
         )
 
         return prompt
 
     def _call_vision_llm(self, image_b64, prompt, llm_settings):
         """Call vision LLM with screenshot via shared llm module"""
-        model = llm_settings.get('model', 'google/gemini-2.0-flash-001')
+        model = llm_settings.get('model', 'google/gemini-2.5-flash-lite:nitro')
         temperature = llm_settings.get('temperature', 0.7)
         max_tokens = llm_settings.get('max_tokens', 500)
 
@@ -735,6 +817,8 @@ class VisionAgent:
                         context['player'] = parts[i+1].strip().strip(':').strip()
                     elif part.strip() == 'Visible characters:' and i+1 < len(parts):
                         context['characters'] = parts[i+1].strip().strip(':').strip()
+                    elif part.strip() == 'Notable details:' and i+1 < len(parts):
+                        context['notable'] = parts[i+1].strip().strip(':').strip()
                     elif part.strip() == 'Atmosphere:' and i+1 < len(parts):
                         context['atmosphere'] = parts[i+1].strip().strip(':').strip()
             except:

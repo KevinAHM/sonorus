@@ -1,0 +1,1763 @@
+{
+  "target_durations": [
+    10.0,
+    15.0,
+    60.0
+  ],
+  "language": "DE_DE",
+  "audio_path": "de-de",
+  "voices": {
+    "NellieOggspire": {
+      "selected_wem_ids": [
+        "198011478",
+        "107688120"
+      ],
+      "wem_paths": {
+        "198011478": "Phoenix/Content/WwiseAudio/windows/de-de/198011478.wem",
+        "107688120": "Phoenix/Content/WwiseAudio/windows/de-de/107688120.wem"
+      }
+    },
+    "PlayerMale": {
+      "selected_wem_ids": [
+        "342627603",
+        "720934557",
+        "268837131",
+        "398342384"
+      ],
+      "wem_paths": {
+        "342627603": "Phoenix/Content/WwiseAudio/windows/de-de/342627603.wem",
+        "720934557": "Phoenix/Content/WwiseAudio/windows/de-de/720934557.wem",
+        "268837131": "Phoenix/Content/WwiseAudio/windows/de-de/268837131.wem",
+        "398342384": "Phoenix/Content/WwiseAudio/windows/de-de/398342384.wem"
+      }
+    },
+    "PlayerFemale": {
+      "selected_wem_ids": [
+        "345384490",
+        "557918233",
+        "182255928",
+        "101281456"
+      ],
+      "wem_paths": {
+        "345384490": "Phoenix/Content/WwiseAudio/windows/de-de/345384490.wem",
+        "557918233": "Phoenix/Content/WwiseAudio/windows/de-de/557918233.wem",
+        "182255928": "Phoenix/Content/WwiseAudio/windows/de-de/182255928.wem",
+        "101281456": "Phoenix/Content/WwiseAudio/windows/de-de/101281456.wem"
+      }
+    },
+    "AbrahamRonen": {
+      "selected_wem_ids": [
+        "150770113",
+        "1039849610"
+      ],
+      "wem_paths": {
+        "150770113": "Phoenix/Content/WwiseAudio/windows/de-de/150770113.wem",
+        "1039849610": "Phoenix/Content/WwiseAudio/windows/de-de/1039849610.wem"
+      }
+    },
+    "AckleyBarnes": {
+      "selected_wem_ids": [
+        "145712496",
+        "158913743"
+      ],
+      "wem_paths": {
+        "145712496": "Phoenix/Content/WwiseAudio/windows/de-de/145712496.wem",
+        "158913743": "Phoenix/Content/WwiseAudio/windows/de-de/158913743.wem"
+      }
+    },
+    "AdelaideOakes": {
+      "selected_wem_ids": [
+        "201763024",
+        "1018721305"
+      ],
+      "wem_paths": {
+        "201763024": "Phoenix/Content/WwiseAudio/windows/de-de/201763024.wem",
+        "1018721305": "Phoenix/Content/WwiseAudio/windows/de-de/1018721305.wem"
+      }
+    },
+    "AesopSharp": {
+      "selected_wem_ids": [
+        "1046324537",
+        "1007592152"
+      ],
+      "wem_paths": {
+        "1046324537": "Phoenix/Content/WwiseAudio/windows/de-de/1046324537.wem",
+        "1007592152": "Phoenix/Content/WwiseAudio/windows/de-de/1007592152.wem"
+      }
+    },
+    "AgabusPhilbert": {
+      "selected_wem_ids": [
+        "278704449"
+      ],
+      "wem_paths": {
+        "278704449": "Phoenix/Content/WwiseAudio/windows/de-de/278704449.wem"
+      }
+    },
+    "AgnesCoffey": {
+      "selected_wem_ids": [
+        "329719957",
+        "108372572"
+      ],
+      "wem_paths": {
+        "329719957": "Phoenix/Content/WwiseAudio/windows/de-de/329719957.wem",
+        "108372572": "Phoenix/Content/WwiseAudio/windows/de-de/108372572.wem"
+      }
+    },
+    "AgnesScriven": {
+      "selected_wem_ids": [
+        "562380575",
+        "598673846"
+      ],
+      "wem_paths": {
+        "562380575": "Phoenix/Content/WwiseAudio/windows/de-de/562380575.wem",
+        "598673846": "Phoenix/Content/WwiseAudio/windows/de-de/598673846.wem"
+      }
+    },
+    "AlbieWeekes": {
+      "selected_wem_ids": [
+        "1046861596",
+        "1018893041"
+      ],
+      "wem_paths": {
+        "1046861596": "Phoenix/Content/WwiseAudio/windows/de-de/1046861596.wem",
+        "1018893041": "Phoenix/Content/WwiseAudio/windows/de-de/1018893041.wem"
+      }
+    },
+    "AlexandraRicketts": {
+      "selected_wem_ids": [
+        "155296795",
+        "1072657392"
+      ],
+      "wem_paths": {
+        "155296795": "Phoenix/Content/WwiseAudio/windows/de-de/155296795.wem",
+        "1072657392": "Phoenix/Content/WwiseAudio/windows/de-de/1072657392.wem"
+      }
+    },
+    "AltheaTwiddle": {
+      "selected_wem_ids": [
+        "1068750935",
+        "284894984"
+      ],
+      "wem_paths": {
+        "1068750935": "Phoenix/Content/WwiseAudio/windows/de-de/1068750935.wem",
+        "284894984": "Phoenix/Content/WwiseAudio/windows/de-de/284894984.wem"
+      }
+    },
+    "AmitKakkar": {
+      "selected_wem_ids": [
+        "1010059261",
+        "1004836943"
+      ],
+      "wem_paths": {
+        "1010059261": "Phoenix/Content/WwiseAudio/windows/de-de/1010059261.wem",
+        "1004836943": "Phoenix/Content/WwiseAudio/windows/de-de/1004836943.wem"
+      }
+    },
+    "AnabelCalhoun": {
+      "selected_wem_ids": [
+        "681153050"
+      ],
+      "wem_paths": {
+        "681153050": "Phoenix/Content/WwiseAudio/windows/de-de/681153050.wem"
+      }
+    },
+    "AndrewLarson": {
+      "selected_wem_ids": [
+        "731389515",
+        "322978433"
+      ],
+      "wem_paths": {
+        "731389515": "Phoenix/Content/WwiseAudio/windows/de-de/731389515.wem",
+        "322978433": "Phoenix/Content/WwiseAudio/windows/de-de/322978433.wem"
+      }
+    },
+    "AnneSallow": {
+      "selected_wem_ids": [
+        "1065100268",
+        "178310058"
+      ],
+      "wem_paths": {
+        "1065100268": "Phoenix/Content/WwiseAudio/windows/de-de/1065100268.wem",
+        "178310058": "Phoenix/Content/WwiseAudio/windows/de-de/178310058.wem"
+      }
+    },
+    "AnneThisbe": {
+      "selected_wem_ids": [
+        "1063882442",
+        "189656730"
+      ],
+      "wem_paths": {
+        "1063882442": "Phoenix/Content/WwiseAudio/windows/de-de/1063882442.wem",
+        "189656730": "Phoenix/Content/WwiseAudio/windows/de-de/189656730.wem"
+      }
+    },
+    "ArchieBickle": {
+      "selected_wem_ids": [
+        "362625066",
+        "73919568",
+        "269318282"
+      ],
+      "wem_paths": {
+        "362625066": "Phoenix/Content/WwiseAudio/windows/de-de/362625066.wem",
+        "73919568": "Phoenix/Content/WwiseAudio/windows/de-de/73919568.wem",
+        "269318282": "Phoenix/Content/WwiseAudio/windows/de-de/269318282.wem"
+      }
+    },
+    "Arn": {
+      "selected_wem_ids": [
+        "1041683392",
+        "1062953427"
+      ],
+      "wem_paths": {
+        "1041683392": "Phoenix/Content/WwiseAudio/windows/de-de/1041683392.wem",
+        "1062953427": "Phoenix/Content/WwiseAudio/windows/de-de/1062953427.wem"
+      }
+    },
+    "ArthurSiggs": {
+      "selected_wem_ids": [
+        "1059048507"
+      ],
+      "wem_paths": {
+        "1059048507": "Phoenix/Content/WwiseAudio/windows/de-de/1059048507.wem"
+      }
+    },
+    "AstoriaCrickett": {
+      "selected_wem_ids": [
+        "824732976",
+        "533362404",
+        "694088618"
+      ],
+      "wem_paths": {
+        "824732976": "Phoenix/Content/WwiseAudio/windows/de-de/824732976.wem",
+        "533362404": "Phoenix/Content/WwiseAudio/windows/de-de/533362404.wem",
+        "694088618": "Phoenix/Content/WwiseAudio/windows/de-de/694088618.wem"
+      }
+    },
+    "AugustusHill": {
+      "selected_wem_ids": [
+        "1005929456",
+        "1055392650"
+      ],
+      "wem_paths": {
+        "1005929456": "Phoenix/Content/WwiseAudio/windows/de-de/1005929456.wem",
+        "1055392650": "Phoenix/Content/WwiseAudio/windows/de-de/1055392650.wem"
+      }
+    },
+    "BaiHowin": {
+      "selected_wem_ids": [
+        "206671099",
+        "207225278"
+      ],
+      "wem_paths": {
+        "206671099": "Phoenix/Content/WwiseAudio/windows/de-de/206671099.wem",
+        "207225278": "Phoenix/Content/WwiseAudio/windows/de-de/207225278.wem"
+      }
+    },
+    "BernardNdiaye": {
+      "selected_wem_ids": [
+        "1020080211",
+        "1031806261"
+      ],
+      "wem_paths": {
+        "1020080211": "Phoenix/Content/WwiseAudio/windows/de-de/1020080211.wem",
+        "1031806261": "Phoenix/Content/WwiseAudio/windows/de-de/1031806261.wem"
+      }
+    },
+    "BettyBowditch": {
+      "selected_wem_ids": [
+        "280476707",
+        "141425832"
+      ],
+      "wem_paths": {
+        "280476707": "Phoenix/Content/WwiseAudio/windows/de-de/280476707.wem",
+        "141425832": "Phoenix/Content/WwiseAudio/windows/de-de/141425832.wem"
+      }
+    },
+    "BloodyBaron": {
+      "selected_wem_ids": [
+        "118299939",
+        "509352217",
+        "23723952"
+      ],
+      "wem_paths": {
+        "118299939": "Phoenix/Content/WwiseAudio/windows/de-de/118299939.wem",
+        "509352217": "Phoenix/Content/WwiseAudio/windows/de-de/509352217.wem",
+        "23723952": "Phoenix/Content/WwiseAudio/windows/de-de/23723952.wem"
+      }
+    },
+    "Bragbor": {
+      "selected_wem_ids": [
+        "407398137"
+      ],
+      "wem_paths": {
+        "407398137": "Phoenix/Content/WwiseAudio/windows/de-de/407398137.wem"
+      }
+    },
+    "Bully1": {
+      "selected_wem_ids": [
+        "143437893",
+        "129219467",
+        "970317837"
+      ],
+      "wem_paths": {
+        "143437893": "Phoenix/Content/WwiseAudio/windows/de-de/143437893.wem",
+        "129219467": "Phoenix/Content/WwiseAudio/windows/de-de/129219467.wem",
+        "970317837": "Phoenix/Content/WwiseAudio/windows/de-de/970317837.wem"
+      }
+    },
+    "CalliopeSnelling": {
+      "selected_wem_ids": [
+        "22759734",
+        "107765617"
+      ],
+      "wem_paths": {
+        "22759734": "Phoenix/Content/WwiseAudio/windows/de-de/22759734.wem",
+        "107765617": "Phoenix/Content/WwiseAudio/windows/de-de/107765617.wem"
+      }
+    },
+    "CassandraMason": {
+      "selected_wem_ids": [
+        "110112070",
+        "167381078"
+      ],
+      "wem_paths": {
+        "110112070": "Phoenix/Content/WwiseAudio/windows/de-de/110112070.wem",
+        "167381078": "Phoenix/Content/WwiseAudio/windows/de-de/167381078.wem"
+      }
+    },
+    "Centaur1": {
+      "selected_wem_ids": [
+        "970708516",
+        "506071103"
+      ],
+      "wem_paths": {
+        "970708516": "Phoenix/Content/WwiseAudio/windows/de-de/970708516.wem",
+        "506071103": "Phoenix/Content/WwiseAudio/windows/de-de/506071103.wem"
+      }
+    },
+    "Centaur2": {
+      "selected_wem_ids": [
+        "765458860",
+        "288847346",
+        "577158076"
+      ],
+      "wem_paths": {
+        "765458860": "Phoenix/Content/WwiseAudio/windows/de-de/765458860.wem",
+        "288847346": "Phoenix/Content/WwiseAudio/windows/de-de/288847346.wem",
+        "577158076": "Phoenix/Content/WwiseAudio/windows/de-de/577158076.wem"
+      }
+    },
+    "CharlotteMorrison": {
+      "selected_wem_ids": [
+        "872099118",
+        "553016190"
+      ],
+      "wem_paths": {
+        "872099118": "Phoenix/Content/WwiseAudio/windows/de-de/872099118.wem",
+        "553016190": "Phoenix/Content/WwiseAudio/windows/de-de/553016190.wem"
+      }
+    },
+    "ChiyoKogawa": {
+      "selected_wem_ids": [
+        "1012362345",
+        "188328584"
+      ],
+      "wem_paths": {
+        "1012362345": "Phoenix/Content/WwiseAudio/windows/de-de/1012362345.wem",
+        "188328584": "Phoenix/Content/WwiseAudio/windows/de-de/188328584.wem"
+      }
+    },
+    "CillianHawksworth": {
+      "selected_wem_ids": [
+        "392700466",
+        "887270756"
+      ],
+      "wem_paths": {
+        "392700466": "Phoenix/Content/WwiseAudio/windows/de-de/392700466.wem",
+        "887270756": "Phoenix/Content/WwiseAudio/windows/de-de/887270756.wem"
+      }
+    },
+    "ClaireBeaumont": {
+      "selected_wem_ids": [
+        "136903576",
+        "11814914"
+      ],
+      "wem_paths": {
+        "136903576": "Phoenix/Content/WwiseAudio/windows/de-de/136903576.wem",
+        "11814914": "Phoenix/Content/WwiseAudio/windows/de-de/11814914.wem"
+      }
+    },
+    "ClementineWillardsey": {
+      "selected_wem_ids": [
+        "54649171",
+        "230591463"
+      ],
+      "wem_paths": {
+        "54649171": "Phoenix/Content/WwiseAudio/windows/de-de/54649171.wem",
+        "230591463": "Phoenix/Content/WwiseAudio/windows/de-de/230591463.wem"
+      }
+    },
+    "CliffordCromwell": {
+      "selected_wem_ids": [
+        "373295352",
+        "272188010"
+      ],
+      "wem_paths": {
+        "373295352": "Phoenix/Content/WwiseAudio/windows/de-de/373295352.wem",
+        "272188010": "Phoenix/Content/WwiseAudio/windows/de-de/272188010.wem"
+      }
+    },
+    "CressidaBlume": {
+      "selected_wem_ids": [
+        "1045108708",
+        "1025164990"
+      ],
+      "wem_paths": {
+        "1045108708": "Phoenix/Content/WwiseAudio/windows/de-de/1045108708.wem",
+        "1025164990": "Phoenix/Content/WwiseAudio/windows/de-de/1025164990.wem"
+      }
+    },
+    "CrispinDunn": {
+      "selected_wem_ids": [
+        "458709155",
+        "712466596"
+      ],
+      "wem_paths": {
+        "458709155": "Phoenix/Content/WwiseAudio/windows/de-de/458709155.wem",
+        "712466596": "Phoenix/Content/WwiseAudio/windows/de-de/712466596.wem"
+      }
+    },
+    "CuthbertBinns": {
+      "selected_wem_ids": [
+        "1020038961"
+      ],
+      "wem_paths": {
+        "1020038961": "Phoenix/Content/WwiseAudio/windows/de-de/1020038961.wem"
+      }
+    },
+    "DaisyAbril": {
+      "selected_wem_ids": [
+        "278208880",
+        "1029411810"
+      ],
+      "wem_paths": {
+        "278208880": "Phoenix/Content/WwiseAudio/windows/de-de/278208880.wem",
+        "1029411810": "Phoenix/Content/WwiseAudio/windows/de-de/1029411810.wem"
+      }
+    },
+    "DinahHecat": {
+      "selected_wem_ids": [
+        "138199664",
+        "117093380"
+      ],
+      "wem_paths": {
+        "138199664": "Phoenix/Content/WwiseAudio/windows/de-de/138199664.wem",
+        "117093380": "Phoenix/Content/WwiseAudio/windows/de-de/117093380.wem"
+      }
+    },
+    "DorothyDencourt": {
+      "selected_wem_ids": [
+        "10970539",
+        "165775346"
+      ],
+      "wem_paths": {
+        "10970539": "Phoenix/Content/WwiseAudio/windows/de-de/10970539.wem",
+        "165775346": "Phoenix/Content/WwiseAudio/windows/de-de/165775346.wem"
+      }
+    },
+    "DumfreyWestland": {
+      "selected_wem_ids": [
+        "696747258",
+        "1046958878"
+      ],
+      "wem_paths": {
+        "696747258": "Phoenix/Content/WwiseAudio/windows/de-de/696747258.wem",
+        "1046958878": "Phoenix/Content/WwiseAudio/windows/de-de/1046958878.wem"
+      }
+    },
+    "DuncanHobhouse": {
+      "selected_wem_ids": [
+        "210009688",
+        "275187576"
+      ],
+      "wem_paths": {
+        "210009688": "Phoenix/Content/WwiseAudio/windows/de-de/210009688.wem",
+        "275187576": "Phoenix/Content/WwiseAudio/windows/de-de/275187576.wem"
+      }
+    },
+    "EddieCleaver": {
+      "selected_wem_ids": [
+        "162564005",
+        "503310538"
+      ],
+      "wem_paths": {
+        "162564005": "Phoenix/Content/WwiseAudio/windows/de-de/162564005.wem",
+        "503310538": "Phoenix/Content/WwiseAudio/windows/de-de/503310538.wem"
+      }
+    },
+    "EddieThistlewood": {
+      "selected_wem_ids": [
+        "313869339",
+        "1063547383"
+      ],
+      "wem_paths": {
+        "313869339": "Phoenix/Content/WwiseAudio/windows/de-de/313869339.wem",
+        "1063547383": "Phoenix/Content/WwiseAudio/windows/de-de/1063547383.wem"
+      }
+    },
+    "EdgarAdley": {
+      "selected_wem_ids": [
+        "492032432",
+        "404307873"
+      ],
+      "wem_paths": {
+        "492032432": "Phoenix/Content/WwiseAudio/windows/de-de/492032432.wem",
+        "404307873": "Phoenix/Content/WwiseAudio/windows/de-de/404307873.wem"
+      }
+    },
+    "EdmundArcher": {
+      "selected_wem_ids": [
+        "399368573"
+      ],
+      "wem_paths": {
+        "399368573": "Phoenix/Content/WwiseAudio/windows/de-de/399368573.wem"
+      }
+    },
+    "EldritchDiggory": {
+      "selected_wem_ids": [
+        "150302850",
+        "24551152"
+      ],
+      "wem_paths": {
+        "150302850": "Phoenix/Content/WwiseAudio/windows/de-de/150302850.wem",
+        "24551152": "Phoenix/Content/WwiseAudio/windows/de-de/24551152.wem"
+      }
+    },
+    "EleazarFig": {
+      "selected_wem_ids": [
+        "1059044034",
+        "1048242667"
+      ],
+      "wem_paths": {
+        "1059044034": "Phoenix/Content/WwiseAudio/windows/de-de/1059044034.wem",
+        "1048242667": "Phoenix/Content/WwiseAudio/windows/de-de/1048242667.wem"
+      }
+    },
+    "Elek": {
+      "selected_wem_ids": [
+        "382439984",
+        "280440078"
+      ],
+      "wem_paths": {
+        "382439984": "Phoenix/Content/WwiseAudio/windows/de-de/382439984.wem",
+        "280440078": "Phoenix/Content/WwiseAudio/windows/de-de/280440078.wem"
+      }
+    },
+    "EricNorthcott": {
+      "selected_wem_ids": [
+        "938972954",
+        "167978220",
+        "816047116"
+      ],
+      "wem_paths": {
+        "938972954": "Phoenix/Content/WwiseAudio/windows/de-de/938972954.wem",
+        "167978220": "Phoenix/Content/WwiseAudio/windows/de-de/167978220.wem",
+        "816047116": "Phoenix/Content/WwiseAudio/windows/de-de/816047116.wem"
+      }
+    },
+    "ErnieLark": {
+      "selected_wem_ids": [
+        "50234907",
+        "1019697137"
+      ],
+      "wem_paths": {
+        "50234907": "Phoenix/Content/WwiseAudio/windows/de-de/50234907.wem",
+        "1019697137": "Phoenix/Content/WwiseAudio/windows/de-de/1019697137.wem"
+      }
+    },
+    "EvangelineBardsley": {
+      "selected_wem_ids": [
+        "12680512",
+        "279295308"
+      ],
+      "wem_paths": {
+        "12680512": "Phoenix/Content/WwiseAudio/windows/de-de/12680512.wem",
+        "279295308": "Phoenix/Content/WwiseAudio/windows/de-de/279295308.wem"
+      }
+    },
+    "EverettClopton": {
+      "selected_wem_ids": [
+        "437723836",
+        "654535066"
+      ],
+      "wem_paths": {
+        "437723836": "Phoenix/Content/WwiseAudio/windows/de-de/437723836.wem",
+        "654535066": "Phoenix/Content/WwiseAudio/windows/de-de/654535066.wem"
+      }
+    },
+    "ExtraGhostCharacterM2": {
+      "selected_wem_ids": [
+        "58927040",
+        "306017575"
+      ],
+      "wem_paths": {
+        "58927040": "Phoenix/Content/WwiseAudio/windows/de-de/58927040.wem",
+        "306017575": "Phoenix/Content/WwiseAudio/windows/de-de/306017575.wem"
+      }
+    },
+    "FGMKitchenF": {
+      "selected_wem_ids": [
+        "465564817"
+      ],
+      "wem_paths": {
+        "465564817": "Phoenix/Content/WwiseAudio/windows/de-de/465564817.wem"
+      }
+    },
+    "FGMKitchenM": {
+      "selected_wem_ids": [
+        "714705140"
+      ],
+      "wem_paths": {
+        "714705140": "Phoenix/Content/WwiseAudio/windows/de-de/714705140.wem"
+      }
+    },
+    "Fastidio": {
+      "selected_wem_ids": [
+        "287282431",
+        "1049390533"
+      ],
+      "wem_paths": {
+        "287282431": "Phoenix/Content/WwiseAudio/windows/de-de/287282431.wem",
+        "1049390533": "Phoenix/Content/WwiseAudio/windows/de-de/1049390533.wem"
+      }
+    },
+    "FatFriar": {
+      "selected_wem_ids": [
+        "1020106157",
+        "258136967"
+      ],
+      "wem_paths": {
+        "1020106157": "Phoenix/Content/WwiseAudio/windows/de-de/1020106157.wem",
+        "258136967": "Phoenix/Content/WwiseAudio/windows/de-de/258136967.wem"
+      }
+    },
+    "FatLady": {
+      "selected_wem_ids": [
+        "220131768",
+        "220672727"
+      ],
+      "wem_paths": {
+        "220131768": "Phoenix/Content/WwiseAudio/windows/de-de/220131768.wem",
+        "220672727": "Phoenix/Content/WwiseAudio/windows/de-de/220672727.wem"
+      }
+    },
+    "FatimahLawang": {
+      "selected_wem_ids": [
+        "204285636",
+        "1069888455"
+      ],
+      "wem_paths": {
+        "204285636": "Phoenix/Content/WwiseAudio/windows/de-de/204285636.wem",
+        "1069888455": "Phoenix/Content/WwiseAudio/windows/de-de/1069888455.wem"
+      }
+    },
+    "Feenky": {
+      "selected_wem_ids": [
+        "1030267510",
+        "1052428814"
+      ],
+      "wem_paths": {
+        "1030267510": "Phoenix/Content/WwiseAudio/windows/de-de/1030267510.wem",
+        "1052428814": "Phoenix/Content/WwiseAudio/windows/de-de/1052428814.wem"
+      }
+    },
+    "FerdinandOctaviusPratt": {
+      "selected_wem_ids": [
+        "377029264",
+        "204712764"
+      ],
+      "wem_paths": {
+        "377029264": "Phoenix/Content/WwiseAudio/windows/de-de/377029264.wem",
+        "204712764": "Phoenix/Content/WwiseAudio/windows/de-de/204712764.wem"
+      }
+    },
+    "FlorenceGreen": {
+      "selected_wem_ids": [
+        "429473373",
+        "169081254"
+      ],
+      "wem_paths": {
+        "429473373": "Phoenix/Content/WwiseAudio/windows/de-de/429473373.wem",
+        "169081254": "Phoenix/Content/WwiseAudio/windows/de-de/169081254.wem"
+      }
+    },
+    "FrancisDoyle": {
+      "selected_wem_ids": [
+        "975238910",
+        "98535485"
+      ],
+      "wem_paths": {
+        "975238910": "Phoenix/Content/WwiseAudio/windows/de-de/975238910.wem",
+        "98535485": "Phoenix/Content/WwiseAudio/windows/de-de/98535485.wem"
+      }
+    },
+    "Garnuff": {
+      "selected_wem_ids": [
+        "115703380",
+        "1054897625"
+      ],
+      "wem_paths": {
+        "115703380": "Phoenix/Content/WwiseAudio/windows/de-de/115703380.wem",
+        "1054897625": "Phoenix/Content/WwiseAudio/windows/de-de/1054897625.wem"
+      }
+    },
+    "GarrethWeasley": {
+      "selected_wem_ids": [
+        "56179009",
+        "59560399"
+      ],
+      "wem_paths": {
+        "56179009": "Phoenix/Content/WwiseAudio/windows/de-de/56179009.wem",
+        "59560399": "Phoenix/Content/WwiseAudio/windows/de-de/59560399.wem"
+      }
+    },
+    "GeorgeOsric": {
+      "selected_wem_ids": [
+        "929217809",
+        "126681818"
+      ],
+      "wem_paths": {
+        "929217809": "Phoenix/Content/WwiseAudio/windows/de-de/929217809.wem",
+        "126681818": "Phoenix/Content/WwiseAudio/windows/de-de/126681818.wem"
+      }
+    },
+    "GerboldOllivander": {
+      "selected_wem_ids": [
+        "134674264",
+        "205644386"
+      ],
+      "wem_paths": {
+        "134674264": "Phoenix/Content/WwiseAudio/windows/de-de/134674264.wem",
+        "205644386": "Phoenix/Content/WwiseAudio/windows/de-de/205644386.wem"
+      }
+    },
+    "GladwinMoon": {
+      "selected_wem_ids": [
+        "108309232",
+        "1073000198"
+      ],
+      "wem_paths": {
+        "108309232": "Phoenix/Content/WwiseAudio/windows/de-de/108309232.wem",
+        "1073000198": "Phoenix/Content/WwiseAudio/windows/de-de/1073000198.wem"
+      }
+    },
+    "GraceWaldegrave": {
+      "selected_wem_ids": [
+        "251374588",
+        "322162450"
+      ],
+      "wem_paths": {
+        "251374588": "Phoenix/Content/WwiseAudio/windows/de-de/251374588.wem",
+        "322162450": "Phoenix/Content/WwiseAudio/windows/de-de/322162450.wem"
+      }
+    },
+    "Grol": {
+      "selected_wem_ids": [
+        "1032156401",
+        "1000800486"
+      ],
+      "wem_paths": {
+        "1032156401": "Phoenix/Content/WwiseAudio/windows/de-de/1032156401.wem",
+        "1000800486": "Phoenix/Content/WwiseAudio/windows/de-de/1000800486.wem"
+      }
+    },
+    "Guardian1": {
+      "selected_wem_ids": [
+        "1047849126",
+        "1022527886"
+      ],
+      "wem_paths": {
+        "1047849126": "Phoenix/Content/WwiseAudio/windows/de-de/1047849126.wem",
+        "1022527886": "Phoenix/Content/WwiseAudio/windows/de-de/1022527886.wem"
+      }
+    },
+    "Guardian2": {
+      "selected_wem_ids": [
+        "1047520686",
+        "243278205"
+      ],
+      "wem_paths": {
+        "1047520686": "Phoenix/Content/WwiseAudio/windows/de-de/1047520686.wem",
+        "243278205": "Phoenix/Content/WwiseAudio/windows/de-de/243278205.wem"
+      }
+    },
+    "Guardian3": {
+      "selected_wem_ids": [
+        "1037713047",
+        "171424537"
+      ],
+      "wem_paths": {
+        "1037713047": "Phoenix/Content/WwiseAudio/windows/de-de/1037713047.wem",
+        "171424537": "Phoenix/Content/WwiseAudio/windows/de-de/171424537.wem"
+      }
+    },
+    "Guardian4": {
+      "selected_wem_ids": [
+        "1009442284",
+        "26334767"
+      ],
+      "wem_paths": {
+        "1009442284": "Phoenix/Content/WwiseAudio/windows/de-de/1009442284.wem",
+        "26334767": "Phoenix/Content/WwiseAudio/windows/de-de/26334767.wem"
+      }
+    },
+    "Guardian5": {
+      "selected_wem_ids": [
+        "123778592",
+        "438170924"
+      ],
+      "wem_paths": {
+        "123778592": "Phoenix/Content/WwiseAudio/windows/de-de/123778592.wem",
+        "438170924": "Phoenix/Content/WwiseAudio/windows/de-de/438170924.wem"
+      }
+    },
+    "Guardian5y11": {
+      "selected_wem_ids": [
+        "670435641",
+        "37982359"
+      ],
+      "wem_paths": {
+        "670435641": "Phoenix/Content/WwiseAudio/windows/de-de/670435641.wem",
+        "37982359": "Phoenix/Content/WwiseAudio/windows/de-de/37982359.wem"
+      }
+    },
+    "Guardian5y17": {
+      "selected_wem_ids": [
+        "952129810",
+        "1051575426"
+      ],
+      "wem_paths": {
+        "952129810": "Phoenix/Content/WwiseAudio/windows/de-de/952129810.wem",
+        "1051575426": "Phoenix/Content/WwiseAudio/windows/de-de/1051575426.wem"
+      }
+    },
+    "HelenThistlewood": {
+      "selected_wem_ids": [
+        "1012458318",
+        "1044056860"
+      ],
+      "wem_paths": {
+        "1012458318": "Phoenix/Content/WwiseAudio/windows/de-de/1012458318.wem",
+        "1044056860": "Phoenix/Content/WwiseAudio/windows/de-de/1044056860.wem"
+      }
+    },
+    "HermenegildaNavarro": {
+      "selected_wem_ids": [
+        "225890",
+        "208475640"
+      ],
+      "wem_paths": {
+        "225890": "Phoenix/Content/WwiseAudio/windows/de-de/225890.wem",
+        "208475640": "Phoenix/Content/WwiseAudio/windows/de-de/208475640.wem"
+      }
+    },
+    "HyacinthOlivier": {
+      "selected_wem_ids": [
+        "570402327",
+        "169481701"
+      ],
+      "wem_paths": {
+        "570402327": "Phoenix/Content/WwiseAudio/windows/de-de/570402327.wem",
+        "169481701": "Phoenix/Content/WwiseAudio/windows/de-de/169481701.wem"
+      }
+    },
+    "IgnatiaFlooTravel": {
+      "selected_wem_ids": [
+        "362613089",
+        "215968445"
+      ],
+      "wem_paths": {
+        "362613089": "Phoenix/Content/WwiseAudio/windows/de-de/362613089.wem",
+        "215968445": "Phoenix/Content/WwiseAudio/windows/de-de/215968445.wem"
+      }
+    },
+    "ImeldaReyes": {
+      "selected_wem_ids": [
+        "176798117",
+        "1016465448"
+      ],
+      "wem_paths": {
+        "176798117": "Phoenix/Content/WwiseAudio/windows/de-de/176798117.wem",
+        "1016465448": "Phoenix/Content/WwiseAudio/windows/de-de/1016465448.wem"
+      }
+    },
+    "IndiraWolff": {
+      "selected_wem_ids": [
+        "196315903",
+        "308194073"
+      ],
+      "wem_paths": {
+        "196315903": "Phoenix/Content/WwiseAudio/windows/de-de/196315903.wem",
+        "308194073": "Phoenix/Content/WwiseAudio/windows/de-de/308194073.wem"
+      }
+    },
+    "IskoAbril": {
+      "selected_wem_ids": [
+        "182802423",
+        "670431117"
+      ],
+      "wem_paths": {
+        "182802423": "Phoenix/Content/WwiseAudio/windows/de-de/182802423.wem",
+        "670431117": "Phoenix/Content/WwiseAudio/windows/de-de/670431117.wem"
+      }
+    },
+    "JalalSehmi": {
+      "selected_wem_ids": [
+        "280029621",
+        "393166104"
+      ],
+      "wem_paths": {
+        "280029621": "Phoenix/Content/WwiseAudio/windows/de-de/280029621.wem",
+        "393166104": "Phoenix/Content/WwiseAudio/windows/de-de/393166104.wem"
+      }
+    },
+    "JasperTrout": {
+      "selected_wem_ids": [
+        "204718814",
+        "799435434",
+        "19792088",
+        "32104668"
+      ],
+      "wem_paths": {
+        "204718814": "Phoenix/Content/WwiseAudio/windows/de-de/204718814.wem",
+        "799435434": "Phoenix/Content/WwiseAudio/windows/de-de/799435434.wem",
+        "19792088": "Phoenix/Content/WwiseAudio/windows/de-de/19792088.wem",
+        "32104668": "Phoenix/Content/WwiseAudio/windows/de-de/32104668.wem"
+      }
+    },
+    "JemimaCollins": {
+      "selected_wem_ids": [
+        "746680408"
+      ],
+      "wem_paths": {
+        "746680408": "Phoenix/Content/WwiseAudio/windows/de-de/746680408.wem"
+      }
+    },
+    "JohannaBickle": {
+      "selected_wem_ids": [
+        "1019339168",
+        "164496299"
+      ],
+      "wem_paths": {
+        "1019339168": "Phoenix/Content/WwiseAudio/windows/de-de/1019339168.wem",
+        "164496299": "Phoenix/Content/WwiseAudio/windows/de-de/164496299.wem"
+      }
+    },
+    "JonathanEldridge": {
+      "selected_wem_ids": [
+        "456015383"
+      ],
+      "wem_paths": {
+        "456015383": "Phoenix/Content/WwiseAudio/windows/de-de/456015383.wem"
+      }
+    },
+    "LawrenceDavies": {
+      "selected_wem_ids": [
+        "61879670",
+        "884970148",
+        "2788751"
+      ],
+      "wem_paths": {
+        "61879670": "Phoenix/Content/WwiseAudio/windows/de-de/61879670.wem",
+        "884970148": "Phoenix/Content/WwiseAudio/windows/de-de/884970148.wem",
+        "2788751": "Phoenix/Content/WwiseAudio/windows/de-de/2788751.wem"
+      }
+    },
+    "LeanderPrewett": {
+      "selected_wem_ids": [
+        "1038827514",
+        "1042662110"
+      ],
+      "wem_paths": {
+        "1038827514": "Phoenix/Content/WwiseAudio/windows/de-de/1038827514.wem",
+        "1042662110": "Phoenix/Content/WwiseAudio/windows/de-de/1042662110.wem"
+      }
+    },
+    "LenoraAbbott": {
+      "selected_wem_ids": [
+        "32159034",
+        "310026342"
+      ],
+      "wem_paths": {
+        "32159034": "Phoenix/Content/WwiseAudio/windows/de-de/32159034.wem",
+        "310026342": "Phoenix/Content/WwiseAudio/windows/de-de/310026342.wem"
+      }
+    },
+    "LeonaPeck": {
+      "selected_wem_ids": [
+        "284879201",
+        "121739120"
+      ],
+      "wem_paths": {
+        "284879201": "Phoenix/Content/WwiseAudio/windows/de-de/284879201.wem",
+        "121739120": "Phoenix/Content/WwiseAudio/windows/de-de/121739120.wem"
+      }
+    },
+    "LeopoldBabcocke": {
+      "selected_wem_ids": [
+        "234693029",
+        "432343359"
+      ],
+      "wem_paths": {
+        "234693029": "Phoenix/Content/WwiseAudio/windows/de-de/234693029.wem",
+        "432343359": "Phoenix/Content/WwiseAudio/windows/de-de/432343359.wem"
+      }
+    },
+    "LethiaBurbley": {
+      "selected_wem_ids": [
+        "693770243",
+        "324127123"
+      ],
+      "wem_paths": {
+        "693770243": "Phoenix/Content/WwiseAudio/windows/de-de/693770243.wem",
+        "324127123": "Phoenix/Content/WwiseAudio/windows/de-de/324127123.wem"
+      }
+    },
+    "Lodgok": {
+      "selected_wem_ids": [
+        "262808198",
+        "1034515561"
+      ],
+      "wem_paths": {
+        "262808198": "Phoenix/Content/WwiseAudio/windows/de-de/262808198.wem",
+        "1034515561": "Phoenix/Content/WwiseAudio/windows/de-de/1034515561.wem"
+      }
+    },
+    "LottieFeatherbottom": {
+      "selected_wem_ids": [
+        "1011957785",
+        "701881285",
+        "134746639"
+      ],
+      "wem_paths": {
+        "1011957785": "Phoenix/Content/WwiseAudio/windows/de-de/1011957785.wem",
+        "701881285": "Phoenix/Content/WwiseAudio/windows/de-de/701881285.wem",
+        "134746639": "Phoenix/Content/WwiseAudio/windows/de-de/134746639.wem"
+      }
+    },
+    "LucanBrattleby": {
+      "selected_wem_ids": [
+        "627169135",
+        "1002718990"
+      ],
+      "wem_paths": {
+        "627169135": "Phoenix/Content/WwiseAudio/windows/de-de/627169135.wem",
+        "1002718990": "Phoenix/Content/WwiseAudio/windows/de-de/1002718990.wem"
+      }
+    },
+    "MagicalWell": {
+      "selected_wem_ids": [
+        "712522392",
+        "639426454"
+      ],
+      "wem_paths": {
+        "712522392": "Phoenix/Content/WwiseAudio/windows/de-de/712522392.wem",
+        "639426454": "Phoenix/Content/WwiseAudio/windows/de-de/639426454.wem"
+      }
+    },
+    "MahendraKapoor": {
+      "selected_wem_ids": [
+        "212506199",
+        "897385985"
+      ],
+      "wem_paths": {
+        "212506199": "Phoenix/Content/WwiseAudio/windows/de-de/212506199.wem",
+        "897385985": "Phoenix/Content/WwiseAudio/windows/de-de/897385985.wem"
+      }
+    },
+    "MarianneMoffett": {
+      "selected_wem_ids": [
+        "1012266038",
+        "1031551220"
+      ],
+      "wem_paths": {
+        "1012266038": "Phoenix/Content/WwiseAudio/windows/de-de/1012266038.wem",
+        "1031551220": "Phoenix/Content/WwiseAudio/windows/de-de/1031551220.wem"
+      }
+    },
+    "MatildaWeasley": {
+      "selected_wem_ids": [
+        "1050386442",
+        "1046146724"
+      ],
+      "wem_paths": {
+        "1050386442": "Phoenix/Content/WwiseAudio/windows/de-de/1050386442.wem",
+        "1046146724": "Phoenix/Content/WwiseAudio/windows/de-de/1046146724.wem"
+      }
+    },
+    "MirabelGarlick": {
+      "selected_wem_ids": [
+        "1003795936",
+        "1024205886"
+      ],
+      "wem_paths": {
+        "1003795936": "Phoenix/Content/WwiseAudio/windows/de-de/1003795936.wem",
+        "1024205886": "Phoenix/Content/WwiseAudio/windows/de-de/1024205886.wem"
+      }
+    },
+    "MudiwaOnai": {
+      "selected_wem_ids": [
+        "1009387679",
+        "1050505139"
+      ],
+      "wem_paths": {
+        "1009387679": "Phoenix/Content/WwiseAudio/windows/de-de/1009387679.wem",
+        "1050505139": "Phoenix/Content/WwiseAudio/windows/de-de/1050505139.wem"
+      }
+    },
+    "MusicConductor": {
+      "selected_wem_ids": [
+        "1042029096",
+        "940210746"
+      ],
+      "wem_paths": {
+        "1042029096": "Phoenix/Content/WwiseAudio/windows/de-de/1042029096.wem",
+        "940210746": "Phoenix/Content/WwiseAudio/windows/de-de/940210746.wem"
+      }
+    },
+    "NatsaiOnai": {
+      "selected_wem_ids": [
+        "1018447106",
+        "1054751420"
+      ],
+      "wem_paths": {
+        "1018447106": "Phoenix/Content/WwiseAudio/windows/de-de/1018447106.wem",
+        "1054751420": "Phoenix/Content/WwiseAudio/windows/de-de/1054751420.wem"
+      }
+    },
+    "NearlyHeadlessNick": {
+      "selected_wem_ids": [
+        "150746935",
+        "123307216"
+      ],
+      "wem_paths": {
+        "150746935": "Phoenix/Content/WwiseAudio/windows/de-de/150746935.wem",
+        "123307216": "Phoenix/Content/WwiseAudio/windows/de-de/123307216.wem"
+      }
+    },
+    "NeridaRoberts": {
+      "selected_wem_ids": [
+        "1017784440",
+        "100681251"
+      ],
+      "wem_paths": {
+        "1017784440": "Phoenix/Content/WwiseAudio/windows/de-de/1017784440.wem",
+        "100681251": "Phoenix/Content/WwiseAudio/windows/de-de/100681251.wem"
+      }
+    },
+    "NiamhFitzgerald": {
+      "selected_wem_ids": [
+        "625450216",
+        "533832949"
+      ],
+      "wem_paths": {
+        "625450216": "Phoenix/Content/WwiseAudio/windows/de-de/625450216.wem",
+        "533832949": "Phoenix/Content/WwiseAudio/windows/de-de/533832949.wem"
+      }
+    },
+    "NonsuchElf": {
+      "selected_wem_ids": [
+        "1006850295",
+        "803010436"
+      ],
+      "wem_paths": {
+        "1006850295": "Phoenix/Content/WwiseAudio/windows/de-de/1006850295.wem",
+        "803010436": "Phoenix/Content/WwiseAudio/windows/de-de/803010436.wem"
+      }
+    },
+    "NoraTreadwell": {
+      "selected_wem_ids": [
+        "932643590",
+        "324004785"
+      ],
+      "wem_paths": {
+        "932643590": "Phoenix/Content/WwiseAudio/windows/de-de/932643590.wem",
+        "324004785": "Phoenix/Content/WwiseAudio/windows/de-de/324004785.wem"
+      }
+    },
+    "NoreenBlainey": {
+      "selected_wem_ids": [
+        "660474729",
+        "226406154",
+        "14881220"
+      ],
+      "wem_paths": {
+        "660474729": "Phoenix/Content/WwiseAudio/windows/de-de/660474729.wem",
+        "226406154": "Phoenix/Content/WwiseAudio/windows/de-de/226406154.wem",
+        "14881220": "Phoenix/Content/WwiseAudio/windows/de-de/14881220.wem"
+      }
+    },
+    "OgleThePortrait": {
+      "selected_wem_ids": [
+        "1061401053",
+        "1053332487"
+      ],
+      "wem_paths": {
+        "1061401053": "Phoenix/Content/WwiseAudio/windows/de-de/1061401053.wem",
+        "1053332487": "Phoenix/Content/WwiseAudio/windows/de-de/1053332487.wem"
+      }
+    },
+    "OminisGaunt": {
+      "selected_wem_ids": [
+        "1032023523",
+        "211511919",
+        "1068483910"
+      ],
+      "wem_paths": {
+        "1032023523": "Phoenix/Content/WwiseAudio/windows/de-de/1032023523.wem",
+        "211511919": "Phoenix/Content/WwiseAudio/windows/de-de/211511919.wem",
+        "1068483910": "Phoenix/Content/WwiseAudio/windows/de-de/1068483910.wem"
+      }
+    },
+    "OttoDibble": {
+      "selected_wem_ids": [
+        "1009202438",
+        "218090273"
+      ],
+      "wem_paths": {
+        "1009202438": "Phoenix/Content/WwiseAudio/windows/de-de/1009202438.wem",
+        "218090273": "Phoenix/Content/WwiseAudio/windows/de-de/218090273.wem"
+      }
+    },
+    "PadraicHaggarty": {
+      "selected_wem_ids": [
+        "107002236",
+        "1024118455"
+      ],
+      "wem_paths": {
+        "107002236": "Phoenix/Content/WwiseAudio/windows/de-de/107002236.wem",
+        "1024118455": "Phoenix/Content/WwiseAudio/windows/de-de/1024118455.wem"
+      }
+    },
+    "PatrickRedding": {
+      "selected_wem_ids": [
+        "507447930",
+        "663891169",
+        "807248648"
+      ],
+      "wem_paths": {
+        "507447930": "Phoenix/Content/WwiseAudio/windows/de-de/507447930.wem",
+        "663891169": "Phoenix/Content/WwiseAudio/windows/de-de/663891169.wem",
+        "807248648": "Phoenix/Content/WwiseAudio/windows/de-de/807248648.wem"
+      }
+    },
+    "Peeves": {
+      "selected_wem_ids": [
+        "330129778",
+        "917819486"
+      ],
+      "wem_paths": {
+        "330129778": "Phoenix/Content/WwiseAudio/windows/de-de/330129778.wem",
+        "917819486": "Phoenix/Content/WwiseAudio/windows/de-de/917819486.wem"
+      }
+    },
+    "Penny": {
+      "selected_wem_ids": [
+        "106635541",
+        "1031368406"
+      ],
+      "wem_paths": {
+        "106635541": "Phoenix/Content/WwiseAudio/windows/de-de/106635541.wem",
+        "1031368406": "Phoenix/Content/WwiseAudio/windows/de-de/1031368406.wem"
+      }
+    },
+    "PercivalPippin": {
+      "selected_wem_ids": [
+        "2168792",
+        "267163660"
+      ],
+      "wem_paths": {
+        "2168792": "Phoenix/Content/WwiseAudio/windows/de-de/2168792.wem",
+        "267163660": "Phoenix/Content/WwiseAudio/windows/de-de/267163660.wem"
+      }
+    },
+    "PerditaStrix": {
+      "selected_wem_ids": [
+        "66684609",
+        "193515747"
+      ],
+      "wem_paths": {
+        "66684609": "Phoenix/Content/WwiseAudio/windows/de-de/66684609.wem",
+        "193515747": "Phoenix/Content/WwiseAudio/windows/de-de/193515747.wem"
+      }
+    },
+    "PhineasBlack": {
+      "selected_wem_ids": [
+        "1021135813"
+      ],
+      "wem_paths": {
+        "1021135813": "Phoenix/Content/WwiseAudio/windows/de-de/1021135813.wem"
+      }
+    },
+    "PiersPemberton": {
+      "selected_wem_ids": [
+        "30820734",
+        "304082298"
+      ],
+      "wem_paths": {
+        "30820734": "Phoenix/Content/WwiseAudio/windows/de-de/30820734.wem",
+        "304082298": "Phoenix/Content/WwiseAudio/windows/de-de/304082298.wem"
+      }
+    },
+    "PoppySweeting": {
+      "selected_wem_ids": [
+        "106844642",
+        "104865676"
+      ],
+      "wem_paths": {
+        "106844642": "Phoenix/Content/WwiseAudio/windows/de-de/106844642.wem",
+        "104865676": "Phoenix/Content/WwiseAudio/windows/de-de/104865676.wem"
+      }
+    },
+    "PrivateGoblinBanker": {
+      "selected_wem_ids": [
+        "369753081",
+        "335505375"
+      ],
+      "wem_paths": {
+        "369753081": "Phoenix/Content/WwiseAudio/windows/de-de/369753081.wem",
+        "335505375": "Phoenix/Content/WwiseAudio/windows/de-de/335505375.wem"
+      }
+    },
+    "PriyaTreadwell": {
+      "selected_wem_ids": [
+        "582841034",
+        "157056188"
+      ],
+      "wem_paths": {
+        "582841034": "Phoenix/Content/WwiseAudio/windows/de-de/582841034.wem",
+        "157056188": "Phoenix/Content/WwiseAudio/windows/de-de/157056188.wem"
+      }
+    },
+    "Ranrak": {
+      "selected_wem_ids": [
+        "152482610",
+        "165950573"
+      ],
+      "wem_paths": {
+        "152482610": "Phoenix/Content/WwiseAudio/windows/de-de/152482610.wem",
+        "165950573": "Phoenix/Content/WwiseAudio/windows/de-de/165950573.wem"
+      }
+    },
+    "RavenclawEntranceKnocker": {
+      "selected_wem_ids": [
+        "146510392"
+      ],
+      "wem_paths": {
+        "146510392": "Phoenix/Content/WwiseAudio/windows/de-de/146510392.wem"
+      }
+    },
+    "RichardJackdaw": {
+      "selected_wem_ids": [
+        "112860086",
+        "108106892"
+      ],
+      "wem_paths": {
+        "112860086": "Phoenix/Content/WwiseAudio/windows/de-de/112860086.wem",
+        "108106892": "Phoenix/Content/WwiseAudio/windows/de-de/108106892.wem"
+      }
+    },
+    "RichardJackdawHead": {
+      "selected_wem_ids": [
+        "43855836",
+        "111970226"
+      ],
+      "wem_paths": {
+        "43855836": "Phoenix/Content/WwiseAudio/windows/de-de/43855836.wem",
+        "111970226": "Phoenix/Content/WwiseAudio/windows/de-de/111970226.wem"
+      }
+    },
+    "RohanPrakash": {
+      "selected_wem_ids": [
+        "729979917",
+        "976599737"
+      ],
+      "wem_paths": {
+        "729979917": "Phoenix/Content/WwiseAudio/windows/de-de/729979917.wem",
+        "976599737": "Phoenix/Content/WwiseAudio/windows/de-de/976599737.wem"
+      }
+    },
+    "Rooky": {
+      "selected_wem_ids": [
+        "674450644",
+        "78867219",
+        "881028611"
+      ],
+      "wem_paths": {
+        "674450644": "Phoenix/Content/WwiseAudio/windows/de-de/674450644.wem",
+        "78867219": "Phoenix/Content/WwiseAudio/windows/de-de/78867219.wem",
+        "881028611": "Phoenix/Content/WwiseAudio/windows/de-de/881028611.wem"
+      }
+    },
+    "RowlandOakes": {
+      "selected_wem_ids": [
+        "1031251310",
+        "1016654096"
+      ],
+      "wem_paths": {
+        "1031251310": "Phoenix/Content/WwiseAudio/windows/de-de/1031251310.wem",
+        "1016654096": "Phoenix/Content/WwiseAudio/windows/de-de/1016654096.wem"
+      }
+    },
+    "RunoCalhoun": {
+      "selected_wem_ids": [
+        "1007769448"
+      ],
+      "wem_paths": {
+        "1007769448": "Phoenix/Content/WwiseAudio/windows/de-de/1007769448.wem"
+      }
+    },
+    "RuthSinger": {
+      "selected_wem_ids": [
+        "349137674",
+        "347180881"
+      ],
+      "wem_paths": {
+        "349137674": "Phoenix/Content/WwiseAudio/windows/de-de/349137674.wem",
+        "347180881": "Phoenix/Content/WwiseAudio/windows/de-de/347180881.wem"
+      }
+    },
+    "SacharissaTugwood": {
+      "selected_wem_ids": [
+        "1039491888",
+        "134447539"
+      ],
+      "wem_paths": {
+        "1039491888": "Phoenix/Content/WwiseAudio/windows/de-de/1039491888.wem",
+        "134447539": "Phoenix/Content/WwiseAudio/windows/de-de/134447539.wem"
+      }
+    },
+    "SamanthaDale": {
+      "selected_wem_ids": [
+        "1053855310",
+        "252883514"
+      ],
+      "wem_paths": {
+        "1053855310": "Phoenix/Content/WwiseAudio/windows/de-de/1053855310.wem",
+        "252883514": "Phoenix/Content/WwiseAudio/windows/de-de/252883514.wem"
+      }
+    },
+    "SanctuaryHouseElf": {
+      "selected_wem_ids": [
+        "101674752",
+        "1012801407"
+      ],
+      "wem_paths": {
+        "101674752": "Phoenix/Content/WwiseAudio/windows/de-de/101674752.wem",
+        "1012801407": "Phoenix/Content/WwiseAudio/windows/de-de/1012801407.wem"
+      }
+    },
+    "SatyavatiShah": {
+      "selected_wem_ids": [
+        "232889659",
+        "101449995"
+      ],
+      "wem_paths": {
+        "232889659": "Phoenix/Content/WwiseAudio/windows/de-de/232889659.wem",
+        "101449995": "Phoenix/Content/WwiseAudio/windows/de-de/101449995.wem"
+      }
+    },
+    "Scrope": {
+      "selected_wem_ids": [
+        "1035465526",
+        "280933804"
+      ],
+      "wem_paths": {
+        "1035465526": "Phoenix/Content/WwiseAudio/windows/de-de/1035465526.wem",
+        "280933804": "Phoenix/Content/WwiseAudio/windows/de-de/280933804.wem"
+      }
+    },
+    "SebastianSallow": {
+      "selected_wem_ids": [
+        "582218228",
+        "403012419"
+      ],
+      "wem_paths": {
+        "582218228": "Phoenix/Content/WwiseAudio/windows/de-de/582218228.wem",
+        "403012419": "Phoenix/Content/WwiseAudio/windows/de-de/403012419.wem"
+      }
+    },
+    "SilvanusSelwyn": {
+      "selected_wem_ids": [
+        "616005381",
+        "438976815",
+        "109594796",
+        "41768759"
+      ],
+      "wem_paths": {
+        "616005381": "Phoenix/Content/WwiseAudio/windows/de-de/616005381.wem",
+        "438976815": "Phoenix/Content/WwiseAudio/windows/de-de/438976815.wem",
+        "109594796": "Phoenix/Content/WwiseAudio/windows/de-de/109594796.wem",
+        "41768759": "Phoenix/Content/WwiseAudio/windows/de-de/41768759.wem"
+      }
+    },
+    "SirCadogan": {
+      "selected_wem_ids": [
+        "290604028",
+        "49437970"
+      ],
+      "wem_paths": {
+        "290604028": "Phoenix/Content/WwiseAudio/windows/de-de/290604028.wem",
+        "49437970": "Phoenix/Content/WwiseAudio/windows/de-de/49437970.wem"
+      }
+    },
+    "SirNestorAmset": {
+      "selected_wem_ids": [
+        "1038469539",
+        "1070591398"
+      ],
+      "wem_paths": {
+        "1038469539": "Phoenix/Content/WwiseAudio/windows/de-de/1038469539.wem",
+        "1070591398": "Phoenix/Content/WwiseAudio/windows/de-de/1070591398.wem"
+      }
+    },
+    "SirPatrickDelaneyPodmore": {
+      "selected_wem_ids": [
+        "460777879",
+        "513714658"
+      ],
+      "wem_paths": {
+        "460777879": "Phoenix/Content/WwiseAudio/windows/de-de/460777879.wem",
+        "513714658": "Phoenix/Content/WwiseAudio/windows/de-de/513714658.wem"
+      }
+    },
+    "SirWensleyDollamott": {
+      "selected_wem_ids": [
+        "678471335"
+      ],
+      "wem_paths": {
+        "678471335": "Phoenix/Content/WwiseAudio/windows/de-de/678471335.wem"
+      }
+    },
+    "Sirona": {
+      "selected_wem_ids": [
+        "110583698",
+        "1057089301"
+      ],
+      "wem_paths": {
+        "110583698": "Phoenix/Content/WwiseAudio/windows/de-de/110583698.wem",
+        "1057089301": "Phoenix/Content/WwiseAudio/windows/de-de/1057089301.wem"
+      }
+    },
+    "SolomonSallow": {
+      "selected_wem_ids": [
+        "1058758024",
+        "173900928"
+      ],
+      "wem_paths": {
+        "1058758024": "Phoenix/Content/WwiseAudio/windows/de-de/1058758024.wem",
+        "173900928": "Phoenix/Content/WwiseAudio/windows/de-de/173900928.wem"
+      }
+    },
+    "SophroniaFranklin": {
+      "selected_wem_ids": [
+        "1010093359",
+        "1016745051"
+      ],
+      "wem_paths": {
+        "1010093359": "Phoenix/Content/WwiseAudio/windows/de-de/1010093359.wem",
+        "1016745051": "Phoenix/Content/WwiseAudio/windows/de-de/1016745051.wem"
+      }
+    },
+    "SortingHat": {
+      "selected_wem_ids": [
+        "160477555",
+        "996883578",
+        "606858719"
+      ],
+      "wem_paths": {
+        "160477555": "Phoenix/Content/WwiseAudio/windows/de-de/160477555.wem",
+        "996883578": "Phoenix/Content/WwiseAudio/windows/de-de/996883578.wem",
+        "606858719": "Phoenix/Content/WwiseAudio/windows/de-de/606858719.wem"
+      }
+    },
+    "StaffroomGargoyleB": {
+      "selected_wem_ids": [
+        "457081554",
+        "161781264"
+      ],
+      "wem_paths": {
+        "457081554": "Phoenix/Content/WwiseAudio/windows/de-de/457081554.wem",
+        "161781264": "Phoenix/Content/WwiseAudio/windows/de-de/161781264.wem"
+      }
+    },
+    "SylviaPembroke": {
+      "selected_wem_ids": [
+        "551732356",
+        "63957244"
+      ],
+      "wem_paths": {
+        "551732356": "Phoenix/Content/WwiseAudio/windows/de-de/551732356.wem",
+        "63957244": "Phoenix/Content/WwiseAudio/windows/de-de/63957244.wem"
+      }
+    },
+    "TalkingMirror": {
+      "selected_wem_ids": [
+        "230451096",
+        "16582789"
+      ],
+      "wem_paths": {
+        "230451096": "Phoenix/Content/WwiseAudio/windows/de-de/230451096.wem",
+        "16582789": "Phoenix/Content/WwiseAudio/windows/de-de/16582789.wem"
+      }
+    },
+    "ThaddeusTravers": {
+      "selected_wem_ids": [
+        "158701620",
+        "609054774",
+        "710620384"
+      ],
+      "wem_paths": {
+        "158701620": "Phoenix/Content/WwiseAudio/windows/de-de/158701620.wem",
+        "609054774": "Phoenix/Content/WwiseAudio/windows/de-de/609054774.wem",
+        "710620384": "Phoenix/Content/WwiseAudio/windows/de-de/710620384.wem"
+      }
+    },
+    "TheophilusHarlow": {
+      "selected_wem_ids": [
+        "71800561",
+        "989672919"
+      ],
+      "wem_paths": {
+        "71800561": "Phoenix/Content/WwiseAudio/windows/de-de/71800561.wem",
+        "989672919": "Phoenix/Content/WwiseAudio/windows/de-de/989672919.wem"
+      }
+    },
+    "ThomasBrown": {
+      "selected_wem_ids": [
+        "578632347",
+        "142839968"
+      ],
+      "wem_paths": {
+        "578632347": "Phoenix/Content/WwiseAudio/windows/de-de/578632347.wem",
+        "142839968": "Phoenix/Content/WwiseAudio/windows/de-de/142839968.wem"
+      }
+    },
+    "TimothyTeasdale": {
+      "selected_wem_ids": [
+        "670665738",
+        "112928379"
+      ],
+      "wem_paths": {
+        "670665738": "Phoenix/Content/WwiseAudio/windows/de-de/670665738.wem",
+        "112928379": "Phoenix/Content/WwiseAudio/windows/de-de/112928379.wem"
+      }
+    },
+    "TownCrier": {
+      "selected_wem_ids": [
+        "1044394314",
+        "270847709"
+      ],
+      "wem_paths": {
+        "1044394314": "Phoenix/Content/WwiseAudio/windows/de-de/1044394314.wem",
+        "270847709": "Phoenix/Content/WwiseAudio/windows/de-de/270847709.wem"
+      }
+    },
+    "VENDORCauldronShop": {
+      "selected_wem_ids": [
+        "492700026",
+        "300474898",
+        "750325650"
+      ],
+      "wem_paths": {
+        "492700026": "Phoenix/Content/WwiseAudio/windows/de-de/492700026.wem",
+        "300474898": "Phoenix/Content/WwiseAudio/windows/de-de/300474898.wem",
+        "750325650": "Phoenix/Content/WwiseAudio/windows/de-de/750325650.wem"
+      }
+    },
+    "VENDORJokeShop": {
+      "selected_wem_ids": [
+        "264231310",
+        "573946175",
+        "775484792",
+        "383480798"
+      ],
+      "wem_paths": {
+        "264231310": "Phoenix/Content/WwiseAudio/windows/de-de/264231310.wem",
+        "573946175": "Phoenix/Content/WwiseAudio/windows/de-de/573946175.wem",
+        "775484792": "Phoenix/Content/WwiseAudio/windows/de-de/775484792.wem",
+        "383480798": "Phoenix/Content/WwiseAudio/windows/de-de/383480798.wem"
+      }
+    },
+    "VENDORMusicShop": {
+      "selected_wem_ids": [
+        "426647940",
+        "451149765"
+      ],
+      "wem_paths": {
+        "426647940": "Phoenix/Content/WwiseAudio/windows/de-de/426647940.wem",
+        "451149765": "Phoenix/Content/WwiseAudio/windows/de-de/451149765.wem"
+      }
+    },
+    "VENDORQuillShop": {
+      "selected_wem_ids": [
+        "560433219"
+      ],
+      "wem_paths": {
+        "560433219": "Phoenix/Content/WwiseAudio/windows/de-de/560433219.wem"
+      }
+    },
+    "VENDORTeaShop": {
+      "selected_wem_ids": [
+        "948727384",
+        "692415368",
+        "926711671"
+      ],
+      "wem_paths": {
+        "948727384": "Phoenix/Content/WwiseAudio/windows/de-de/948727384.wem",
+        "692415368": "Phoenix/Content/WwiseAudio/windows/de-de/692415368.wem",
+        "926711671": "Phoenix/Content/WwiseAudio/windows/de-de/926711671.wem"
+      }
+    },
+    "VictorRookwood": {
+      "selected_wem_ids": [
+        "234778560",
+        "1015900646"
+      ],
+      "wem_paths": {
+        "234778560": "Phoenix/Content/WwiseAudio/windows/de-de/234778560.wem",
+        "1015900646": "Phoenix/Content/WwiseAudio/windows/de-de/1015900646.wem"
+      }
+    },
+    "VioletMcDowell": {
+      "selected_wem_ids": [
+        "949271327",
+        "558780495"
+      ],
+      "wem_paths": {
+        "949271327": "Phoenix/Content/WwiseAudio/windows/de-de/949271327.wem",
+        "558780495": "Phoenix/Content/WwiseAudio/windows/de-de/558780495.wem"
+      }
+    },
+    "WigotSpitchwick": {
+      "selected_wem_ids": [
+        "699634632",
+        "1068327930"
+      ],
+      "wem_paths": {
+        "699634632": "Phoenix/Content/WwiseAudio/windows/de-de/699634632.wem",
+        "1068327930": "Phoenix/Content/WwiseAudio/windows/de-de/1068327930.wem"
+      }
+    },
+    "ZenobiaNoke": {
+      "selected_wem_ids": [
+        "396896599",
+        "446306159"
+      ],
+      "wem_paths": {
+        "396896599": "Phoenix/Content/WwiseAudio/windows/de-de/396896599.wem",
+        "446306159": "Phoenix/Content/WwiseAudio/windows/de-de/446306159.wem"
+      }
+    }
+  }
+}

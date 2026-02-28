@@ -112,7 +112,7 @@ def log_llm_event(
     Log an LLM call event.
 
     Args:
-        model: Model name (e.g., "google/gemini-3-flash-preview")
+        model: Model name (e.g., "google/gemini-3-flash-preview:nitro")
         context: Context of the call ("chat", "target_selection", "interjection", "vision", "sentiment")
         input_tokens: Number of input tokens used
         output_tokens: Number of output tokens generated
@@ -266,7 +266,7 @@ if __name__ == "__main__":
 
     # Test LLM event
     eid1 = log_llm_event(
-        model="google/gemini-3-flash-preview",
+        model="google/gemini-3-flash-preview:nitro",
         context="chat",
         input_tokens=150,
         output_tokens=42,

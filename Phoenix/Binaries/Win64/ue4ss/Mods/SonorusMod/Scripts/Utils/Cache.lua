@@ -186,16 +186,21 @@ local function GetEntityCache(entityType)
     return store.entities[entityType]
 end
 
----Add entity to cache (deduped)
+---Add entity to cache (deduped by GetFullName since userdata refs vary)
 ---@param entityType string
 ---@param actor any UObject actor
 function Cache.AddEntity(entityType, actor)
     if not IsValid(actor) then return end
 
     local cache = GetEntityCache(entityType)
-    if cache.set[actor] then return end
 
-    cache.set[actor] = true
+    local fullName = nil
+    pcall(function() fullName = actor:GetFullName() end)
+    if not fullName then return end
+
+    if cache.set[fullName] then return end
+
+    cache.set[fullName] = actor
     table.insert(cache.list, actor)
 end
 
@@ -214,18 +219,20 @@ function Cache.CleanEntities(entityType, interval)
     cache.lastCleanup = now
 
     local validList = {}
+    local newSet = {}
     local removedCount = 0
 
-    for _, entity in ipairs(cache.list) do
+    for fullName, entity in pairs(cache.set) do
         if IsValid(entity) then
             table.insert(validList, entity)
+            newSet[fullName] = entity
         else
-            cache.set[entity] = nil
             removedCount = removedCount + 1
         end
     end
 
     cache.list = validList
+    cache.set = newSet
 
     if removedCount > 0 then
         print(string.format("[Cache] Cleaned %d invalid %s, %d remain",
@@ -301,6 +308,17 @@ end
 function Cache.IsEntityCacheReady(entityType)
     local cache = GetEntityCache(entityType)
     return cache.initialized
+end
+
+---Reset entity cache (clear initialized flag, allowing re-initialization)
+---Use when cache is empty but was initialized (e.g., all entities became invalid)
+---@param entityType string
+function Cache.ResetEntityCache(entityType)
+    local cache = GetEntityCache(entityType)
+    cache.initialized = false
+    cache.list = {}
+    cache.set = {}
+    -- Note: Don't clear hookRegistered - spawn hooks should persist
 end
 
 -- ============================================

@@ -20,7 +20,7 @@
     "desc": "Professor Ronen's Charms classroom"
   },
   "ClockTowerCourtyard": {
-    "name": "Clock Tower Courtyard ",
+    "name": "Clock Tower Courtyard",
     "desc": "The Clock Tower Courtyard of Hogwarts castle"
   },
   "CoastArm": {
@@ -186,7 +186,7 @@
     "desc": "The Transfiguration Courtyard of Hogwarts castle"
   },
   "TrophyRoom": {
-    "name": "Trophy Room ",
+    "name": "Trophy Room",
     "desc": "The Trophy Room of Hogwarts castle"
   },
   "Undercroft": {
@@ -198,5 +198,586 @@
   },
   "WestHogwarts": {
     "name": "Feldcroft Region"
+  },
+
+  "HM_3BroomsBar": {
+    "name": "Three Broomsticks",
+    "desc": "A popular pub and inn renowned for its Butterbeers and warm atmosphere. A favourite among Hogwarts students."
+  },
+  "HM_AlbieWeekes": {
+    "name": "Spintwitches Sporting Needs"
+  },
+  "HM_AugustusHill": {
+    "name": "Gladrags Wizardwear"
+  },
+  "HM_BeastShop": {
+    "name": "Brood and Peck",
+    "desc": "A beast supply shop stocked with the latest and greatest in beast byproducts"
+  },
+  "HM_CalliopeSnelling": {
+    "name": "Madam Snelling's Tress Emporium"
+  },
+  "HM_CeridwensCauldrons": {
+    "name": "Ceridwen's Cauldrons"
+  },
+  "HM_DervishnBanges": {
+    "name": "Dervish and Banges"
+  },
+  "HM_DogweednDeathcap": {
+    "name": "Dogweed and Deathcap",
+    "desc": "A plant shop for all sorts magical flora and seeds"
+  },
+  "HM_ExtortionistHideout_Dungeon": {
+    "name": "Ashwinder Hideout",
+    "desc": "The primary gathering place for Rookwood's infamous band of nefarious extortionists"
+  },
+  "HM_FlorenceGreen": {
+    "name": "Dogweed and Deathcap"
+  },
+  "HM_GerboldOllivander": {
+    "name": "Ollivanders"
+  },
+  "HM_GladragsWizardwear": {
+    "name": "Gladrags Wizardwear",
+    "desc": "A clothing shop for both the elegant and eccentric wizard. It has two additional locations in London and Paris."
+  },
+  "HM_HairdressingSalon": {
+    "name": "Madam Snelling's Tress Emporium",
+    "desc": "A hairdressing salon run by Calliope Snelling that offers the latest hairstyles"
+  },
+  "HM_Hogshead": {
+    "name": "Hog's Head",
+    "desc": "A pub and inn known for its unsavoury patrons and general uncleanliness"
+  },
+  "HM_HOGSHEADALLEY": {
+    "name": "Hog's Head Alley"
+  },
+  "HM_Honeydukes": {
+    "name": "Honeydukes",
+    "desc": "A sweet shop stocked with a variety of wizarding confections, but is known best for its fudge. It is, naturally, very popular with Hogwarts students."
+  },
+  "HM_JPippensPotions": {
+    "name": "J. Pippin's Potions",
+    "desc": "An apothecary that carries a wide selection of potions and potions ingredients"
+  },
+  "HM_LeonaPeck": {
+    "name": "Brood and Peck"
+  },
+  "HM_LOWERHIGHSTREET": {
+    "name": "Lower High Street"
+  },
+  "HM_MadamPuddifootsTea": {
+    "name": "Steepley and Sons",
+    "desc": "Hogsmeade's local tea shop. It offers a wide selection of fine teas and confections."
+  },
+  "HM_MagicNeep": {
+    "name": "The Magic Neep",
+    "desc": "Hogsmeade's supplier of fresh produce, seeds and fertiliser"
+  },
+  "HM_MusicShop": {
+    "name": "Flutes and Lutes"
+  },
+  "HM_Ollivanders": {
+    "name": "Ollivanders",
+    "desc": "A branch of the renowned wand shop owned and operated by the Ollivander wandmaking family since 382 B.C."
+  },
+  "HM_PercivalPippin": {
+    "name": "J. Pippin's Potions"
+  },
+  "HM_PostOffice": {
+    "name": "Hogsmeade Post Office"
+  },
+  "HM_QUIDDITCH": {
+    "name": "Spintwitches Sporting Needs"
+  },
+  "HM_RIVERSEDGE": {
+    "name": "Rivers Edge"
+  },
+  "HM_ScrivenshaftsQuillShop": {
+    "name": "Scrivenshaft's Quill Shop",
+    "desc": "A quill shop with a selection of quills ranging from the very basic to the extravagant and charmed"
+  },
+  "HM_SecondHandShop": {
+    "name": "Bingle & Blatch"
+  },
+  "HM_Spintwitches": {
+    "name": "Spintwitches Sporting Needs",
+    "desc": "A sporting goods shop that sells a variety of brooms"
+  },
+  "HM_TheGraveyard": {
+    "name": "Hogsmeade Graveyard",
+    "desc": "Where Hogsmeade residents who have passed are buried"
+  },
+  "HM_TheOldFool": {
+    "name": "The Old Fool",
+    "desc": "An abandoned old building in Hogsmeade"
+  },
+  "HM_ThePlaza": {
+    "name": "Hogsmeade Square",
+    "desc": "The central square in Hogsmeade"
+  },
+  "HM_ThreeBroomsticks": {
+    "name": "The Three Broomsticks",
+    "desc": "The Three Broomsticks Inn is the most esteemed pub in Hogsmeade, where conversation and Butterbeer flow freely."
+  },
+  "HM_TimothyTeasdale": {
+    "name": "The Magic Neep"
+  },
+  "HM_TomesnScrolls": {
+    "name": "Tomes and Scrolls",
+    "desc": "A specialty bookshop with wares that fulfil the promise of its name"
+  },
+  "HM_TWISTEDALLEY": {
+    "name": "Spire Alley"
+  },
+  "HM_UPPERHIGHSTREET": {
+    "name": "Upper High Street"
+  },
+  "HM_WaterMill": {
+    "name": "The Water Mill"
+  },
+  "HM_Zonkos": {
+    "name": "Zonko's Joke Shop",
+    "desc": "A joke and trick shop with a selection of pranking delights that include Biting Teacups, Inflatable Tongues and Dungbombs"
+  },
+
+  "HOG_AstronomyTower": {
+    "name": "Astronomy Tower",
+    "desc": "The tallest tower in Hogwarts and the location where Astronomy class are conducted"
+  },
+  "HOG_ASTRONOMYTOWER_ROOMOFREQ": {
+    "name": "The Room of Requirement",
+    "desc": "A secret room suited to the seeker's needs – where a student can hone their Potion-Making, Herbology and Care of Beasts skills"
+  },
+  "HOG_ASTRONOMYWINGKL": {
+    "name": "Astronomy Wing",
+    "desc": "The wing of Hogwarts comprising the Astronomy tower, the highest spire in Hogwarts, the Defence against the Dark Arts tower and the Transfiguration courtyard"
+  },
+  "HOG_BellTower": {
+    "name": "Bell Tower"
+  },
+  "HOG_BellTowers": {
+    "name": "Bell Tower",
+    "desc": "The large double towers"
+  },
+  "HOG_Boathouse": {
+    "name": "Boathouse",
+    "desc": "The old wooden building used to store the boats that carry the first-years across the lake to the castle"
+  },
+  "HOG_BoathouseStairway": {
+    "name": "Boathouse Stairway",
+    "desc": "The stairway that leads to the Boathouse"
+  },
+  "HOG_CentralHall": {
+    "name": "Central Hall",
+    "desc": "A central hallway"
+  },
+  "HOG_CentralTower": {
+    "name": "Central Hall",
+    "desc": "The tower that overlooks much of Hogwarts"
+  },
+  "HOG_Class_Alchemy": {
+    "name": "Alchemy Class",
+    "desc": "The classroom where students learn Alchemy"
+  },
+  "HOG_Class_Arithmancy": {
+    "name": "Arithmancy Class",
+    "desc": "The classroom where students learn Arithmancy"
+  },
+  "HOG_Class_Astronomy": {
+    "name": "Astronomy Class",
+    "desc": "The classroom where students learn about the many wonders of the stars above"
+  },
+  "HOG_Class_Beasts": {
+    "name": "Beasts Class"
+  },
+  "HOG_Class_Charms": {
+    "name": "Charms Class",
+    "desc": "The classroom where students learn to harness the power of Charms"
+  },
+  "HOG_Class_DADA": {
+    "name": "Defence Against the Dark Arts",
+    "desc": "The classroom where students learn Defence against the Dark Arts"
+  },
+  "HOG_Class_Detention": {
+    "name": "Detention",
+    "desc": "The dreary place where students are sent to serve out their punishment for breaking the rules"
+  },
+  "HOG_Class_Divination": {
+    "name": "Divination Class",
+    "desc": "The classroom where Divination students meet"
+  },
+  "HOG_Class_Flying": {
+    "name": "Flying Class",
+    "desc": "The classroom where students learn about Flying"
+  },
+  "HOG_Class_HistoryofMagic": {
+    "name": "History of Magic",
+    "desc": "The classroom where students learn about the vast history of the magical world"
+  },
+  "HOG_Class_MagicalCreatures": {
+    "name": "Beasts Class",
+    "desc": "The classroom where students learn about magical beasts and their various properties"
+  },
+  "HOG_Class_MuggleStudies": {
+    "name": "Muggle Studies",
+    "desc": "The classroom where students learn about the history and lifestyles of Muggles"
+  },
+  "HOG_Class_Music": {
+    "name": "Music Class",
+    "desc": "The classroom where students attend Music class"
+  },
+  "HOG_Class_Potions": {
+    "name": "Potions Class",
+    "desc": "The classroom where students learn to brew magical mixtures"
+  },
+  "HOG_Class_Transfiguration": {
+    "name": "Transfiguration Class",
+    "desc": "The classroom where students hone their skills in Transfiguration"
+  },
+  "HOG_ClockTower": {
+    "name": "Clock Tower",
+    "desc": "One of the oldest and most recognisable towers of Hogwarts, notable for its signature clock"
+  },
+  "HOG_ClockTowerCourtyard": {
+    "name": "Clock Tower Courtyard",
+    "desc": "The courtyard under the shadow of the Clock Tower"
+  },
+  "HOG_DADATower": {
+    "name": "Defence Against the Dark Arts Tower",
+    "desc": "The tower where the Defence Against the Dark Arts class is held"
+  },
+  "HOG_EntranceHall": {
+    "name": "Entrance Hall",
+    "desc": "The elegant entrance hall of Hogwarts"
+  },
+  "HOG_ENTRANCEWINGKL": {
+    "name": "The Bell Tower Wing",
+    "desc": "The Bell Tower Wing of Hogwarts, comprising the Bell Tower Entrance Hall, the Bell Towers and the North Hall"
+  },
+  "HOG_FacultyTower": {
+    "name": "Faculty Tower",
+    "desc": "The tower reserved for professors"
+  },
+  "HOG_Garden": {
+    "name": "Gardens",
+    "desc": "The enchanting garden of Hogwarts"
+  },
+  "HOG_GRANDSTAIRCASEKL": {
+    "name": "The Grand Staircase Tower",
+    "desc": "The area of Hogwarts featuring the Grand Staircase, the Quad Courtyard, Ravenclaw Tower and the Slytherin Dungeons"
+  },
+  "HOG_GrandStaircaseTower": {
+    "name": "Grand Staircase",
+    "desc": "The large, main staircase of Hogwarts"
+  },
+  "HOG_GreatHall": {
+    "name": "Great Hall",
+    "desc": "The magnificent hall where students gather to eat meals and socialise"
+  },
+  "HOG_GreatHall_Gryffindor": {
+    "name": "Gryffindor Table",
+    "desc": "The table where members of Gryffindor house eat"
+  },
+  "HOG_GreatHall_Hufflepuff": {
+    "name": "Hufflepuff Table",
+    "desc": "The table where members of Hufflepuff house eat"
+  },
+  "HOG_GreatHall_Ravenclaw": {
+    "name": "Ravenclaw Table",
+    "desc": "The table where members of Ravenclaw house eat"
+  },
+  "HOG_GreatHall_Slytherin": {
+    "name": "Slytherin Table",
+    "desc": "The table where members of Slytherin house eat"
+  },
+  "HOG_GREATHALLKL": {
+    "name": "The Great Hall",
+    "desc": "The magnificent hall where students gather to eat meals and socialise. The area also comprises the boathouse, viaduct courtyard and Hufflepuff common room."
+  },
+  "HOG_Greenhouses": {
+    "name": "Greenhouses",
+    "desc": "Home to a variety of magical plants and Herbology classes"
+  },
+  "HOG_Grotto": {
+    "name": "The School Grounds"
+  },
+  "HOG_GroundsQ": {
+    "name": "The Grounds",
+    "desc": "The grounds surrounding Hogwarts"
+  },
+  "Hog_Gryffindor_CommonRoom": {
+    "name": "Gryffindor Common Room",
+    "desc": "The room where the members of Gryffindor gather and socialise"
+  },
+  "HOG_GryffindorLowerHallway": {
+    "name": "Gryffindor Lower Hallway"
+  },
+  "HOG_GryffindorTower": {
+    "name": "Gryffindor Tower",
+    "desc": "The tower that houses Gryffindor students"
+  },
+  "HOG_HieroglyphicHall": {
+    "name": "Hieroglyphic Hall"
+  },
+  "HOG_HospitalWing": {
+    "name": "Hospital Wing",
+    "desc": "The school wing where sick and injured students are treated"
+  },
+  "Hog_Hufflepuff_CommonRoom": {
+    "name": "Hufflepuff Common Room",
+    "desc": "The room where the members of Hufflepuff gather and socialise"
+  },
+  "HOG_HufflepuffBasement": {
+    "name": "Hufflepuff Basement",
+    "desc": "The basement that houses Hufflepuff students"
+  },
+  "HOG_Kitchens": {
+    "name": "Kitchens",
+    "desc": "The large room where house-elves prepare every meal"
+  },
+  "HOG_Library": {
+    "name": "Library",
+    "desc": "The place that contains information on every conceivable subject in the wizarding world"
+  },
+  "HOG_Library_MainDesk": {
+    "name": "Librarian's Desk",
+    "desc": "The desk that belongs to the Librarian"
+  },
+  "HOG_Library_Restricted": {
+    "name": "The Restricted Section",
+    "desc": "The part of the library that is forbidden to students because it contains books on subjects too dangerous to be taught at Hogwarts."
+  },
+  "HOG_LIBRARYANNEXKL": {
+    "name": "The Library Annex",
+    "desc": "The Hogwarts library contains information on nearly every conceivable subject in the wizarding world. This area also incudes the greenhouses, the viaduct bridge, and the viaduct entrance."
+  },
+  "HOG_LibraryStorage": {
+    "name": "Library Storage Room",
+    "desc": "A storage room for library materials and supplies"
+  },
+  "HOG_LongGallery": {
+    "name": "Long Gallery"
+  },
+  "HOG_MagicalCreatures": {
+    "name": "Beasts Classroom",
+    "desc": "The classroom where students attend Beasts class"
+  },
+  "HOG_Map_Ravenclaw_GirlStairs": {
+    "name": "Ravenclaw Girls' Dormitory Stairs"
+  },
+  "HOG_MAP_RAVENCLAW_MAINSTAIRS": {
+    "name": "Ravenclaw Main Stairs"
+  },
+  "HOG_NorthHall": {
+    "name": "North Hall",
+    "desc": "The north hallway of Hogwarts"
+  },
+  "HOG_NorthHallBasement": {
+    "name": "Dungeons"
+  },
+  "HOG_NorthTower": {
+    "name": "West Tower",
+    "desc": "One of the smaller towers of Hogwarts"
+  },
+  "HOG_Office_AbrahamRonen": {
+    "name": "Professor Ronen's Office",
+    "desc": "The office and study of Professor Ronen"
+  },
+  "HOG_Office_AesopSharp": {
+    "name": "Professor Sharp's Office",
+    "desc": "The office and study of Professor Sharp"
+  },
+  "HOG_Office_BaiHowin": {
+    "name": "Professor Howin's Office",
+    "desc": "The office and study of Professor Howin"
+  },
+  "HOG_Office_CuthbertBinns": {
+    "name": "Professor Binns's Office",
+    "desc": "The office and study of Professor Binns"
+  },
+  "HOG_Office_DinahHecat": {
+    "name": "Professor Hecat's Office",
+    "desc": "The office and study of Professor Hecat"
+  },
+  "HOG_Office_ElizaMokuwa": {
+    "name": "Madam Kogawa's Office",
+    "desc": "The office and study of Madam Kogawa"
+  },
+  "HOG_Office_Fig": {
+    "name": "Professor Fig's Office",
+    "desc": "The office and study of Professor Fig"
+  },
+  "HOG_Office_IrisAlhambra": {
+    "name": "Professor Hecat's Office",
+    "desc": "The office and study of Professor Hecat"
+  },
+  "HOG_Office_MariAsuka": {
+    "name": "Madam Kogawa's Office",
+    "desc": "The office and study of Madam Kogawa"
+  },
+  "HOG_Office_MatildaWeasley": {
+    "name": "Professor Weasley's Office",
+    "desc": "The office and study of Professor Weasley"
+  },
+  "HOG_Office_MirabelGarlick": {
+    "name": "Professor Garlick's Office",
+    "desc": "The office and study of Professor Garlick"
+  },
+  "HOG_Office_MudiwaOnai": {
+    "name": "Professor Onai's Office",
+    "desc": "The office and study of Professor Onai"
+  },
+  "HOG_Office_PhineasBlack": {
+    "name": "The Headmaster's Office",
+    "desc": "The office of the Headmaster of Hogwarts"
+  },
+  "HOG_Office_PhineasBlackEntrance": {
+    "name": "Headmaster's Office Entrance",
+    "desc": "The entrance to the Headmaster's office"
+  },
+  "HOG_Office_SamirShaw": {
+    "name": "Professor Shah's Office",
+    "desc": "The office and study of Professor Shah"
+  },
+  "HOG_OwlCorridor": {
+    "name": "Owl Corridor",
+    "desc": "A secret corridor"
+  },
+  "HOG_Owlery": {
+    "name": "Owlery",
+    "desc": "The room where the school's owls and students' owls live"
+  },
+  "HOG_Owlery_SecretRoom": {
+    "name": "Secret Room",
+    "desc": "The room that Richard Jackdaw used during his time at Hogwarts"
+  },
+  "HOG_PIP_FrameLibrary": {
+    "name": "Frame Library",
+    "desc": "An old library"
+  },
+  "HOG_PondDock": {
+    "name": "Pond Dock",
+    "desc": "The dock leading to the pond"
+  },
+  "HOG_PotionsClassroom": {
+    "name": "Potions Classroom",
+    "desc": "The shadowy dungeon where Potions is held"
+  },
+  "HOG_PrefectBathroom": {
+    "name": "Prefects' Bathroom"
+  },
+  "HOG_QuadCourtyard": {
+    "name": "Quad Courtyard",
+    "desc": "A large courtyard"
+  },
+  "HOG_QuadEastHall": {
+    "name": "East Quad Hall",
+    "desc": "The East hallway that leads to the Quad Courtyard"
+  },
+  "HOG_QuadNorthHall": {
+    "name": "North Quad Hall",
+    "desc": "The North hallway that leads to the Quad Courtyard"
+  },
+  "HOG_QuadSouthHall": {
+    "name": "South Quad Hall",
+    "desc": "The south hallway that leads to the Quad Courtyard"
+  },
+  "HOG_Ravenclaw_CommonRoom": {
+    "name": "Ravenclaw Common Room",
+    "desc": "The room where the members of Ravenclaw gather and socialise"
+  },
+  "HOG_RavenclawTower": {
+    "name": "Ravenclaw Tower",
+    "desc": "The tower that serves as the home of Ravenclaw house"
+  },
+  "Hog_ReceptionHall": {
+    "name": "Reception Hall"
+  },
+  "HOG_RoomofReqHidden": {
+    "name": "Room of Requirement",
+    "desc": "The hidden room that can only be opened if there is a need"
+  },
+  "HOG_Sanctum": {
+    "name": "The Map Chamber",
+    "desc": "The large ornate cavern formed by mysterious forces"
+  },
+  "HOG_SanctumEntrance_Hog": {
+    "name": "Map Chamber Entrance",
+    "desc": "The entrance to the Map Chamber"
+  },
+  "HOG_SanctumEntrance_OL": {
+    "name": "Mysterious Entryway",
+    "desc": "A mysterious entryway accessible only via the push of a hidden brick"
+  },
+  "HOG_SchoolGrounds": {
+    "name": "School Grounds"
+  },
+  "HOG_Scriptorium": {
+    "name": "Scriptorium"
+  },
+  "HOG_Slytherin_CommonRoom": {
+    "name": "Slytherin Common Room"
+  },
+  "HOG_SlytherinDungeon": {
+    "name": "Slytherin Dungeon"
+  },
+  "HOG_SuspensionBridge": {
+    "name": "Suspension Bridge",
+    "desc": "The suspension bridge of Hogwarts"
+  },
+  "HOG_TransfigurationCourtyard": {
+    "name": "Transfiguration Courtyard",
+    "desc": "The middle courtyard"
+  },
+  "HOG_TrophyRoom": {
+    "name": "Trophy Room",
+    "desc": "The Hogwarts trophy room, where memorialised accomplishments from throughout the ages can be seen on display"
+  },
+  "HOG_Undercroft": {
+    "name": "Undercroft"
+  },
+  "HOG_UndergroundHarbor": {
+    "name": "Underground Harbour",
+    "desc": "The place where the first-years arrive via boat to Hogwarts"
+  },
+  "HOG_ViaductBridge": {
+    "name": "Viaduct Bridge",
+    "desc": "The large stone bridge that spans a large chasm"
+  },
+  "HOG_ViaductCourtyard": {
+    "name": "Viaduct Courtyard",
+    "desc": "The entrance courtyard of Hogwarts"
+  },
+  "HOG_ViaductEntrance": {
+    "name": "Viaduct Entrance",
+    "desc": "The entrance to the Viaduct"
+  },
+  "HOG_WaterCave": {
+    "name": "Water Cave"
+  },
+  "HOG_WestHall": {
+    "name": "West Hall"
+  },
+  "HOG_WoodenBridge": {
+    "name": "Wooden Bridge"
+  },
+  "Hogsmeade_Desc": {
+    "name": "Hogsmeade",
+    "desc": "The only all-wizarding village in Britain"
+  },
+  "HogsmeadeGrounds": {
+    "name": "Hogsmeade"
+  },
+  "HogwartsGrounds": {
+    "name": "Hogwarts Grounds",
+    "desc": "The grounds surrounding Hogwarts castle"
+  },
+  "HogwartsInitialRegion": {
+    "name": "Hogwarts"
+  },
+  "HERBOLOGY_FORGOTTEN_DUNGEON": {
+    "name": "Hidden Herbology Corridor",
+    "desc": "A lost corridor in Hogwarts rumoured to contain a former Herbology professor's dangerous magical plants"
   }
 }

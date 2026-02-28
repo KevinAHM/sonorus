@@ -22,12 +22,197 @@ DISABLE_3D_POSITIONING = False
 try:
     from openal import (
         oalInit, oalQuit, oalGetListener, oalSetStreamBufferCount,
-        Source, SourceStream, Buffer, WaveFile, AL_PLAYING
+        oalInitHRTF,  # PyOpenAL-HRTF extension
+        Source, SourceStream, Buffer, WaveFile, AL_PLAYING, AL_STOPPED
     )
     OPENAL_AVAILABLE = True
+    HRTF_AVAILABLE = True
 except ImportError:
-    OPENAL_AVAILABLE = False
-    print("[WARN] PyOpenAL not available")
+    try:
+        # Fallback to standard PyOpenAL without HRTF
+        from openal import (
+            oalInit, oalQuit, oalGetListener, oalSetStreamBufferCount,
+            Source, SourceStream, Buffer, WaveFile, AL_PLAYING, AL_STOPPED
+        )
+        OPENAL_AVAILABLE = True
+        HRTF_AVAILABLE = False
+        print("[WARN] PyOpenAL-HRTF not available, using standard PyOpenAL")
+    except ImportError:
+        OPENAL_AVAILABLE = False
+        HRTF_AVAILABLE = False
+        AL_STOPPED = 0x4114  # Fallback value
+        print("[WARN] PyOpenAL not available")
+
+# OpenAL EFX imports for reverb (via ctypes - PyOpenAL doesn't expose EFX)
+EFX_AVAILABLE = False
+_efx = None  # Module-level EFX function container
+
+try:
+    import ctypes
+    from openal import al
+
+    # EFX constants
+    AL_EFFECTSLOT_EFFECT = 0x0001
+    AL_EFFECT_TYPE = 0x8001
+    AL_EFFECT_EAXREVERB = 0x8000
+    AL_EFFECT_REVERB = 0x0001
+    AL_AUXILIARY_SEND_FILTER = 0x10005
+    AL_EFFECTSLOT_NULL = 0
+
+    # EAX Reverb parameters
+    AL_EAXREVERB_DENSITY = 0x0001
+    AL_EAXREVERB_DIFFUSION = 0x0002
+    AL_EAXREVERB_GAIN = 0x0003
+    AL_EAXREVERB_GAINHF = 0x0004
+    AL_EAXREVERB_GAINLF = 0x0005
+    AL_EAXREVERB_DECAY_TIME = 0x0006
+    AL_EAXREVERB_DECAY_HFRATIO = 0x0007
+    AL_EAXREVERB_DECAY_LFRATIO = 0x0008
+    AL_EAXREVERB_REFLECTIONS_GAIN = 0x0009
+    AL_EAXREVERB_REFLECTIONS_DELAY = 0x000A
+    AL_EAXREVERB_LATE_REVERB_GAIN = 0x000C
+    AL_EAXREVERB_LATE_REVERB_DELAY = 0x000D
+    AL_EAXREVERB_ECHO_TIME = 0x000F
+    AL_EAXREVERB_ECHO_DEPTH = 0x0010
+    AL_EAXREVERB_MODULATION_TIME = 0x0011
+    AL_EAXREVERB_MODULATION_DEPTH = 0x0012
+    AL_EAXREVERB_AIR_ABSORPTION_GAINHF = 0x0013
+    AL_EAXREVERB_HFREFERENCE = 0x0014
+    AL_EAXREVERB_LFREFERENCE = 0x0015
+    AL_EAXREVERB_ROOM_ROLLOFF_FACTOR = 0x0016
+
+    class EFXFunctions:
+        """Container for EFX functions loaded via ctypes"""
+        def __init__(self):
+            self.available = False
+            self.alGenEffects = None
+            self.alDeleteEffects = None
+            self.alEffecti = None
+            self.alEffectf = None
+            self.alGenAuxiliaryEffectSlots = None
+            self.alDeleteAuxiliaryEffectSlots = None
+            self.alAuxiliaryEffectSloti = None
+            self.alSource3i = None
+            self.alGetError = None
+
+    _efx = EFXFunctions()
+
+    def _init_efx_functions():
+        """Initialize EFX functions from OpenAL-Soft DLL"""
+        global _efx, EFX_AVAILABLE
+
+        # Find OpenAL DLL - try common locations
+        dll_paths = [
+            # Embedded Python location
+            os.path.join(SONORUS_DIR, "python", "Lib", "site-packages", "openal", "soft_oal_64.dll"),
+            # Common names in PATH
+            "soft_oal_64.dll",
+            "OpenAL32.dll",
+            "soft_oal.dll",
+            "openal32.dll",
+        ]
+        openal_dll = None
+
+        for path in dll_paths:
+            try:
+                openal_dll = ctypes.CDLL(path)
+                print(f"[Audio3D] Loaded OpenAL DLL: {path}")
+                break
+            except OSError:
+                continue
+
+        if not openal_dll:
+            print("[Audio3D] Could not load OpenAL DLL for EFX")
+            return False
+
+        try:
+            # Get alGetProcAddress to load EFX extension functions
+            alGetProcAddress = openal_dll.alGetProcAddress
+            alGetProcAddress.restype = ctypes.c_void_p
+            alGetProcAddress.argtypes = [ctypes.c_char_p]
+
+            # Load EFX functions
+            def get_func(name, restype, argtypes):
+                addr = alGetProcAddress(name.encode('utf-8'))
+                if not addr:
+                    print(f"[Audio3D] alGetProcAddress failed for: {name}")
+                    return None
+                func_type = ctypes.CFUNCTYPE(restype, *argtypes)
+                return func_type(addr)
+
+            # alGenEffects(sizei n, uint *effects)
+            _efx.alGenEffects = get_func("alGenEffects", None,
+                [ctypes.c_int, ctypes.POINTER(ctypes.c_uint)])
+
+            # alDeleteEffects(sizei n, uint *effects)
+            _efx.alDeleteEffects = get_func("alDeleteEffects", None,
+                [ctypes.c_int, ctypes.POINTER(ctypes.c_uint)])
+
+            # alEffecti(uint effect, enum param, int value)
+            _efx.alEffecti = get_func("alEffecti", None,
+                [ctypes.c_uint, ctypes.c_int, ctypes.c_int])
+
+            # alEffectf(uint effect, enum param, float value)
+            _efx.alEffectf = get_func("alEffectf", None,
+                [ctypes.c_uint, ctypes.c_int, ctypes.c_float])
+
+            # alGenAuxiliaryEffectSlots(sizei n, uint *slots)
+            _efx.alGenAuxiliaryEffectSlots = get_func("alGenAuxiliaryEffectSlots", None,
+                [ctypes.c_int, ctypes.POINTER(ctypes.c_uint)])
+
+            # alDeleteAuxiliaryEffectSlots(sizei n, uint *slots)
+            _efx.alDeleteAuxiliaryEffectSlots = get_func("alDeleteAuxiliaryEffectSlots", None,
+                [ctypes.c_int, ctypes.POINTER(ctypes.c_uint)])
+
+            # alAuxiliaryEffectSloti(uint slot, enum param, int value)
+            _efx.alAuxiliaryEffectSloti = get_func("alAuxiliaryEffectSloti", None,
+                [ctypes.c_uint, ctypes.c_int, ctypes.c_int])
+
+            # alSource3i(uint source, enum param, int v1, int v2, int v3)
+            _efx.alSource3i = get_func("alSource3i", None,
+                [ctypes.c_uint, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int])
+
+            # alSourceiv(uint source, enum param, int *values) - for aux send filter
+            _efx.alSourceiv = get_func("alSourceiv", None,
+                [ctypes.c_uint, ctypes.c_int, ctypes.POINTER(ctypes.c_int)])
+
+            # alGetError()
+            _efx.alGetError = openal_dll.alGetError
+            _efx.alGetError.restype = ctypes.c_int
+            _efx.alGetError.argtypes = []
+
+            # Check all required functions loaded
+            func_names = ["alGenEffects", "alEffecti", "alEffectf",
+                         "alGenAuxiliaryEffectSlots", "alAuxiliaryEffectSloti", "alSource3i"]
+            required = [_efx.alGenEffects, _efx.alEffecti, _efx.alEffectf,
+                       _efx.alGenAuxiliaryEffectSlots, _efx.alAuxiliaryEffectSloti,
+                       _efx.alSource3i]
+
+            missing = [name for name, func in zip(func_names, required) if func is None]
+
+            if not missing:
+                _efx.available = True
+                EFX_AVAILABLE = True
+                print("[Audio3D] EFX functions loaded via ctypes")
+                return True
+            else:
+                print(f"[Audio3D] Missing EFX functions: {missing}")
+                return False
+
+        except Exception as e:
+            print(f"[Audio3D] Failed to load EFX functions: {e}")
+            return False
+
+except ImportError as e:
+    print(f"[WARN] OpenAL EFX not available: {e}")
+
+# Reverb presets
+try:
+    from audio.reverb import get_preset_for_auxbus, get_preset_name_for_auxbus
+    REVERB_PRESETS_AVAILABLE = True
+except ImportError:
+    REVERB_PRESETS_AVAILABLE = False
+    print("[WARN] Reverb presets not available")
 
 # ============================================
 # Position Reader - reads from socket with interpolation
@@ -221,11 +406,19 @@ class TTSStream:
     """
     Stream adapter for real-time TTS PCM chunks.
     Implements the interface expected by PyOpenAL's SourceStream.
+
+    Large TTS chunks are split into smaller pieces (~4KB, ~42ms at 48kHz)
+    for smoother OpenAL buffer management and to prevent playback gaps.
     """
+
+    # Target chunk size for OpenAL buffers: ~4KB = ~42ms at 48kHz mono 16-bit
+    # PyOpenAL recommends 20-50ms buffers for smooth streaming
+    CHUNK_SIZE = 4096
 
     def __init__(self, sample_rate=44100, channels=1, bits=16):
         # Required by PyOpenAL
-        self.frequency = sample_rate
+        self.sample_rate = sample_rate
+        self.frequency = sample_rate  # PyOpenAL alias
         self.channels = channels
         self.bits = bits
         self.length = 0  # Unknown length for streaming
@@ -233,6 +426,7 @@ class TTSStream:
         # Internal state
         self.buffer_queue = queue.Queue()
         self.done = False
+        self.stream_complete = False  # Alias for compatibility with spatial_lav
         self.exists = True
         self._total_fed = 0
         self.playback_started = False  # Set by Audio3DPlayer after source.play()
@@ -241,16 +435,21 @@ class TTSStream:
         self._chunk_count = 0
         self._silence_count = 0
         self._total_pulled = 0
+        self._split_count = 0      # Number of sub-chunks created from splitting
         self._feed_times = []      # Timestamps of feed() calls
         self._pull_times = []      # Timestamps of get_buffer() calls
-        self._chunk_sizes = []     # Size of each chunk fed
+        self._chunk_sizes = []     # Size of each chunk fed (before splitting)
         self._queue_depths = []    # Queue depth at each pull
         self._underrun_times = []  # When silence was returned (elapsed seconds)
         self._first_feed_time = None
         self._first_pull_time = None
 
     def feed(self, pcm_bytes):
-        """Feed PCM data chunk (called by TTS provider)"""
+        """Feed PCM data chunk (called by TTS provider).
+
+        Large chunks are automatically split into smaller ~4KB pieces
+        for smoother OpenAL buffer management.
+        """
         if self.exists and pcm_bytes:
             now = time.time()
 
@@ -279,7 +478,20 @@ class TTSStream:
             if len(pcm_bytes) % 2 != 0:
                 print(f"[TTSStream] WARNING: Chunk #{self._chunk_count} has ODD size {len(pcm_bytes)} (misaligned PCM)")
 
-            self.buffer_queue.put(pcm_bytes)
+            # Split large chunks into smaller pieces for smoother OpenAL buffering
+            # This prevents gaps caused by PyOpenAL struggling with huge buffers
+            if len(pcm_bytes) > self.CHUNK_SIZE:
+                num_pieces = 0
+                for i in range(0, len(pcm_bytes), self.CHUNK_SIZE):
+                    piece = pcm_bytes[i:i + self.CHUNK_SIZE]
+                    self.buffer_queue.put(piece)
+                    num_pieces += 1
+                self._split_count += num_pieces
+                # Log splitting on first large chunk only
+                if self._chunk_count == 1:
+                    print(f"[TTSStream] Split {len(pcm_bytes)} bytes into {num_pieces} x ~{self.CHUNK_SIZE} byte pieces")
+            else:
+                self.buffer_queue.put(pcm_bytes)
 
     def finish(self):
         """Signal end of TTS stream"""
@@ -287,6 +499,7 @@ class TTSStream:
         remaining = self.buffer_queue.qsize()
         print(f"[TTSStream] FINISH called at {elapsed:.2f}s, {remaining} chunks remaining in queue, total fed: {self._total_fed} bytes")
         self.done = True
+        self.stream_complete = True
 
     def get_buffer(self):
         """Get next buffer (called by PyOpenAL SourceStream)"""
@@ -338,7 +551,7 @@ class TTSStream:
         """Print streaming summary on completion - helps diagnose audio issues"""
         duration = self._pull_times[-1] - self._first_pull_time if self._pull_times else 0
         print(f"\n[TTSStream] === STREAMING SUMMARY ===")
-        print(f"[TTSStream] Total chunks fed: {self._chunk_count}")
+        print(f"[TTSStream] Total chunks fed: {self._chunk_count} (split into {self._split_count} pieces)")
         print(f"[TTSStream] Total bytes fed: {self._total_fed}")
         print(f"[TTSStream] Total bytes pulled: {self._total_pulled}")
         print(f"[TTSStream] Total underruns (silence gaps): {self._silence_count}")
@@ -380,6 +593,7 @@ class Audio3DPlayer:
     """
     3D audio player using PyOpenAL.
     Handles both file playback and streaming.
+    Supports EFX reverb effects.
     """
 
     def __init__(self):
@@ -390,12 +604,106 @@ class Audio3DPlayer:
         self._stop_event = threading.Event()
         self.abort_flag = False  # For interruption support
 
-    def abort(self):
-        """Signal playback to stop immediately (for interruption handling)."""
+        # EFX reverb state
+        self._efx_effect = None
+        self._efx_slot = None
+        self._current_reverb = None  # Name of current preset
+
+        # Pause state for soft interrupt
+        self._pause_start: float = 0
+        self._total_pause_duration: float = 0
+        self._paused = False
+        self._source_gain: float = 1.5  # Stored for restore on resume
+
+    def pause(self):
+        """Pause audio playback with gain fade (soft interrupt)."""
+        if self._paused or not self.source:
+            return
+        self._pause_start = time.time()
+        # Fade gain to 0
+        gain = self._source_gain
+        steps = 5
+        step_time = 0.01
+        for i in range(steps - 1, -1, -1):
+            try:
+                self.source.set_gain(gain * i / steps)
+            except Exception:
+                break
+            time.sleep(step_time)
+        try:
+            self.source.pause()
+        except Exception:
+            pass
+        self._paused = True
+        print("[Audio3D] Paused (soft interrupt)")
+
+    def resume(self) -> float:
+        """Resume audio playback with gain fade. Returns total pause duration."""
+        if not self._paused or not self.source:
+            return 0.0
+        if self._pause_start > 0:
+            self._total_pause_duration += time.time() - self._pause_start
+            self._pause_start = 0
+        self._paused = False
+        try:
+            self.source.set_gain(0)
+            self.source.play()
+        except Exception:
+            pass
+        # Fade gain back to original
+        gain = self._source_gain
+        steps = 5
+        step_time = 0.01
+        for i in range(1, steps + 1):
+            try:
+                self.source.set_gain(gain * i / steps)
+            except Exception:
+                break
+            if i < steps:
+                time.sleep(step_time)
+        print(f"[Audio3D] Resumed (total paused: {self._total_pause_duration:.1f}s)")
+        return self._total_pause_duration
+
+    @property
+    def is_paused(self):
+        return self._paused
+
+    def abort(self, fade_ms=100):
+        """Stop playback with a short fade out.
+
+        Args:
+            fade_ms: Fade duration in milliseconds (default 100ms)
+        """
+        if not self.source:
+            return
+
         self.abort_flag = True
 
+        # Clean up pause state
+        was_paused = self._paused
+        self._paused = False
+        self._pause_start = 0
+        self._total_pause_duration = 0
+
+        # Only fade if not already paused (gain is already 0 when paused)
+        if fade_ms > 0 and not was_paused:
+            steps = max(1, fade_ms // 10)
+            step_time = (fade_ms / 1000.0) / steps
+            for i in range(steps - 1, -1, -1):
+                try:
+                    self.source.set_gain(i / steps)
+                except Exception:
+                    break
+                time.sleep(step_time)
+
+        try:
+            self.source.stop()
+            print(f"[Audio3D] Playback aborted (fade={fade_ms}ms)")
+        except Exception as e:
+            print(f"[Audio3D] Source stop error: {e}")
+
     def init(self):
-        """Initialize OpenAL"""
+        """Initialize OpenAL with HRTF and EFX"""
         if not OPENAL_AVAILABLE:
             print("[Audio3D] PyOpenAL not available")
             return False
@@ -403,15 +711,184 @@ class Audio3DPlayer:
         try:
             oalInit()
             oalSetStreamBufferCount(16)  # More buffers for streaming
+
+            # Initialize HRTF for binaural 3D audio
+            if HRTF_AVAILABLE:
+                try:
+                    oalInitHRTF()
+                    print("[Audio3D] OpenAL initialized with HRTF")
+                except Exception as e:
+                    print(f"[Audio3D] HRTF init failed, using standard panning: {e}")
+            else:
+                print("[Audio3D] OpenAL initialized (no HRTF)")
+
             self.initialized = True
-            print("[Audio3D] OpenAL initialized")
+
+            # Initialize EFX functions (must be done after oalInit creates context)
+            if _efx is not None and not _efx.available:
+                _init_efx_functions()
+
+            # Initialize EFX reverb effect and slot
+            if _efx is not None and _efx.available:
+                self._init_efx()
+
             return True
         except Exception as e:
             print(f"[Audio3D] Failed to initialize: {e}")
             return False
 
+    def _init_efx(self):
+        """Initialize EFX effect and slot for reverb"""
+        global _efx
+        if not _efx or not _efx.available:
+            print("[Audio3D] EFX functions not available")
+            return
+
+        try:
+            # Generate effect (ctypes needs pointer)
+            effect = ctypes.c_uint(0)
+            _efx.alGenEffects(1, ctypes.byref(effect))
+            if effect.value == 0:
+                print("[Audio3D] Failed to generate EFX effect")
+                return
+
+            # Clear any pending errors
+            _efx.alGetError()
+
+            # Set effect type to EAX Reverb
+            _efx.alEffecti(effect.value, AL_EFFECT_TYPE, AL_EFFECT_EAXREVERB)
+            err = _efx.alGetError()
+            if err:
+                print(f"[Audio3D] EAX Reverb not supported (error {hex(err)}), trying standard reverb")
+                _efx.alEffecti(effect.value, AL_EFFECT_TYPE, AL_EFFECT_REVERB)
+                err = _efx.alGetError()
+                if err:
+                    print(f"[Audio3D] Standard reverb also failed (error {hex(err)})")
+                    _efx.alDeleteEffects(1, ctypes.byref(effect))
+                    return
+
+            # Generate effect slot
+            slot = ctypes.c_uint(0)
+            _efx.alGenAuxiliaryEffectSlots(1, ctypes.byref(slot))
+            if slot.value == 0:
+                print("[Audio3D] Failed to generate EFX slot")
+                _efx.alDeleteEffects(1, ctypes.byref(effect))
+                return
+
+            # Attach effect to slot
+            _efx.alAuxiliaryEffectSloti(slot.value, AL_EFFECTSLOT_EFFECT, effect.value)
+            err = _efx.alGetError()
+            if err:
+                print(f"[Audio3D] Failed to attach effect to slot (error {hex(err)})")
+                _efx.alDeleteAuxiliaryEffectSlots(1, ctypes.byref(slot))
+                _efx.alDeleteEffects(1, ctypes.byref(effect))
+                return
+
+            self._efx_effect = effect.value
+            self._efx_slot = slot.value
+            print(f"[Audio3D] EFX reverb initialized (effect={effect.value}, slot={slot.value})")
+
+        except Exception as e:
+            print(f"[Audio3D] EFX init error: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def set_reverb(self, auxbus_name: str, send_level: float = 1.0):
+        """
+        Set reverb preset based on game AuxBus name.
+
+        Args:
+            auxbus_name: The AuxBus name from Lua (e.g., "OutdoorConvolution")
+            send_level: Wet/dry mix (0.0-1.0), from game's SendLevel
+        """
+        global _efx
+        if not _efx or not _efx.available or not self._efx_effect:
+            return
+
+        if not REVERB_PRESETS_AVAILABLE:
+            return
+
+        try:
+            preset = get_preset_for_auxbus(auxbus_name)
+            preset_name = get_preset_name_for_auxbus(auxbus_name)
+
+            # Apply preset parameters using ctypes
+            _efx.alEffectf(self._efx_effect, AL_EAXREVERB_DENSITY, preset["density"])
+            _efx.alEffectf(self._efx_effect, AL_EAXREVERB_DIFFUSION, preset["diffusion"])
+            _efx.alEffectf(self._efx_effect, AL_EAXREVERB_GAIN, preset["gain"] * send_level)
+            _efx.alEffectf(self._efx_effect, AL_EAXREVERB_GAINHF, preset["gain_hf"])
+            _efx.alEffectf(self._efx_effect, AL_EAXREVERB_GAINLF, preset["gain_lf"])
+            _efx.alEffectf(self._efx_effect, AL_EAXREVERB_DECAY_TIME, preset["decay_time"])
+            _efx.alEffectf(self._efx_effect, AL_EAXREVERB_DECAY_HFRATIO, preset["decay_hf_ratio"])
+            _efx.alEffectf(self._efx_effect, AL_EAXREVERB_DECAY_LFRATIO, preset["decay_lf_ratio"])
+            _efx.alEffectf(self._efx_effect, AL_EAXREVERB_REFLECTIONS_GAIN, preset["reflections_gain"])
+            _efx.alEffectf(self._efx_effect, AL_EAXREVERB_REFLECTIONS_DELAY, preset["reflections_delay"])
+            _efx.alEffectf(self._efx_effect, AL_EAXREVERB_LATE_REVERB_GAIN, preset["late_reverb_gain"])
+            _efx.alEffectf(self._efx_effect, AL_EAXREVERB_LATE_REVERB_DELAY, preset["late_reverb_delay"])
+            _efx.alEffectf(self._efx_effect, AL_EAXREVERB_ECHO_TIME, preset["echo_time"])
+            _efx.alEffectf(self._efx_effect, AL_EAXREVERB_ECHO_DEPTH, preset["echo_depth"])
+            _efx.alEffectf(self._efx_effect, AL_EAXREVERB_MODULATION_TIME, preset["modulation_time"])
+            _efx.alEffectf(self._efx_effect, AL_EAXREVERB_MODULATION_DEPTH, preset["modulation_depth"])
+            _efx.alEffectf(self._efx_effect, AL_EAXREVERB_AIR_ABSORPTION_GAINHF, preset["air_absorption_gain_hf"])
+            _efx.alEffectf(self._efx_effect, AL_EAXREVERB_HFREFERENCE, preset["hf_reference"])
+            _efx.alEffectf(self._efx_effect, AL_EAXREVERB_LFREFERENCE, preset["lf_reference"])
+            _efx.alEffectf(self._efx_effect, AL_EAXREVERB_ROOM_ROLLOFF_FACTOR, preset["room_rolloff_factor"])
+
+            # Update effect slot with new parameters
+            _efx.alAuxiliaryEffectSloti(self._efx_slot, AL_EFFECTSLOT_EFFECT, self._efx_effect)
+
+            self._current_reverb = preset_name
+
+            # Detailed reverb debug output
+            effective_gain = preset["gain"] * send_level
+            print(f"[Audio3D] Reverb: {preset_name}")
+            print(f"[Audio3D]   Gain: {effective_gain:.3f} (preset={preset['gain']:.3f} x send={send_level:.2f})")
+            print(f"[Audio3D]   Decay: {preset['decay_time']:.2f}s | HF ratio: {preset['decay_hf_ratio']:.2f}")
+            print(f"[Audio3D]   Reflections: gain={preset['reflections_gain']:.3f} delay={preset['reflections_delay']*1000:.1f}ms")
+            print(f"[Audio3D]   Late reverb: gain={preset['late_reverb_gain']:.3f} delay={preset['late_reverb_delay']*1000:.1f}ms")
+            print(f"[Audio3D]   Echo: depth={preset['echo_depth']:.2f} time={preset['echo_time']*1000:.0f}ms")
+
+        except Exception as e:
+            print(f"[Audio3D] Failed to set reverb: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _connect_source_to_reverb(self, source_id: int, send_level: float = 1.0):
+        """Connect a source to the reverb effect slot"""
+        global _efx
+        if not self._efx_slot:
+            print("[Audio3D] No EFX slot available - reverb disabled")
+            return
+
+        if not _efx or not _efx.available:
+            print("[Audio3D] EFX functions not available")
+            return
+
+        try:
+            # Clear any pending errors first (OpenAL errors are sticky)
+            _efx.alGetError()
+
+            # Connect source's aux send 0 to our reverb slot
+            # alSource3i(source, AL_AUXILIARY_SEND_FILTER, effectSlot, sendNumber, filter)
+            print(f"[Audio3D] Connecting source {source_id} to slot {self._efx_slot}...")
+
+            # Use alSource3i directly - it's a core function
+            _efx.alSource3i(source_id, AL_AUXILIARY_SEND_FILTER, self._efx_slot, 0, 0)
+
+            err = _efx.alGetError()
+            if err:
+                error_names = {0xa001: "INVALID_NAME", 0xa002: "INVALID_ENUM",
+                              0xa003: "INVALID_VALUE", 0xa004: "INVALID_OPERATION"}
+                print(f"[Audio3D] alSource3i failed: {error_names.get(err, hex(err))}")
+            else:
+                print(f"[Audio3D] Source {source_id} connected to reverb slot {self._efx_slot}")
+        except Exception as e:
+            print(f"[Audio3D] Error connecting source to reverb: {e}")
+            import traceback
+            traceback.print_exc()
+
     def shutdown(self):
-        """Cleanup OpenAL"""
+        """Cleanup OpenAL and EFX"""
         self._stop_event.set()
         if self._update_thread:
             self._update_thread.join(timeout=1.0)
@@ -421,6 +898,22 @@ class Audio3DPlayer:
                 self.source.destroy()
             except:
                 pass
+
+        # Cleanup EFX
+        global _efx
+        if _efx and _efx.available:
+            try:
+                if self._efx_slot:
+                    slot = ctypes.c_uint(self._efx_slot)
+                    _efx.alDeleteAuxiliaryEffectSlots(1, ctypes.byref(slot))
+                    self._efx_slot = None
+                if self._efx_effect:
+                    effect = ctypes.c_uint(self._efx_effect)
+                    _efx.alDeleteEffects(1, ctypes.byref(effect))
+                    self._efx_effect = None
+            except:
+                pass
+
         if self.initialized:
             try:
                 oalQuit()
@@ -511,19 +1004,33 @@ class Audio3DPlayer:
             traceback.print_exc()
             return False
 
-    def play_stream(self, tts_stream, on_chunk_callback=None, on_start=None, use_3d=True):
+    def play_stream(self, tts_stream, on_chunk_callback=None, on_start=None, use_3d=True,
+                    reverb_auxbus=None, reverb_send=1.0, abort_check=None,
+                    sentence_boundaries=None):
         """
-        Play streaming TTS audio with optional 3D positioning.
+        Play streaming TTS audio with optional 3D positioning and reverb.
 
         Args:
             on_start: Callback called RIGHT when audio playback begins (for accurate timing)
             use_3d: If False, plays centered stereo audio without 3D spatialization (for player voice)
+            reverb_auxbus: Game AuxBus name for reverb preset (e.g., "OutdoorConvolution")
+            reverb_send: Wet/dry mix for reverb (0.0-1.0)
+            abort_check: Callback that returns True if playback should abort (epoch stale).
+            sentence_boundaries: Optional narration boundaries (not implemented for PyOpenAL fallback).
         """
         if not self.initialized:
             if not self.init():
                 return False
 
+        # Check abort before starting
+        if abort_check and abort_check():
+            print("[Audio3D] Abort before start (epoch stale)")
+            return False
+
         self.abort_flag = False  # Reset abort flag at start
+        self._paused = False
+        self._pause_start = 0
+        self._total_pause_duration = 0
 
         try:
             # CRITICAL: Wait for buffer to have data BEFORE creating SourceStream
@@ -535,7 +1042,7 @@ class Audio3DPlayer:
                 if time.time() - wait_start > 10.0:
                     print("[Audio3D] ERROR: Timeout waiting for buffer data")
                     return False
-                if self.abort_flag:
+                if self.abort_flag or (abort_check and abort_check()):
                     print("[Audio3D] Aborted while waiting for buffer")
                     return False
                 time.sleep(0.01)
@@ -565,6 +1072,7 @@ class Audio3DPlayer:
                 source_pos = self.position_reader.get_source_position()
                 self.source.set_position(source_pos)
                 self.source.set_gain(gain)
+                self._source_gain = gain
                 self.source.set_rolloff_factor(rolloff)
                 self.source.set_reference_distance(2.0)  # Distance at full volume (meters)
                 self.source.set_max_distance(100.0)  # Max distance (meters)
@@ -592,7 +1100,24 @@ class Audio3DPlayer:
                 self.source.set_source_relative(True)
                 self.source.set_position((0, 0, 0))
                 self.source.set_gain(1.5)
+                self._source_gain = 1.5
                 print("[Audio3D] Non-3D mode: centered stereo playback")
+
+            # Apply reverb if specified
+            if reverb_auxbus and EFX_AVAILABLE and self._efx_slot:
+                self.set_reverb(reverb_auxbus, reverb_send)
+                # Connect source to reverb - need source ID
+                try:
+                    source_id = int(self.source.id)  # PyOpenAL source ID as int
+                    self._connect_source_to_reverb(source_id)
+                except Exception as e:
+                    print(f"[Audio3D] Failed to get source ID for reverb: {e}")
+            elif not reverb_auxbus:
+                print("[Audio3D] No reverb (auxbus not specified)")
+            elif not EFX_AVAILABLE:
+                print("[Audio3D] No reverb (EFX not available)")
+            elif not self._efx_slot:
+                print("[Audio3D] No reverb (EFX slot not created)")
 
             # Start playback
             self.source.play()
@@ -609,6 +1134,7 @@ class Audio3DPlayer:
 
             # Update loop - feeds buffers and keeps playing
             update_count = 0
+            restart_count = 0
             while True:
                 try:
                     if not self.source.update():
@@ -621,6 +1147,19 @@ class Audio3DPlayer:
 
                 update_count += 1
 
+                # Check for unexpected stop (buffer starvation) and restart
+                # Only restart if: not aborted, stream not done, and source stopped unexpectedly
+                try:
+                    state = self.source.get_state() if self.source else 0
+                    if state == AL_STOPPED and not self.abort_flag and not tts_stream.done:
+                        # Source stopped but we have more data - restart it
+                        restart_count += 1
+                        elapsed = time.time() - playback_start
+                        print(f"[Audio3D] *** AL_STOPPED detected at {elapsed:.2f}s - restarting playback (#{restart_count}) ***")
+                        self.source.play()
+                except Exception:
+                    pass
+
                 # DIAGNOSTIC: Log state every 100 updates (~1 second at 10ms sleep)
                 if update_count % 100 == 0:
                     elapsed = time.time() - playback_start
@@ -630,8 +1169,8 @@ class Audio3DPlayer:
                     except Exception:
                         pass  # Skip logging if state check fails
 
-                # Check for abort (interruption)
-                if self.abort_flag:
+                # Check for abort (interruption or epoch stale)
+                if self.abort_flag or (abort_check and abort_check()):
                     print("[Audio3D] Playback aborted")
                     try:
                         if self.source:
@@ -641,14 +1180,15 @@ class Audio3DPlayer:
                     break
                 time.sleep(0.01)
 
-            print(f"[Audio3D] Update loop ended after {update_count} updates")
+            restart_msg = f", {restart_count} restarts" if restart_count > 0 else ""
+            print(f"[Audio3D] Update loop ended after {update_count} updates{restart_msg}")
 
             # Wait for final buffers to finish (unless aborted)
             wait_start = time.time()
             if not self.abort_flag and self.source is not None:
                 try:
                     while self.source.get_state() == AL_PLAYING:
-                        if self.abort_flag:
+                        if self.abort_flag or (abort_check and abort_check()):
                             # Abort requested during wait - stop immediately
                             try:
                                 self.source.stop()
@@ -714,6 +1254,85 @@ def shutdown():
     if _player:
         _player.shutdown()
         _player = None
+
+
+def test_reverb(auxbus_name: str = None, send_level: float = 1.0,
+                wav_file: str = "voice_references/GreyCat_reference_15s.wav"):
+    """
+    Test reverb by playing a WAV file with the specified reverb preset.
+
+    Args:
+        auxbus_name: Reverb preset name (e.g., "OutdoorConvolution"). If None, uses current from Lua.
+        send_level: Wet/dry mix (0.0-1.0)
+        wav_file: Path to WAV file relative to sonorus folder
+    """
+    player = get_player()
+    if not player.initialized:
+        player.init()
+
+    filepath = os.path.join(SONORUS_DIR, wav_file)
+    if not os.path.exists(filepath):
+        print(f"[TestReverb] File not found: {filepath}")
+        return False
+
+    # If no auxbus specified, try to get from lua_socket
+    if auxbus_name is None:
+        try:
+            # Import here to avoid circular imports
+            from utils.lua_socket import lua_socket
+            reverb = lua_socket.get_current_reverb()
+            auxbus_name = reverb.get("auxbus")
+            send_level = reverb.get("send", 1.0)
+            print(f"[TestReverb] Using current zone reverb: {auxbus_name}")
+        except Exception as e:
+            print(f"[TestReverb] Could not get current reverb: {e}")
+            auxbus_name = "OutdoorOverland"  # Fallback
+
+    print(f"[TestReverb] Playing {wav_file} with reverb: {auxbus_name} (send={send_level:.2f})")
+
+    try:
+        # Load and play file
+        wav = WaveFile(filepath)
+        buffer = Buffer(wav)
+        player.source = Source(buffer, destroy_buffer=True)
+
+        # Center audio (source-relative at origin)
+        player.source.set_source_relative(True)
+        player.source.set_position((0, 0, 0))
+        player.source.set_gain(1.5)
+
+        # Apply reverb
+        if auxbus_name and _efx and _efx.available and player._efx_slot:
+            player.set_reverb(auxbus_name, send_level)
+            try:
+                source_id = int(player.source.id)  # PyOpenAL source ID as int
+                player._connect_source_to_reverb(source_id)
+            except Exception as e:
+                print(f"[TestReverb] Failed to connect reverb: {e}")
+        else:
+            print("[TestReverb] Reverb not available")
+
+        # Play
+        player.source.play()
+        print("[TestReverb] Playing...")
+
+        # Wait for completion
+        while player.source and player.source.get_state() == AL_PLAYING:
+            time.sleep(0.1)
+
+        # Cleanup
+        if player.source:
+            player.source.destroy()
+            player.source = None
+
+        print("[TestReverb] Done")
+        return True
+
+    except Exception as e:
+        print(f"[TestReverb] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 
 # ============================================

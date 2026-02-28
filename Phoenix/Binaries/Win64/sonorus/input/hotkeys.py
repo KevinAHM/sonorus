@@ -8,6 +8,7 @@ Uses pynput with game window check.
 import threading
 import ctypes
 from pynput import keyboard
+from .voice import can_activate_hotkey
 
 user32 = ctypes.windll.user32
 
@@ -51,28 +52,6 @@ def is_key_pressed(vk):
     return (user32.GetAsyncKeyState(vk) & 0x8000) != 0
 
 
-def get_active_window_title():
-    """Get the title of the active window."""
-    try:
-        hwnd = user32.GetForegroundWindow()
-        if not hwnd:
-            return ""
-        length = user32.GetWindowTextLengthW(hwnd)
-        if length == 0:
-            return ""
-        buffer = ctypes.create_unicode_buffer(length + 1)
-        user32.GetWindowTextW(hwnd, buffer, length + 1)
-        return buffer.value
-    except:
-        return ""
-
-
-def is_game_window_active():
-    """Check if game window is in foreground."""
-    title = get_active_window_title().lower().strip()
-    return title == "hogwarts legacy"
-
-
 def _win32_event_filter(msg, data):
     """Low-level keyboard hook for reliable key capture."""
     global _callback, _hotkey_vk, _check_pause
@@ -91,12 +70,8 @@ def _win32_event_filter(msg, data):
     if vk != _hotkey_vk:
         return True
 
-    # Only when game is active
-    if not is_game_window_active():
-        return True
-
-    # Check if game is paused
-    if _check_pause and _check_pause():
+    # Shared guard - game must be active and not paused
+    if not can_activate_hotkey(_check_pause):
         return True
 
     # Trigger callback

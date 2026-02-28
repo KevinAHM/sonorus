@@ -4,30 +4,30 @@ Handles loading, saving, filtering, and formatting of dialogue history.
 """
 
 import os
+import re
 import json
 
 from .settings import DATA_DIR, load_settings
 from .localization import get_display_name
 from constants import DIALOGUE_HISTORY_LIMIT
 
+# Import DB functions
+from .dialogue_db import (
+    load_all_entries as _db_load_all,
+    replace_all_entries as _db_replace_all,
+)
+
 
 def load_dialogue_history(game_context=None):
     """
-    Load dialogue history from file, collapsing consecutive duplicates.
+    Load dialogue history from database, collapsing consecutive duplicates.
 
     Args:
         game_context: Either a dict with 'playerName', or a callable that returns such a dict.
                      Accepts both for backwards compatibility.
     """
-    path = os.path.join(DATA_DIR, "dialogue_history.json")
     try:
-        with open(path, 'r', encoding='utf-8') as f:
-            raw_history = json.load(f)
-
-        # Debug: check raw JSON for non-dict entries
-        raw_bad = [(i, type(e).__name__) for i, e in enumerate(raw_history) if not isinstance(e, dict)]
-        if raw_bad:
-            print(f"[DialogueHistory] RAW JSON has {len(raw_bad)} non-dict entries: {raw_bad[:5]}")
+        raw_history = _db_load_all()
 
         # Get player name to normalize player entries
         # Support both dict and callable for backwards compatibility
@@ -38,22 +38,22 @@ def load_dialogue_history(game_context=None):
                     ctx = game_context()  # Call if it's a function
                 else:
                     ctx = game_context  # Use directly if it's a dict
-                player_name = ctx.get('playerName', '').lower()
+                player_name = (ctx.get('playerName') or '').lower()
         except:
             pass
 
         # Collapse consecutive identical NPC lines (cleans up rapid-fire repeats from Lua)
         cleaned = []
         for entry in raw_history:
-            # Skip non-dict entries (corrupted data)
+            # Skip non-dict entries (corrupted data - shouldn't happen with DB)
             if not isinstance(entry, dict):
                 print(f"[DialogueHistory] WARNING: Skipping non-dict entry: {type(entry).__name__} = {repr(entry)[:100]}")
                 continue
 
             # Normalize player entries (Lua captures player voice lines without isPlayer flag)
             if player_name and not entry.get('isAIResponse'):
-                speaker = entry.get('speaker', '').lower()
-                voice_name = entry.get('voiceName', '').lower()
+                speaker = (entry.get('speaker') or '').lower()
+                voice_name = (entry.get('voiceName') or '').lower()
                 # Match player name (with or without spaces - "AdriValter" vs "Adri Valter")
                 player_name_nospace = player_name.replace(' ', '')
                 if (speaker == player_name or
@@ -68,24 +68,31 @@ def load_dialogue_history(game_context=None):
         # Collapse consecutive spell casts (e.g., Stupefy spam -> "Cast Stupefy (5x)")
         cleaned = collapse_consecutive_spells(cleaned)
 
-        # Debug: check after processing
-        post_bad = [(i, type(e).__name__) for i, e in enumerate(cleaned) if not isinstance(e, dict)]
-        if post_bad:
-            print(f"[DialogueHistory] AFTER PROCESSING has {len(post_bad)} non-dict entries: {post_bad[:5]}")
-
         return cleaned
-    except:
+    except Exception as e:
+        print(f"[DialogueHistory] Error loading history: {e}")
         return []
 
 
-def save_dialogue_history(history):
-    """Save dialogue history to file"""
-    path = os.path.join(DATA_DIR, "dialogue_history.json")
+def replace_dialogue_history(history):
+    """Replace entire dialogue history - BULK OPERATIONS ONLY.
+
+    WARNING: This deletes ALL existing entries and reinserts everything.
+    Use append_entry() from dialogue_db for normal single-entry writes.
+
+    Valid use cases:
+    - Import from JSON backup
+    - Clear NPC from history (filter + replace)
+    - Delete specific entries by timestamp
+    """
     try:
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(history, f, indent=2)
+        _db_replace_all(history)
     except Exception as e:
-        print(f"[ERROR] Failed to save dialogue history: {e}")
+        print(f"[ERROR] Failed to replace dialogue history: {e}")
+
+
+# Backwards compatibility alias - but prefer replace_dialogue_history for clarity
+save_dialogue_history = replace_dialogue_history
 
 
 def collapse_consecutive_duplicate(history, new_entry):
@@ -221,7 +228,7 @@ def filter_dialogue_history(history):
             "player" in voice_name.lower()
         )
         # Also preserve location, broom, and other system events
-        is_system_event = entry_type in ("location", "broom", "spell")
+        is_system_event = entry_type in ("location", "broom", "spell", "commitment")
 
         if is_player_or_ai or is_system_event:
             # Always keep player, AI, and system event lines
@@ -312,14 +319,14 @@ def format_dialogue_entry(entry, include_time=True, mark_player=False):
     if not isinstance(entry, dict):
         return None
 
-    speaker = entry.get("speaker", "Unknown")
-    voice_name = entry.get("voiceName", "")
-    target = entry.get("target", "")
-    text = entry.get("text", "")
-    game_time = entry.get("gameTime", "")
+    speaker = entry.get("speaker") or "Unknown"
+    voice_name = entry.get("voiceName") or ""
+    target = entry.get("target") or ""
+    text = entry.get("text") or ""
+    game_time = entry.get("gameTime") or ""
     is_ai = entry.get("isAIResponse", False)
     is_player = entry.get("isPlayer", False)
-    entry_type = entry.get("type", "")
+    entry_type = entry.get("type") or ""
 
     if not text:
         return None
@@ -330,10 +337,21 @@ def format_dialogue_entry(entry, include_time=True, mark_player=False):
     # Player tag prefix
     player_prefix = "[PLAYER] " if (mark_player and is_player) else ""
 
+    # Handle director prompt entries (NPC-to-NPC scene direction)
+    if entry_type == 'prompt':
+        # Director prompts are scene direction, not dialogue - skip in history
+        # or format as a stage direction
+        return f"{time_prefix}[Scene: {text}]"
+
     # Handle location transition entries
     if entry_type == 'location':
         location = entry.get('location', text.replace('Entered ', ''))
-        return f"{time_prefix}[{player_prefix}{speaker} entered {location}]"
+        companions = entry.get('companions')
+        if companions:
+            names = f"{speaker} and {', '.join(companions)}"
+        else:
+            names = speaker
+        return f"{time_prefix}[{player_prefix}{names} entered {location}]"
 
     # Handle broom mount/dismount entries
     if entry_type == 'broom':
@@ -344,7 +362,7 @@ def format_dialogue_entry(entry, include_time=True, mark_player=False):
         count = entry.get('count', 1)
         if count > 1:
             # Time range format for collapsed spells
-            first_time = entry.get('firstGameTime', '')
+            first_time = entry.get('firstGameTime') or ''
             last_time = game_time
             if include_time and first_time and last_time and first_time != last_time:
                 time_str = f"[{first_time}-{last_time}] "
@@ -353,6 +371,21 @@ def format_dialogue_entry(entry, include_time=True, mark_player=False):
             return f"{time_str}{player_prefix}{speaker}: {text} ({count}x)"
         else:
             return f"{time_prefix}{player_prefix}{speaker}: {text}"
+
+    # Handle combat entries
+    if entry_type == 'combat':
+        # Time range format for combat (start to end)
+        start_time = entry.get('firstGameTime') or ''
+        end_time = game_time
+        if include_time and start_time and end_time and start_time != end_time:
+            time_str = f"[{start_time}-{end_time}] "
+        else:
+            time_str = time_prefix
+        return f"{time_str}Combat: {text}"
+
+    # Commitment events
+    if entry_type == 'commitment':
+        return f"{time_prefix}[{text}]"
 
     # Regular dialogue
     if is_player or is_ai:
@@ -372,13 +405,243 @@ def format_dialogue_entry(entry, include_time=True, mark_player=False):
             return f"{time_prefix}{display_name}: {text}"
 
 
-def format_dialogue_history(history, limit=None, for_npc_id=None):
+def _parse_game_time(time_str):
+    """Parse game time string like '2:09 AM' or '11:30 PM' into minutes since midnight."""
+    if not time_str:
+        return None
+    try:
+        time_str = time_str.strip()
+        # Handle "2:09 AM" format
+        parts = time_str.replace(':', ' ').replace('  ', ' ').split()
+        if len(parts) < 2:
+            return None
+        hour = int(parts[0])
+        minute = int(parts[1])
+        period = parts[-1].upper() if len(parts) >= 3 else None
+        if period == 'AM':
+            if hour == 12:
+                hour = 0
+        elif period == 'PM':
+            if hour != 12:
+                hour += 12
+        return hour * 60 + minute
+    except (ValueError, IndexError):
+        return None
+
+
+def _game_datetime_to_minutes(game_date, game_time):
+    """Convert game date + time to total minutes (for gap calculation)."""
+    date = _parse_game_date(game_date)
+    time_mins = _parse_game_time(game_time)
+    if not date or time_mins is None:
+        return None
+    # Use approximate days (30-day months) * 1440 minutes/day + time
+    total_days = date[0] * 365 + date[1] * 30 + date[2]
+    return total_days * 1440 + time_mins
+
+
+def _npc_witnessed(entry, npc_id):
+    """Check if an NPC witnessed a dialogue entry (was speaker or in earshot)."""
+    # NPC was the speaker
+    if entry.get('voiceName') == npc_id:
+        return True
+    # NPC was in earshot
+    if npc_id in entry.get('earshot', []):
+        return True
+    return False
+
+
+def get_time_since_last_interaction(history, for_npc_id, current_game_date, current_game_time, player_name=None):
+    """Find the time gap (in game minutes) since the NPC last interacted with the player.
+
+    Only considers entries the NPC witnessed (same earshot filter as dialogue history),
+    then looks for entries where the player was involved:
+    - Player speaking (isPlayer=True) and NPC witnessed it
+    - AI response from this NPC directed at the player
+    - Cutscene dialogue the NPC witnessed (player assumed present)
+
+    Ignores: NPC-to-NPC conversations, ambient chatter, combat, broom, spell, location.
+
+    Returns (gap_minutes, date_formatted) or (None, None) if no prior interaction found.
+    """
+    if not history or not for_npc_id:
+        return None, None
+
+    current_mins = _game_datetime_to_minutes(current_game_date, current_game_time)
+    if current_mins is None:
+        return None, None
+
+    # Apply same earshot filter as format_dialogue_history
+    settings = load_settings()
+    realistic_memory = settings.get('history', {}).get('realistic_memory', True)
+
+    player_name_lower = (player_name or '').lower()
+
+    # Scan backwards for the last meaningful interaction with the player
+    for entry in reversed(history):
+        if not isinstance(entry, dict):
+            continue
+
+        # Earshot filter: only entries the NPC witnessed
+        if realistic_memory and not _npc_witnessed(entry, for_npc_id):
+            continue
+
+        entry_type = entry.get('type', 'dialogue')
+
+        # Skip system events
+        if entry_type in ('location', 'broom', 'spell', 'combat', 'prompt', 'commitment'):
+            continue
+
+        is_ai = entry.get('isAIResponse', False)
+        is_player = entry.get('isPlayer', False)
+        target = (entry.get('target') or '').lower()
+
+        # Cutscene dialogue the NPC witnessed - player was present
+        if entry_type == 'cutscene':
+            pass  # Accept
+        # Player speaking and NPC heard it
+        elif is_player:
+            pass  # Accept
+        # AI response directed at the player (not NPC-to-NPC)
+        elif is_ai and player_name_lower and target == player_name_lower:
+            pass  # Accept
+        else:
+            # NPC-to-NPC conversation or ambient chatter - skip
+            continue
+
+        # Found a matching entry - compute gap
+        entry_date = entry.get('gameDate', '')
+        entry_time = entry.get('gameTime', '')
+        entry_mins = _game_datetime_to_minutes(entry_date, entry_time)
+        if entry_mins is None:
+            return None, None
+
+        gap = current_mins - entry_mins
+        return gap, entry_date
+
+    return None, None
+
+
+def format_time_gap(gap_minutes):
+    """Format a gap in game minutes into a human-readable string.
+
+    Returns string like '2 hours', '3 days', '1 week', or None if gap is small.
+    Only returns a value if gap >= 60 minutes.
+    """
+    if gap_minutes is None or gap_minutes < 60:
+        return None
+
+    if gap_minutes < 120:
+        return "about an hour"
+    elif gap_minutes < 1440:
+        hours = gap_minutes // 60
+        return f"about {hours} hours"
+    elif gap_minutes < 2880:
+        return "about a day"
+    elif gap_minutes < 10080:
+        days = gap_minutes // 1440
+        return f"about {days} days"
+    elif gap_minutes < 20160:
+        return "about a week"
+    elif gap_minutes < 43200:
+        weeks = gap_minutes // 10080
+        return f"about {weeks} weeks"
+    elif gap_minutes < 86400:
+        return "about a month"
+    else:
+        months = gap_minutes // 43200
+        return f"about {months} months"
+
+
+_MONTH_NAMES = {
+    'january': 1, 'february': 2, 'march': 3, 'april': 4,
+    'may': 5, 'june': 6, 'july': 7, 'august': 8,
+    'september': 9, 'october': 10, 'november': 11, 'december': 12,
+}
+
+
+def _parse_game_date(date_str):
+    """Parse game date string into (year, month, day) tuple.
+
+    Supports both formats:
+    - Short: '1891/01/13'
+    - Long:  'Wednesday, January 14th, 1891'
+    """
+    if not date_str:
+        return None
+
+    date_str = date_str.strip()
+
+    # Try short format first: YYYY/MM/DD
+    if re.match(r'^\d{4}/\d{1,2}/\d{1,2}$', date_str):
+        try:
+            parts = date_str.split('/')
+            return (int(parts[0]), int(parts[1]), int(parts[2]))
+        except (ValueError, IndexError):
+            return None
+
+    # Try long format: "Wednesday, January 14th, 1891" or "January 14th, 1891"
+    # Extract month name, day number, and year
+    match = re.search(r'(\w+)\s+(\d{1,2})\w*,?\s+(\d{4})', date_str)
+    if match:
+        month_name = match.group(1).lower()
+        month = _MONTH_NAMES.get(month_name)
+        if month:
+            try:
+                return (int(match.group(3)), month, int(match.group(2)))
+            except ValueError:
+                return None
+
+    return None
+
+
+def _format_relative_date(entry_date, current_date):
+    """Format relative time between two game dates.
+
+    Returns string like '3 days ago', '1 month ago', 'yesterday', 'today'.
+    """
+    if not entry_date or not current_date:
+        return ""
+
+    entry = _parse_game_date(entry_date)
+    current = _parse_game_date(current_date)
+    if not entry or not current:
+        return ""
+
+    # Simple day calculation (assumes 30-day months for simplicity)
+    entry_days = entry[0] * 365 + entry[1] * 30 + entry[2]
+    current_days = current[0] * 365 + current[1] * 30 + current[2]
+    diff = current_days - entry_days
+
+    if diff <= 0:
+        return "today"
+    elif diff == 1:
+        return "yesterday"
+    elif diff < 7:
+        return f"{diff} days ago"
+    elif diff < 14:
+        return "1 week ago"
+    elif diff < 30:
+        weeks = diff // 7
+        return f"{weeks} weeks ago"
+    elif diff < 60:
+        return "1 month ago"
+    elif diff < 365:
+        months = diff // 30
+        return f"{months} months ago"
+    else:
+        years = diff // 365
+        return f"{years} year{'s' if years > 1 else ''} ago"
+
+
+def format_dialogue_history(history, limit=None, for_npc_id=None, current_game_date=None):
     """Format dialogue history for LLM context.
 
     Args:
         history: List of dialogue history entries
         limit: Max entries to include (default from settings)
         for_npc_id: If provided, filter to only entries this NPC witnessed (was speaker or in earshot)
+        current_game_date: Current game date string (e.g., '1891/01/15') for relative time display
     """
     if not history:
         return ""
@@ -399,24 +662,7 @@ def format_dialogue_history(history, limit=None, for_npc_id=None):
     # Filter by earshot if realistic memory is enabled and NPC specified
     realistic_memory = settings.get('history', {}).get('realistic_memory', True)
     if for_npc_id and realistic_memory:
-        def npc_witnessed(entry):
-            # NPC was the speaker
-            if entry.get('voiceName') == for_npc_id:
-                return True
-            # NPC was in earshot
-            if for_npc_id in entry.get('earshot', []):
-                return True
-            # Legacy handling: entries without earshot field
-            if 'earshot' not in entry:
-                # Player events (broom, location, spell) without earshot were never tracked
-                # Exclude them since NPC couldn't have witnessed
-                entry_type = entry.get('type', '')
-                if entry_type in ('broom', 'location', 'spell'):
-                    return False
-                # Dialogue entries (chatter, cutscene, ai_response) - include for backwards compat
-                return True
-            return False
-        filtered = [entry for entry in filtered if npc_witnessed(entry)]
+        filtered = [entry for entry in filtered if _npc_witnessed(entry, for_npc_id)]
 
     # Take last N entries
     recent = filtered[-limit:] if len(filtered) > limit else filtered
@@ -446,14 +692,22 @@ def format_dialogue_history(history, limit=None, for_npc_id=None):
         return ""
 
     lines = []
-    prev_date = None
+    prev_date_tuple = None
     for entry in recent:
-        game_date = entry.get("gameDate", "")
+        game_date = entry.get("gameDate") or ""
+        date_tuple = _parse_game_date(game_date) if game_date else None
 
-        # Add day divider when date changes
-        if game_date and prev_date and game_date != prev_date:
-            lines.append(f"--- {game_date} ---")
-        prev_date = game_date if game_date else prev_date
+        # Add day divider when date changes (compare parsed tuples to handle mixed formats)
+        if date_tuple and prev_date_tuple and date_tuple != prev_date_tuple:
+            # Always display in short format for consistency
+            display_date = f"{date_tuple[0]}/{date_tuple[1]:02d}/{date_tuple[2]:02d}"
+            relative = _format_relative_date(game_date, current_game_date)
+            if relative:
+                lines.append(f"--- {display_date} ({relative}) ---")
+            else:
+                lines.append(f"--- {display_date} ---")
+        if date_tuple:
+            prev_date_tuple = date_tuple
 
         # Format the entry using shared helper
         line = format_dialogue_entry(entry, include_time=True, mark_player=False)
@@ -463,4 +717,4 @@ def format_dialogue_history(history, limit=None, for_npc_id=None):
     if not lines:
         return ""
 
-    return "**Recent events and conversations:**\n" + "\n".join(lines)
+    return "## Recent History\n" + "\n".join(lines)

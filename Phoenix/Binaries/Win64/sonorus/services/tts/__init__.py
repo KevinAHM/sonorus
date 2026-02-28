@@ -5,12 +5,22 @@ Provides a unified interface for text-to-speech providers (Inworld, ElevenLabs).
 """
 import os
 import sys
+import re
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from utils.settings import load_settings
+from utils.settings import load_settings, is_dev_mode
 
 from .base import BaseTTSProvider, VoiceCache
+
+# End marker trimmer for clean audio cutoffs
+# DISABLED - alignment model timestamps too inaccurate for reliable trimming
+END_TRIMMER_ENABLED = False
+try:
+    from audio.end_trimmer import EndMarkerTrimmer, pad_text_with_end_marker
+    END_TRIMMER_AVAILABLE = END_TRIMMER_ENABLED
+except ImportError:
+    END_TRIMMER_AVAILABLE = False
 
 # Cached provider instances
 _providers = {}
@@ -22,9 +32,15 @@ def get_provider():
     provider_name = settings.get('tts', {}).get('provider', 'inworld')
 
     if provider_name not in _providers:
-        if provider_name == 'elevenlabs':
+        if provider_name == 'none':
+            from .none import NoTTSProvider
+            _providers[provider_name] = NoTTSProvider()
+        elif provider_name == 'elevenlabs':
             from .elevenlabs import ElevenLabsProvider
             _providers[provider_name] = ElevenLabsProvider()
+        elif provider_name == 'pocket' or provider_name == 'pocket_onnx':
+            from .pocket_onnx import PocketOnnxProvider
+            _providers[provider_name] = PocketOnnxProvider()
         else:
             from .inworld import InworldProvider
             _providers[provider_name] = InworldProvider()
@@ -35,6 +51,15 @@ def get_provider():
 def init():
     """Initialize TTS provider (loads voice cache)."""
     return get_provider().init()
+
+
+def _apply_pronunciation(text):
+    """Apply pronunciation replacements and normalize audio tags for current provider."""
+    from utils.text_utils import apply_pronunciation_replacements, normalize_audio_tags
+    provider = get_provider_name()
+    text = normalize_audio_tags(text, provider)
+    text = apply_pronunciation_replacements(text, tts_provider=provider)
+    return text
 
 
 def speak(text, character_name, **kwargs):
@@ -49,7 +74,118 @@ def speak(text, character_name, **kwargs):
     Returns:
         {"success": bool, "word_timings": list, "error": str or None}
     """
+    text = _apply_pronunciation(text)
     return get_provider().speak(text, character_name, **kwargs)
+
+
+def speak_streaming(sentence_gen, character_name, **kwargs):
+    """
+    Stream sentences through TTS and play audio in real-time.
+    Sentences are fed to TTS as they arrive from LLM streaming.
+
+    Args:
+        sentence_gen: Generator yielding sentence strings or (text, is_narration) tuples
+        character_name: Character whose voice to use
+        **kwargs: Additional arguments (setup_event, setup_data, etc.)
+
+    Returns:
+        {"success": bool, "word_timings": list, "error": str or None}
+    """
+    # Track original (clean) sentences for subtitle display
+    # (pronunciation-fixed text should not appear in subtitles)
+    original_sentences = []
+
+    setup_data = kwargs.get('setup_data')
+
+    # Resolve narrator voice if narration is enabled
+    settings = load_settings()
+    narration_enabled = settings.get('conversation', {}).get('narration_enabled', False)
+    if narration_enabled and setup_data is not None:
+        narrator_voice_id = _resolve_narrator_voice()
+        if narrator_voice_id:
+            setup_data['_narrator_voice_id'] = narrator_voice_id
+
+    # Apply pronunciation to each sentence as it arrives
+    # Handles both plain strings and (text, is_narration) tuples
+    def processed_gen():
+        for item in sentence_gen:
+            if isinstance(item, tuple):
+                text, is_narration = item
+                if text:
+                    original_sentences.append((text, is_narration))
+                    yield (_apply_pronunciation(text), is_narration)
+            else:
+                if item:
+                    original_sentences.append(item)
+                    yield _apply_pronunciation(item)
+
+    # Pass clean sentences list through setup_data so base.py can use them
+    if setup_data is not None:
+        setup_data['_original_sentences'] = original_sentences
+
+    return get_provider().speak_streaming(processed_gen(), character_name, **kwargs)
+
+
+def _resolve_narrator_voice():
+    """Resolve the narrator voice ID based on settings and available voices.
+
+    Returns voice name/ID string, or None if narration not possible.
+    """
+    settings = load_settings()
+    conv = settings.get('conversation', {})
+
+    # Explicit narrator voice setting
+    narrator_voice = conv.get('narrator_voice', '').strip()
+    if narrator_voice:
+        return narrator_voice
+
+    # Check for Narrator reference wav
+    voice_refs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'voice_references')
+    import glob
+    narrator_refs = glob.glob(os.path.join(voice_refs_dir, 'Narrator_reference_*'))
+    if narrator_refs:
+        return 'Narrator'
+
+    # Provider-specific fallbacks
+    provider_name = get_provider_name()
+    if provider_name in ('pocket', 'pocket_onnx'):
+        return 'GreyCat'
+    elif provider_name == 'inworld':
+        return 'Graham'
+
+    return None
+
+
+def _segment_text_for_prebuffer(text: str, narration_enabled: bool):
+    """Split full response text into sentence/narration segments."""
+    from utils.text_utils import split_into_sentences_safe
+
+    if not text or not text.strip():
+        return []
+
+    segments = []
+    sentence_chunks = split_into_sentences_safe(text)
+    if not sentence_chunks:
+        sentence_chunks = [text]
+
+    if narration_enabled:
+        from utils.narration import parse_segments
+        for sentence in sentence_chunks:
+            for seg in parse_segments(sentence):
+                seg_text = (seg.text or "").strip()
+                if not seg_text:
+                    continue
+                # Skip bracket-only segments (e.g. [laugh]) to avoid empty subtitles.
+                if re.fullmatch(r'(\[[^\]]*\]\s*)+', seg_text):
+                    continue
+                segments.append((seg_text, bool(seg.is_narration)))
+    else:
+        for sentence in sentence_chunks:
+            seg_text = (sentence or "").strip()
+            if seg_text:
+                segments.append((seg_text, False))
+
+    return segments
 
 
 def prepare_tts(text, character_name, **kwargs):
@@ -57,9 +193,33 @@ def prepare_tts(text, character_name, **kwargs):
     Pre-buffer TTS without playing.
 
     Returns:
-        (tts_stream, word_timings, visemes) tuple on success, None if failed
+        (tts_stream, word_timings, visemes, sentence_boundaries) tuple on success,
+        None if failed
     """
-    return get_provider().prepare_tts(text, character_name, **kwargs)
+    settings = load_settings()
+    narration_enabled = settings.get('conversation', {}).get('narration_enabled', False)
+
+    segmented = _segment_text_for_prebuffer(text, narration_enabled=narration_enabled)
+    if not segmented:
+        processed_text = _apply_pronunciation(text)
+        return get_provider().prepare_tts(processed_text, character_name, **kwargs)
+
+    original_sentences = list(segmented)
+    narrator_voice_id = _resolve_narrator_voice() if narration_enabled else None
+
+    def processed_gen():
+        for seg_text, is_narration in segmented:
+            yield (_apply_pronunciation(seg_text), is_narration)
+
+    processed_text = _apply_pronunciation(text)
+    return get_provider().prepare_tts(
+        processed_text,
+        character_name,
+        sentence_gen=processed_gen(),
+        original_sentences=original_sentences,
+        narrator_voice_id=narrator_voice_id,
+        **kwargs,
+    )
 
 
 def get_or_create_voice(character_name, lang=None, lua_socket=None):
@@ -106,7 +266,7 @@ def clear_provider_cache(provider_name=None):
     Clear cached provider instance(s), forcing re-initialization on next use.
 
     Args:
-        provider_name: 'inworld', 'elevenlabs', or None for all providers
+        provider_name: 'inworld', 'elevenlabs', 'pocket', or None for all providers
     """
     global _providers
 
@@ -118,12 +278,28 @@ def clear_provider_cache(provider_name=None):
         if provider_name == 'inworld':
             from .inworld import clear_voice_cache
             clear_voice_cache()
+        elif provider_name == 'elevenlabs':
+            from .elevenlabs import clear_voice_cache
+            clear_voice_cache()
+        elif provider_name == 'pocket' or provider_name == 'pocket_onnx':
+            from .pocket_onnx import clear_voice_cache
+            clear_voice_cache()
     else:
         print("[TTS] Clearing all cached providers")
         _providers.clear()
         # Clear all provider module caches
         try:
             from .inworld import clear_voice_cache
+            clear_voice_cache()
+        except ImportError:
+            pass
+        try:
+            from .elevenlabs import clear_voice_cache
+            clear_voice_cache()
+        except ImportError:
+            pass
+        try:
+            from .pocket_onnx import clear_voice_cache
             clear_voice_cache()
         except ImportError:
             pass
@@ -135,7 +311,11 @@ def is_available() -> bool:
     tts_settings = settings.get('tts', {})
     provider = tts_settings.get('provider', 'inworld')
 
-    if provider == 'inworld':
+    if provider == 'none':
+        return True  # Always available - no external dependencies
+    elif provider == 'pocket' or provider == 'pocket_onnx':
+        return True  # Local ONNX inference - always available
+    elif provider == 'inworld':
         inworld = tts_settings.get('inworld', {})
         return bool(inworld.get('api_key') and inworld.get('workspace_id'))
     elif provider == 'elevenlabs':
@@ -153,6 +333,7 @@ def get_provider_name() -> str:
 
 def synthesize_to_bytes(text, character_name, lang=None):
     """Synthesize text to raw PCM audio bytes."""
+    text = _apply_pronunciation(text)
     provider = get_provider()
     # get_or_create_voice now raises specific exceptions on failure
     voice = provider.get_or_create_voice(character_name, lang)
@@ -161,15 +342,53 @@ def synthesize_to_bytes(text, character_name, lang=None):
     if not voice_id:
         raise Exception(f"Voice '{character_name}' has no voice ID. Try refreshing the voice cache.")
 
+    sample_rate = provider.get_sample_rate()
     pcm_chunks = []
+    total_word_timestamps = [0]  # Use list for mutable access in callback
+
     def on_chunk(pcm_bytes, word_timing):
         if pcm_bytes:
             pcm_chunks.append(pcm_bytes)
+        if word_timing:
+            words = word_timing.get("words", [])
+            total_word_timestamps[0] += len(words)
 
-    success = provider.synthesize_stream(text, voice_id, on_chunk)
+    # Use end marker trimmer for clean audio cutoffs
+    if END_TRIMMER_AVAILABLE:
+        padded_text = pad_text_with_end_marker(text)
+        trimmer = EndMarkerTrimmer(
+            original_text=text,
+            on_chunk=on_chunk,
+            sample_rate=sample_rate,
+            bytes_per_sample=2  # 16-bit PCM
+        )
+        success = provider.synthesize_stream(padded_text, voice_id, trimmer.process_chunk)
+        trimmer.flush()
+    else:
+        success = provider.synthesize_stream(text, voice_id, on_chunk)
+
     if not success:
         raise Exception("TTS synthesis failed.")
     if not pcm_chunks:
         raise Exception("No audio data received.")
 
-    return b''.join(pcm_chunks), provider.get_sample_rate()
+    provider_name = get_provider_name()
+    print(f"[{provider_name.title()}] Word timestamps received: {total_word_timestamps[0]}")
+
+    audio_data = b''.join(pcm_chunks)
+
+    # Save debug audio in dev mode
+    if is_dev_mode():
+        try:
+            import wave
+            debug_path = os.path.join(os.path.dirname(__file__), '..', '..', 'debug_tts_output.wav')
+            with wave.open(debug_path, 'wb') as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)  # 16-bit
+                wf.setframerate(sample_rate)
+                wf.writeframes(audio_data)
+            print(f"[TTS] Debug audio saved: {debug_path}")
+        except Exception as e:
+            print(f"[TTS] Failed to save debug audio: {e}")
+
+    return audio_data, sample_rate

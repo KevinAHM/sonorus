@@ -1,0 +1,23 @@
+
+  SONORUS - Installation Instructions
+  ====================================
+
+  1. Extract the zip file to any folder on your computer.
+     (Right-click the zip > "Extract All" or use 7-Zip/WinRAR)
+
+  2. Open the extracted folder. You should see:
+       install_sonorus.bat
+       Phoenix/
+
+  3. Make sure Hogwarts Legacy is closed.
+
+  4. Double-click install_sonorus.bat and follow the prompts.
+
+  That's it! This also works for updating Sonorus to a newer version.
+
+  5. Once installed, you can safely delete the extracted files
+     (this folder). Sonorus now lives inside your game directory.
+
+  -----------------------------------------------
+  Having issues? Join our Discord for help:
+  https://discord.gg/YXhJy3pA7b
