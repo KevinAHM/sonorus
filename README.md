@@ -298,7 +298,7 @@ Some features are marked experimental in the settings. Use at your own risk - es
 - Reduce server crashes and fix "worker process not available" error
 - Fix game date & time storage inconsistency
 - Improve Parakeet speech detection for short utterances
-- Preserve "Ominis" and "Deek" in text correction and Deep gram STT
+- Preserve "Ominis" and "Deek" in text correction and Deepgram STT
 - Fix vision agent when using Open Mic
 - NPCs use instant rotation lock outside of Hogwarts to avoid nav-mesh issues
 - Fix local LM with OpenAI provider requiring API key
