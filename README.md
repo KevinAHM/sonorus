@@ -485,6 +485,7 @@ Thank you to [Skytaks](https://www.nexusmods.com/profile/skytaks) who spent hour
 * [ONNX Version](https://huggingface.co/istupakov/canary-180m-flash-onnx)
 * [Moonshine](https://huggingface.co/UsefulSensors/moonshine)
 * [ONNX Version](https://huggingface.co/onnx-community/moonshine-base-ONNX)
+
 **Voice synthesis:**
 
 * [Kyutai Pocket TTS](https://github.com/kyutai-labs/pocket-tts)
