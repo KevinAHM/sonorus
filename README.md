@@ -154,7 +154,7 @@ Sonorus works entirely with free tier or free credit AI services:
 
 - **Gemini** - AI responses (Free tier, handful of messages per day)
 - **Voice Synthesis:**
-  - **Pocket TTS** - Local voice cloning (runs on your PC, English only)
+  - **Pocket TTS** - Local voice cloning (Runs on your PC, English only)
   - **Inworld** - Cloud TTS ($2 free credit, about 3 hours of audio)
 - **Speech-to-Text:**
   - **Canary Flash** - Local speech recognition (Runs on your PC, English, German, French, Spanish)
@@ -231,9 +231,9 @@ Run `uninstall_sonorus.bat` from the same zip you used to install. It will offer
 - **Reshade:** Tested and working
 - **UEVR:** Tested and working - headtracking 3D audio, gaze offset, and gesture controls
 - **Other UE4SS mods:** Should work, but remove other UE4SS installations first, then manually install them into ue4ss/Mods
-- **Floo Companion Mod:** Tested and working - converse on brooms! (recommended)
-- **Stand Up Straight:** Tested and working (recommended)
-- **House Points Mod:** Tested and working (recommended)
+- **Floo Companion Mod:** Tested and working - converse on brooms! (Recommended)
+- **Stand Up Straight:** Tested and working (Recommended)
+- **House Points Mod:** Tested and working (Recommended)
 - (MOD SUPPORT) NPCs will know house point totals and teachers can award/demerit
 - **Emote With Any NPC:** Tested and working, but typing into chat may trigger emotes
 - **Time Dilator Mod:** Incompatible, Sonorus has its own time controls
