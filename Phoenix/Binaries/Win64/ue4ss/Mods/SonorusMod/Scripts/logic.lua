@@ -122,7 +122,7 @@ end)
 print("[Sonorus] Socket reconnect triggered")
 
 -- Commitment manager for NPC schedule overrides (dofile for hot reload)
-_G.CommitmentManager = dofile(_G.SonorusScriptsPath .. "CommitmentManager.lua")
+_G.CommitmentManager = dofile(_G.SonorusScriptsPath .. "Utils/CommitmentManager.lua")
 
 -- ============================================
 -- Access global state from main.lua
@@ -747,176 +747,137 @@ end
 -- Persistent state for TurnInPlace test toggle
 _G._TurnInPlaceState = _G._TurnInPlaceState or nil
 
+_G._DebugDugbog = _G._DebugDugbog or nil
+
 function DebugF7()
     ExecuteInGameThread(function()
-        local TAG = "[NpcDebug]"
-        print(TAG .. " === NPC STATUS CHECK ===")
+        local TAG = "[DugbogSpawn]"
 
-        local staticData = _G.GetStaticCache and _G.GetStaticCache()
-        if not staticData or not staticData.populationManager then
-            print(TAG .. " No PopulationManager")
+        -- Toggle: second press destroys
+        if _G._DebugDugbog and SafeIsValid(_G._DebugDugbog) then
+            print(TAG .. " === DESTROYING DUGBOG ===")
+            pcall(function() _G._DebugDugbog:K2_DestroyActor() end)
+            _G._DebugDugbog = nil
+            print(TAG .. " Destroyed")
             return
         end
-        local popManager = staticData.populationManager
+        _G._DebugDugbog = nil
 
-        -- Check active commitments
-        local commitments = _G.ActiveCommitments or {}
-        local npcList = {}
-        for npcId, entry in pairs(commitments) do
-            table.insert(npcList, {id = npcId, commitment = entry})
+        print(TAG .. " === SPAWN DUGBOG (NON-HOSTILE) ===")
+
+        local staticData = GetStaticCache()
+        if not staticData then print(TAG .. " No static cache") return end
+
+        local player = staticData.player
+        if not player or not SafeIsValid(player) then print(TAG .. " No player") return end
+
+        local playerLoc = player:K2_GetActorLocation()
+        local playerRot = player:K2_GetActorRotation()
+
+        -- Spawn ~500 units in front of player (~5m), ~150 units up (~5ft)
+        local yawRad = math.rad(playerRot.Yaw)
+        local spawnX = playerLoc.X + math.cos(yawRad) * 500
+        local spawnY = playerLoc.Y + math.sin(yawRad) * 500
+        local spawnZ = playerLoc.Z + 150
+
+        print(string.format("%s Player at (%.0f, %.0f, %.0f) yaw=%.1f", TAG, playerLoc.X, playerLoc.Y, playerLoc.Z, playerRot.Yaw))
+        print(string.format("%s Spawn target: (%.0f, %.0f, %.0f)", TAG, spawnX, spawnY, spawnZ))
+
+        -- Find dugbog Blueprint class
+        local classPath = "/Game/Pawn/NPC/Enemy/Character/Dugbog/BP_Dugbog.BP_Dugbog_C"
+        local dugbogClass = StaticFindObject(classPath)
+        if not dugbogClass then
+            print(TAG .. " Class not in memory, trying LoadAsset...")
+            pcall(function()
+                LoadAsset("/Game/Pawn/NPC/Enemy/Character/Dugbog/BP_Dugbog")
+            end)
+            dugbogClass = StaticFindObject(classPath)
+        end
+        if not dugbogClass then
+            print(TAG .. " FAILED: Could not find or load BP_Dugbog class")
+            return
+        end
+        print(TAG .. " Class: " .. dugbogClass:GetFullName())
+
+        -- GameplayStatics for spawning
+        local gps = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+        if not gps then
+            print(TAG .. " FAILED: No GameplayStatics")
+            return
         end
 
-        -- If no active commitments, check a hardcoded list for debugging
-        if #npcList == 0 then
-            print(TAG .. " No active commitments. Checking common NPCs...")
-            for _, name in ipairs({"DuncanEverette", "SebastianSallow", "NatsaiOnai", "PoppySweeting", "GladwinMoon"}) do
-                table.insert(npcList, {id = name, commitment = nil})
-            end
+        local spawnTransform = {
+            Translation = { X = spawnX, Y = spawnY, Z = spawnZ },
+            Rotation = { X = 0, Y = 0, Z = 0, W = 1 },
+            Scale3D = { X = 1, Y = 1, Z = 1 }
+        }
+
+        -- BeginDeferredActorSpawnFromClass (2 = AdjustIfPossibleButAlwaysSpawn)
+        local dugbog = nil
+        local ok, err = pcall(function()
+            dugbog = gps:BeginDeferredActorSpawnFromClass(player, dugbogClass, spawnTransform, 2, player)
+        end)
+        if not ok then
+            print(TAG .. " BeginDeferredActorSpawnFromClass FAILED: " .. tostring(err))
+            return
+        end
+        if not dugbog then
+            print(TAG .. " BeginDeferredActorSpawnFromClass returned nil")
+            return
         end
 
-        for _, entry in ipairs(npcList) do
-            local npcId = entry.id
-            print(string.format("%s --- %s ---", TAG, npcId))
+        local ok2, err2 = pcall(function()
+            gps:FinishSpawningActor(dugbog, spawnTransform)
+        end)
+        if not ok2 then
+            print(TAG .. " FinishSpawningActor FAILED: " .. tostring(err2))
+        end
 
-            -- Show commitment state if any
-            if entry.commitment then
-                local c = entry.commitment
-                print(string.format("%s   Commitment: %s -> %s (applied=%s dirty=%s)",
-                    TAG, c.activity_id or "?", c.location_id or "?",
-                    tostring(c.applied), tostring(c.dirty)))
+        print(TAG .. " Dugbog spawned: " .. tostring(dugbog:GetFullName()))
+        _G._DebugDugbog = dugbog
+
+        -- === MAKE NON-HOSTILE (delay 200ms for AI components to initialize) ===
+        ExecuteInGameThreadWithDelay(200, function()
+            if not dugbog or not SafeIsValid(dugbog) then
+                print(TAG .. " Dugbog gone before pacify")
+                return
             end
 
-            -- Get ScheduledEntity
-            local se = nil
-            pcall(function() se = popManager:GetScheduledEntityFromName(npcId) end)
-            if not se then
-                print(string.format("%s   ScheduledEntity: NOT FOUND", TAG))
-            else
-                local seValid = false
-                pcall(function() seValid = se:IsValid() end)
-                if not seValid then
-                    print(string.format("%s   ScheduledEntity: INVALID", TAG))
-                else
-                    -- In flesh?
-                    local inFlesh = false
-                    pcall(function() inFlesh = se:CurrentlyInFlesh() end)
-                    print(string.format("%s   InFlesh: %s", TAG, tostring(inFlesh)))
+            print(TAG .. " --- Pacifying dugbog ---")
 
-                    -- Location
-                    pcall(function()
-                        local loc = se:GetLocation()
-                        if loc then
-                            print(string.format("%s   Location: %.0f, %.0f, %.0f", TAG, loc.X or 0, loc.Y or 0, loc.Z or 0))
-                        end
-                    end)
-
-                    -- Is enabled / in transit
-                    pcall(function()
-                        local enabled = se:IsEnabled()
-                        local transit = se:IsInTransit()
-                        print(string.format("%s   Enabled: %s  InTransit: %s", TAG, tostring(enabled), tostring(transit)))
-                    end)
-
-                    -- Current activity
-                    local out1, out2 = {}, {}
-                    pcall(function() se:GetCurrentActivity(out1, out2) end)
-                    if out1.ActivityIsValid then
-                        local actId = "?"
-                        pcall(function() actId = out1.Activity:ToString() end)
-                        local actType = "?"
-                        pcall(function() actType = out1.ActivityType:ToString() end)
-                        local locKey = "?"
-                        pcall(function() locKey = out1.LocationKey:ToString() end)
-                        print(string.format("%s   Activity: %s (%s) at %s  [%s-%s]",
-                            TAG, actId, actType, locKey,
-                            tostring(out1.StartTime), tostring(out1.EndTime)))
+            -- EnemyAIComponent: disable attacks + wander mode
+            pcall(function()
+                local aiClass = StaticFindObject("/Script/Phoenix.EnemyAIComponent")
+                if aiClass then
+                    local aiComp = dugbog:GetComponentByClass(aiClass)
+                    if aiComp then
+                        aiComp:SetCanAttack(false)
+                        print(TAG .. " EnemyAIComponent:SetCanAttack(false): OK")
+                        aiComp:ForceDisengagedState()
+                        print(TAG .. " EnemyAIComponent:ForceDisengagedState(): OK")
+                        aiComp:SetWanderMode()
+                        print(TAG .. " EnemyAIComponent:SetWanderMode(): OK")
                     else
-                        print(string.format("%s   Activity: none/invalid", TAG))
-                    end
-
-                    -- Upcoming activity
-                    local up1, up2 = {}, {}
-                    pcall(function() se:GetUpcomingActivity(up1, up2) end)
-                    if up1.ActivityIsValid then
-                        local actId = "?"
-                        pcall(function() actId = up1.Activity:ToString() end)
-                        local locKey = "?"
-                        pcall(function() locKey = up1.LocationKey:ToString() end)
-                        print(string.format("%s   Upcoming: %s at %s [%s-%s]",
-                            TAG, actId, locKey,
-                            tostring(up1.StartTime), tostring(up1.EndTime)))
-                    end
-
-                    -- Active station
-                    pcall(function()
-                        local stationComp = se:GetActiveStation()
-                        if stationComp then
-                            local owner = nil
-                            pcall(function() owner = stationComp:GetOwner() end)
-                            if owner then
-                                local ownerName = "?"
-                                pcall(function() ownerName = owner:GetFullName() end)
-                                print(string.format("%s   Station: %s", TAG, ownerName))
-                            end
-                        else
-                            print(string.format("%s   Station: none", TAG))
-                        end
-                    end)
-
-                    -- Player distance
-                    pcall(function()
-                        local player = staticData.player
-                        if player and inFlesh then
-                            local flesh = se:GetFlesh()
-                            if flesh then
-                                local npcLoc = flesh:K2_GetActorLocation()
-                                local playerLoc = player:K2_GetActorLocation()
-                                local dx = npcLoc.X - playerLoc.X
-                                local dy = npcLoc.Y - playerLoc.Y
-                                local dz = npcLoc.Z - playerLoc.Z
-                                local dist = math.sqrt(dx*dx + dy*dy + dz*dz) / 100
-                                print(string.format("%s   Distance: %.0fm", TAG, dist))
-                            end
-                        end
-                    end)
-                end
-            end
-        end
-
-        -- Force-flesh + hobo clear for committed NPCs not in flesh
-        for _, entry in ipairs(npcList) do
-            if entry.commitment and entry.commitment.applied then
-                local se = nil
-                pcall(function() se = popManager:GetScheduledEntityFromName(entry.id) end)
-                if se then
-                    local inFlesh = false
-                    pcall(function() inFlesh = se:CurrentlyInFlesh() end)
-                    if not inFlesh then
-                        print(string.format("%s   Force-fleshing %s...", TAG, entry.id))
-                        pcall(function()
-                            se:StartPrecachingFlesh(5, nil, 50000.0, true, 0, 0)
-                        end)
-                        pcall(function()
-                            local player = staticData.player
-                            local playerLoc = player:K2_GetActorLocation()
-                            local transform = {
-                                Translation = { X = playerLoc.X + 200, Y = playerLoc.Y + 200, Z = playerLoc.Z },
-                                Rotation = { X = 0, Y = 0, Z = 0, W = 1 },
-                                Scale3D = { X = 1, Y = 1, Z = 1 }
-                            }
-                            popManager:PlaceScheduledEntityBP(entry.id, transform)
-                            print(string.format("%s   PlaceScheduledEntityBP called for %s", TAG, entry.id))
-                        end)
+                        print(TAG .. " No EnemyAIComponent on actor")
                     end
                 end
-                -- Clear hobos
-                if _G.CommitmentManager then
-                    pcall(_G.CommitmentManager.ClearNearbyHobos, entry.id)
-                end
-            end
-        end
+            end)
 
-        print(TAG .. " === CHECK COMPLETE ===")
+            -- CharacterStateInfo: non-targetable
+            pcall(function()
+                local csi = dugbog:GetCharacterStateInfo()
+                if csi then
+                    csi:SetAttackable(false)
+                    print(TAG .. " CharacterStateInfo:SetAttackable(false): OK")
+                else
+                    print(TAG .. " No CharacterStateInfo")
+                end
+            end)
+
+            print(TAG .. " --- Pacify complete ---")
+        end)
+
+        print(TAG .. " Press F7 again to destroy")
     end)
 end
 

@@ -13,7 +13,7 @@
     "reranker": "memory.reranker_model"
   },
   "gemini": {
-    "chat": "gemini-3-flash",
+    "chat": "gemini-3-flash-preview",
     "vision": "gemini-2.5-flash-lite",
     "target": "gemini-2.5-flash-lite",
     "interjection": "gemini-2.5-flash-lite",
@@ -25,7 +25,7 @@
     "reranker": "gemini-2.5-flash-lite"
   },
   "openrouter": {
-    "chat": "google/gemini-3-flash",
+    "chat": "google/gemini-3-flash-preview",
     "vision": "google/gemini-2.5-flash-lite:nitro",
     "target": "meta-llama/llama-4-scout:nitro",
     "interjection": "x-ai/grok-4.1-fast",

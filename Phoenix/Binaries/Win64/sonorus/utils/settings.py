@@ -7,8 +7,8 @@ import os
 import json
 from datetime import date
 
-# Gemini 3 Flash - use GA version after March 2026
-GEMINI_3_GA_DATE = date(2026, 3, 1)
+# Gemini 3 Flash - use GA version after June 2026
+GEMINI_3_GA_DATE = date(2026, 6, 1)
 GEMINI_3_FLASH = 'gemini-3-flash' if date.today() >= GEMINI_3_GA_DATE else 'gemini-3-flash-preview'
 
 # ============================================

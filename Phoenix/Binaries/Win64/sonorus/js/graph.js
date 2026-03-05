@@ -563,22 +563,26 @@ async function clearNpcGraph() {
 
         if (data.success) {
             showToast(`Cleared ${shortName}'s memories: ${data.nodes_deleted} entities, ${data.edges_deleted} relationships`, 'success');
-            loadNpcGraph(); // Reload (will show empty state)
+        } else if (data.chapters_cleared) {
+            showToast(`Cleared ${shortName}'s chapters (graph clear failed: ${data.error || 'unknown'})`, 'warning');
+        } else {
+            showToast(data.error || 'Clear failed', 'error');
+        }
 
-            // Refresh migration status so the migrate button can reappear
+        // Always refresh UI if chapters were cleared (regardless of graph success)
+        if (data.success || data.chapters_cleared) {
+            loadNpcGraph();
+
             if (typeof loadMigrationStatus === 'function') {
                 await loadMigrationStatus();
             }
 
-            // If the dialogue history is currently filtered to this NPC, refresh to update migrate button
             const historyPerspective = document.getElementById('historyPerspective');
             if (historyPerspective && historyPerspective.value === npcId) {
                 if (typeof filterHistoryByPerspective === 'function') {
                     await filterHistoryByPerspective(false);
                 }
             }
-        } else {
-            showToast(data.error || 'Clear failed', 'error');
         }
     } catch (e) {
         console.error('Clear graph failed:', e);

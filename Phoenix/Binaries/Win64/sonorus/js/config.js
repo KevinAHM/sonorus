@@ -35,7 +35,7 @@ const TTS_PROVIDERS = {
             { id: "api_url", type: "text", label: "API URL", placeholder: "https://api.inworld.ai", default: "https://api.inworld.ai", hint: "Base URL for the Inworld API (leave default unless using a proxy)" },
             { id: "workspace_id", type: "text", label: "Workspace ID", placeholder: "default-xxxxx", hint: "Find this in the API Keys section (bottom left of sidebar) in the Inworld console" },
             { id: "api_key", type: "password", label: "API Key", placeholder: "Base64 encoded key", hint: "Use Basic (Base64) key, not JWT — <strong>\u26a0\ufe0f select \"Write\" access when creating (not \"Read\")</strong>", validate: validateInworldApiKey },
-            { id: "model", type: "text", label: "TTS Model", placeholder: "inworld-tts-1.5-max", default: "inworld-tts-1.5-max", hint: "<strong>inworld-tts-1.5-max</strong> (highest quality, recommended), <strong>inworld-tts-1.5-mini</strong> cheaper and slightly faster", onChange: "onInworldModelChange" },
+            { id: "model", type: "text", label: "TTS Model", placeholder: "inworld-tts-1.5-max", default: "inworld-tts-1.5-max", hint: "<strong>inworld-tts-1.5-max</strong> (highest quality, recommended), <strong>inworld-tts-1.5-mini</strong> (cheaper and slightly faster)", onChange: "onInworldModelChange" },
             { id: "temperature", type: "range", label: "TTS Temperature", hint: "Higher = more expressive but can cause instability/artifacts. Default is tuned for balance. For per-NPC adjustments, use <a href=\"#chapterCharacters\" onclick=\"scrollToSection('chapterCharacters')\">Characters</a>.", min: 0.1, max: 2.0, step: 0.1, default: 1.1 },
             {
                 id: "sample_rate", type: "select", label: "Sample Rate", options: [
@@ -843,8 +843,8 @@ function validateLLMApiKey(value, providerId) {
     return null;
 }
 
-// Gemini 3 Flash - switches to GA version after March 2026
-const GEMINI_3_GA_DATE = new Date('2026-03-01');
+// Gemini 3 Flash - switches to GA version after June 2026
+const GEMINI_3_GA_DATE = new Date('2026-06-01');
 const GEMINI_3_IS_GA = new Date() >= GEMINI_3_GA_DATE;
 const GEMINI_3_FLASH = GEMINI_3_IS_GA ? 'gemini-3-flash' : 'gemini-3-flash-preview';
 const GEMINI_3_FLASH_OR = GEMINI_3_IS_GA ? 'google/gemini-3-flash' : 'google/gemini-3-flash-preview';

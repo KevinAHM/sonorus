@@ -1612,29 +1612,37 @@ def process_chat_request(data, is_continuation=False):
     commitments_enabled = settings.get('commitments', {}).get('enabled', False)
 
     action_parts = []
+    current_companion_id = game_context.get('companionId', '')
+    is_current_companion = current_companion_id and speaker_id.lower() == current_companion_id.lower()
 
     if companion_actions_enabled or house_points_enabled:
         # Header - explain format
-        if companion_actions_enabled and house_points_enabled:
-            action_parts.append("**Actions:** You may include actions at the END of your response using `[Action: X]` format. You can use multiple actions if appropriate. When awarding or deducting house points, you MUST announce it verbally in your dialogue before the action tag.")
-        elif house_points_enabled:
-            action_parts.append("**Actions:** You may optionally include an action at the END of your response using `[Action: X]` format. Most responses need no action. When awarding or deducting house points, you MUST announce it verbally in your dialogue before the action tag.")
+        if house_points_enabled and not companion_actions_enabled and not commitments_enabled:
+            # House points only — these are authority actions, no consent needed
+            action_parts.append(
+                "**Actions:** You may include actions at the END of your response using `[Action: X]` format. "
+                "When awarding or deducting house points, you MUST announce it verbally in your dialogue before the action tag."
+            )
         else:
-            action_parts.append("**Actions:** You may optionally include an action at the END of your response using `[Action: X]` format. Most responses need no action.")
+            hp_note = " House point actions are an exception — those are commands of authority and do not require consent." if house_points_enabled else ""
+            action_parts.append(
+                f"**Actions:** You may OPTIONALLY include an action at the END of your response using `[Action: X]` format. "
+                f"ONLY use an action when {player_name} explicitly requests, agrees to, or consents to something — or when you have proposed something and {player_name} has clearly accepted. "
+                f"Never add actions during casual conversation. The vast majority of responses should have NO action tag." + hp_note
+                + (" When awarding or deducting house points, you MUST announce it verbally in your dialogue before the action tag." if house_points_enabled else "")
+            )
 
         # Companion actions - show only the relevant action based on current state
         if companion_actions_enabled:
-            current_companion_id = game_context.get('companionId', '')
-            is_current_companion = current_companion_id and speaker_id.lower() == current_companion_id.lower()
             if is_current_companion:
                 action_parts.append(
                     f"- `[Action: LeaveCompanion]` - Stop being {player_name}'s companion. "
-                    f"Use when parting ways or if asked to stop accompanying them."
+                    f"ONLY use when {player_name} explicitly asks you to leave, stop following, or go away. Do NOT use for casual goodbyes or conversation pauses."
                 )
             else:
                 action_parts.append(
                     f"- `[Action: JoinAsCompanion]` - Become {player_name}'s traveling companion, following them on adventures. "
-                    f"Use when you genuinely want to accompany them."
+                    f"ONLY use when {player_name} explicitly invites you to come along, or when you offer and {player_name} clearly accepts."
                 )
 
         # House points actions (teachers only)
@@ -1651,12 +1659,16 @@ def process_chat_request(data, is_continuation=False):
             )
     elif commitments_enabled:
         # No companion/HP actions — add header for commitments only
-        action_parts.append("**Actions:** You may optionally include an action at the END of your response using `[Action: X]` format. Most responses need no action.")
+        action_parts.append(
+            f"**Actions:** You may OPTIONALLY include an action at the END of your response using `[Action: X]` format. "
+            f"ONLY use an action when {player_name} explicitly requests, agrees to, or consents to something — or when you have proposed something and {player_name} has clearly accepted. "
+            f"Never add actions during casual conversation. The vast majority of responses should have NO action tag."
+        )
 
     # Commitment actions (only when enabled)
     if commitments_enabled:
         from utils.commitments import build_commitment_action_instructions
-        action_parts.extend(build_commitment_action_instructions(player_name))
+        action_parts.extend(build_commitment_action_instructions(player_name, is_current_companion=is_current_companion))
 
     if action_parts:
         prompt = f"{prompt}\n\n" + "\n".join(action_parts)

@@ -426,26 +426,30 @@ def clear_npc_graph(npc_id):
     """Delete all nodes and edges for an NPC's graph, plus chapter data."""
     try:
         from utils.memory import GraphitiManager, ChapterManager
+        from utils.memory_queue import reset_npc_state
 
+        # Always clear chapter data and queue state so the NPC can be re-migrated,
+        # even if graph clear fails (e.g. corrupted Kuzu DB)
+        chapter_mgr = ChapterManager()
+        chapter_mgr.clear_npc_data(npc_id)
+        reset_npc_state(npc_id)
+
+        # Attempt to clear the graph (may fail if Kuzu DB is corrupted/missing)
+        graph_result = {"success": False, "error": "Graph not initialized"}
         graphiti_mgr = GraphitiManager()
-        if not graphiti_mgr.init_graphiti():
-            return jsonify({"success": False, "error": "Neo4j not connected"}), 503
-
-        result = graphiti_mgr.clear_graph(npc_id)
-
-        if result.get("success"):
-            # Also clear chapter data so the NPC can be re-migrated
-            chapter_mgr = ChapterManager()
-            chapter_mgr.clear_npc_data(npc_id)
-
-            # Reset queue checkpoint so entries are reprocessed from the beginning
-            from utils.memory_queue import reset_npc_state
-            reset_npc_state(npc_id)
-
-            print(f"[Memory] Cleared graph for {npc_id}")
-            return jsonify(result)
+        if graphiti_mgr.init_graphiti():
+            graph_result = graphiti_mgr.clear_graph(npc_id)
         else:
-            return jsonify(result), 400
+            print(f"[Memory] Could not init Graphiti for {npc_id} graph clear - chapters/state already cleared")
+
+        if graph_result.get("success"):
+            print(f"[Memory] Cleared graph + chapters for {npc_id}")
+            return jsonify(graph_result)
+        else:
+            # Graph clear failed but chapters/state were still cleared
+            print(f"[Memory] Graph clear failed for {npc_id} but chapters/state cleared: {graph_result.get('error')}")
+            graph_result["chapters_cleared"] = True
+            return jsonify(graph_result)
 
     except Exception as e:
         print(f"[Memory] Error clearing graph for {npc_id}: {e}")

@@ -678,6 +678,26 @@ class PlaybackCoordinator:
                 turn.playback_start_time = time.time()
                 playback_start_time = turn.playback_start_time
 
+                # Emit first sentence subtitle immediately to avoid client fallback
+                # flashing full text on first-turn cold starts (audio backend init).
+                if turn.sentence_boundaries and turn._sentence_subtitles and turn._last_subtitle_idx < 0:
+                    first = turn.sentence_boundaries[0]
+                    is_narr = bool(first.get('is_narration', False))
+                    bt = turn._get_boundary_time(first, 0)
+                    if bt is None:
+                        bt = float(first.get('start_time', 0.0) or 0.0)
+                    msg = {
+                        "type": "subtitle_update",
+                        "turn_id": turn.turn_id,
+                        "text": remove_unpaired_double_quotes(first.get('text', '')),
+                        "sentence_idx": 0,
+                        "total_sentences": len(turn.sentence_boundaries),
+                        "is_narration": is_narr,
+                    }
+                    self.lua_socket.send(msg)
+                    turn._last_subtitle_idx = 0
+                    print(f"[Subtitle] idx=0 at audio_pos=0.00s (boundary_start={bt:.2f}s, narration={is_narr})")
+
                 # 5. Start sync loop (sends new visemes + audio position)
                 self._stop_sync.clear()
                 self._sync_thread = threading.Thread(

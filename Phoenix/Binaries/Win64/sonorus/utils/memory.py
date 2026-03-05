@@ -356,6 +356,26 @@ class GraphitiManager:
             result = executor.submit(self._init_graphiti_impl, priority=TaskPriority.HIGH, timeout=60.0)
             return result.value if result.success else False
 
+    @staticmethod
+    def _backup_kuzu_db(kuzu_db_path: str) -> bool:
+        """Backup the Kuzu DB file and WAL after successful init."""
+        # NOTE: Kuzu DB is a single FILE (memory.kuzu), NOT a directory.
+        # WAL file is memory.kuzu.wal. Both are backed up at init (no active writes).
+        import shutil
+        backup_path = kuzu_db_path + ".backup"
+        wal_path = kuzu_db_path + ".wal"
+        wal_backup_path = wal_path + ".backup"
+        try:
+            if os.path.isfile(kuzu_db_path):
+                shutil.copy2(kuzu_db_path, backup_path)
+                if os.path.isfile(wal_path):
+                    shutil.copy2(wal_path, wal_backup_path)
+                print(f"[Memory/Kuzu] Backed up database to {backup_path}")
+                return True
+        except Exception as e:
+            print(f"[Memory/Kuzu] Backup failed: {e}")
+        return False
+
     def _init_graphiti_impl(self) -> bool:
         """Implementation of init_graphiti - runs on executor thread."""
         if self._graphiti is not None:
@@ -369,7 +389,7 @@ class GraphitiManager:
             memory_settings = settings.get('memory', {})
             provider = llm_settings.get('provider', 'gemini')
 
-            # Kuzu database path (stored in data folder)
+            # Kuzu database path - single FILE, not a directory. WAL file is memory.kuzu.wal.
             kuzu_db_path = os.path.join(DATA_DIR, "memory.kuzu")
 
             # Create Kuzu driver
@@ -560,6 +580,9 @@ class GraphitiManager:
             else:
                 print("[Memory/Graphiti] Schema already built this session")
 
+            # Backup DB after successful init so we can recover from future corruption
+            self._backup_kuzu_db(kuzu_db_path)
+
             return True
 
         except ImportError as e:
@@ -572,6 +595,14 @@ class GraphitiManager:
             print(f"[Memory] Failed to initialize Graphiti: {e}")
             import traceback
             traceback.print_exc()
+            kuzu_db_path = os.path.join(DATA_DIR, "memory.kuzu")
+            backup_path = kuzu_db_path + ".backup"
+            if os.path.exists(backup_path):
+                print(f"[Memory] Memory database may be corrupted. A backup exists at: {backup_path}")
+                print(f"[Memory] To restore: delete '{os.path.basename(kuzu_db_path)}' and its .wal file, rename the .backup files (remove the .backup extension), then restart.")
+            elif os.path.exists(kuzu_db_path):
+                print(f"[Memory] Memory database may be corrupted. No backup available.")
+                print(f"[Memory] To reset: delete '{os.path.basename(kuzu_db_path)}' and its .wal file, then restart.")
             return False
 
     async def _add_episode_async(self, npc_id: str, chapter_title: str,
@@ -862,6 +893,7 @@ class GraphitiManager:
             import kuzu
             import gc
 
+            # Kuzu DB is a single FILE, not a directory. WAL file is memory.kuzu.wal.
             kuzu_db_path = os.path.join(DATA_DIR, "memory.kuzu")
 
             # Release Graphiti's DB locks (same as clear_all_memories)

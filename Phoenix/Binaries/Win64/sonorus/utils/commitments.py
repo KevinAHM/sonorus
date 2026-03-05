@@ -679,7 +679,7 @@ def create_commitment_from_ui(npc_id, location_id, game_time_start, game_context
     return True, None, commitment
 
 
-def build_commitment_action_instructions(player_name):
+def build_commitment_action_instructions(player_name, is_current_companion=False):
     """Build action instruction strings for the LLM prompt.
     Returns a list of strings to append to action_parts.
     """
@@ -700,10 +700,11 @@ def build_commitment_action_instructions(player_name):
 
     parts.append(
         f'- `[Action: Meet "Name" at "Location" on "M/D/YYYY H:MM AM/PM"]` — '
-        f'Go to a location to meet someone. This is the ONLY way you can physically travel somewhere — '
-        f'use it whenever you agree to go somewhere, whether right now or later. '
-        f'For immediate trips, use the current date/time. '
-        f'The name should be "{player_name}" for the player. '
+        f'Go to a location to meet someone. This is the ONLY way you can physically travel somewhere. '
+        f'ONLY use when {player_name} explicitly agrees to meet somewhere, or when you propose a meeting and {player_name} clearly accepts. '
+        f'Casual mentions of places do NOT count — there must be a clear, mutual agreement to meet. '
+        f'{"Since you are already traveling with " + player_name + ", do NOT use this for immediate trips — only for future plans. " if is_current_companion else "For immediate trips, use the current date/time. "}'
+        f'Use "{player_name}" as the name when meeting them. '
         f'Do NOT commit and ask for agreement in the same response — wait for them to agree first.\n'
         f'  Available locations:\n  {locations_text}'
     )
