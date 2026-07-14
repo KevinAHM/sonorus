@@ -1,5 +1,5 @@
 BPML_GenericFunctions : 1
 BPModLoaderMod : 1
-ConsoleEnablerMod : 1
-ConsoleCommandsMod : 1
+ConsoleEnablerMod : 0
+ConsoleCommandsMod : 0
 SonorusMod : 1

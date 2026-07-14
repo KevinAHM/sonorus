@@ -109,6 +109,11 @@ if not exist "bin\oo2core_9_win64.dll" (
     powershell -Command "Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/WorkingRobot/OodleUE/refs/heads/main/Engine/Source/Programs/Shared/EpicGames.Oodle/Sdk/2.9.10/win/redist/oo2core_9_win64.dll' -OutFile 'bin\oo2core_9_win64.dll'"
 )
 
+if not exist "bin\sfw.exe" (
+    echo Downloading Socket Firewall...
+    powershell -Command "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -Uri 'https://github.com/SocketDev/sfw-free/releases/latest/download/sfw-free-windows-x86_64.exe' -OutFile 'bin\sfw.exe'"
+)
+
 if not exist "bin\vgmstream\vgmstream-cli.exe" (
     echo Downloading vgmstream...
     if not exist "bin\vgmstream" mkdir "bin\vgmstream"
@@ -134,11 +139,11 @@ if errorlevel 1 (
 )
 
 :: Check if dependencies are installed
-"%PYTHON%" -c "import sys; import importlib.util; sys.exit(0 if all(importlib.util.find_spec(m) is not None for m in ['onnx_asr', 'websocket', 'diskcache', 'posthog', 'dotenv']) else 1)" >nul 2>&1
+"%PYTHON%" -c "import sys; import importlib.util; sys.exit(0 if all(importlib.util.find_spec(m) is not None for m in ['kaldi_native_fbank', 'real_ladybug', 'json_repair', 'qdrant_client']) else 1)" >nul 2>&1
 if errorlevel 1 (
     echo Installing Python dependencies...
-    "%PYTHON%" -m pip install setuptools wheel --no-warn-script-location -q
-    "%PYTHON%" -m pip install -r requirements.txt --no-warn-script-location
+    bin\sfw.exe "%PYTHON%" -m pip install setuptools wheel --no-warn-script-location -q
+    bin\sfw.exe "%PYTHON%" -m pip install -r requirements.txt --no-warn-script-location
     if errorlevel 1 (
         echo ERROR: Failed to install dependencies.
         echo. > server.lock.stop
@@ -158,12 +163,7 @@ if not exist "python\Lib\site-packages\tkinter" (
 
 :: heartbeat.py exits when server.py creates server.heartbeat, or when we write server.lock.stop
 
-:: Pre-download ONNX models (VAD + turn detection)
-if not exist "models\silero_vad.onnx" (
-    echo Downloading VAD model...
-    if not exist "models" mkdir models
-    powershell -Command "Invoke-WebRequest -Uri 'https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx' -OutFile 'models\silero_vad.onnx'"
-)
+:: Pre-download ONNX models (turn detection)
 if not exist "models\smart-turn-v3.2-cpu.onnx" (
     echo Downloading turn detection model...
     if not exist "models" mkdir models
@@ -175,7 +175,13 @@ if "%DEBUG_MODE%"=="1" set SONORUS_DEBUG=1
 echo Starting Sonorus server...
 echo The web interface will open in your browser shortly.
 echo.
+:server_loop
 "%PYTHON%" server.py
+if exist "data\.server_restart" (
+    del "data\.server_restart" 2>nul
+    echo Server restarting...
+    goto server_loop
+)
 
 :: Signal heartbeat to stop, clean up lock
 echo. > server.lock.stop

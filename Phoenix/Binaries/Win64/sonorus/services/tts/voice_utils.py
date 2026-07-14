@@ -205,12 +205,16 @@ def get_voice_reference_names(language: str = "EN_US") -> set:
     Get set of all voice names that have reference files for a specific language.
 
     Args:
-        language: Language code (e.g., "EN_US", "DE_DE") - determines search directory
+        language: Language code (e.g., "EN_US", "DE_DE") - determines search directory.
+                  Undubbed languages automatically fall back to EN_US.
 
     Returns:
         Set of voice names (e.g., {"SebastianSallow", "NatsaiOnai", ...})
     """
     global _voice_reference_cache
+
+    from constants import get_voice_language
+    language = get_voice_language(language)
 
     # For now, we cache only for the query, since language can vary
     # TODO: Could make cache language-aware with dict of sets
@@ -226,14 +230,19 @@ def get_voice_reference_names(language: str = "EN_US") -> set:
     if not os.path.exists(search_dir):
         return voice_names
 
-    # Pattern: {VoiceName}_reference_{duration}.wav
+    # Pattern: {VoiceName}_reference.wav or {VoiceName}_reference_{duration}.wav
     for f in os.listdir(search_dir):
-        if "_reference_" in f and f.endswith(".wav"):
-            # Extract voice name (everything before _reference_)
+        if not f.endswith(".wav"):
+            continue
+        if "_reference_" in f:
             voice_name = f.split("_reference_")[0]
-            if voice_name:
-                voice_names.add(voice_name)
-                voice_names.add(voice_name.lower())
+        elif f.endswith("_reference.wav"):
+            voice_name = f[:-len("_reference.wav")]
+        else:
+            continue
+        if voice_name:
+            voice_names.add(voice_name)
+            voice_names.add(voice_name.lower())
 
     # Update cache with EN_US results for backward compatibility
     if language == "EN_US":
@@ -257,7 +266,8 @@ def has_voice_reference(voice_name: str, language: str = "EN_US") -> bool:
 
     Args:
         voice_name: Internal voice ID (e.g., "SebastianSallow", "AdultMaleA")
-        language: Language code (e.g., "EN_US", "DE_DE") - determines search directory
+        language: Language code (e.g., "EN_US", "DE_DE") - determines search directory.
+                  Undubbed languages automatically fall back to EN_US.
 
     Returns:
         True if voice reference exists, False otherwise
@@ -290,18 +300,23 @@ def find_voice_reference(character_name: str, duration: str = "15s", language: s
 
     Searches:
     1. Language-specific directory (e.g., voice_references/de_de/ for German)
-    2. Exact name: {name}_reference_{duration}.wav
-    3. Without spaces: {nameNoSpaces}_reference_{duration}.wav
-    4. Case-insensitive search
+    2. Preferred exact name: {name}_reference.wav
+    3. Legacy exact name: {name}_reference_{duration}.wav
+    4. Without spaces
+    5. Case-insensitive search
 
     Args:
         character_name: Character name (e.g., "SebastianSallow" or "Sebastian Sallow")
         duration: Reference duration ("10s", "15s", or "60s")
-        language: Language code (e.g., "EN_US", "DE_DE") - determines search directory
+        language: Language code (e.g., "EN_US", "DE_DE") - determines search directory.
+                  Undubbed languages automatically fall back to EN_US.
 
     Returns:
         Path to reference file, or None if not found
     """
+    from constants import get_voice_language
+    language = get_voice_language(language)
+
     # Determine search directory based on language
     if language == "EN_US":
         search_dir = VOICE_REFERENCES_DIR  # voice_references/
@@ -313,17 +328,23 @@ def find_voice_reference(character_name: str, duration: str = "15s", language: s
         return None
 
     # Try exact name first
-    filename = f"{character_name}_reference_{duration}.wav"
-    path = os.path.join(search_dir, filename)
-    if os.path.exists(path):
-        return path
+    for filename in (
+        f"{character_name}_reference.wav",
+        f"{character_name}_reference_{duration}.wav",
+    ):
+        path = os.path.join(search_dir, filename)
+        if os.path.exists(path):
+            return path
 
     # Try without spaces (e.g., "Nellie Oggspire" -> "NellieOggspire")
     name_no_spaces = character_name.replace(" ", "")
-    filename_no_spaces = f"{name_no_spaces}_reference_{duration}.wav"
-    path_no_spaces = os.path.join(search_dir, filename_no_spaces)
-    if os.path.exists(path_no_spaces):
-        return path_no_spaces
+    for filename in (
+        f"{name_no_spaces}_reference.wav",
+        f"{name_no_spaces}_reference_{duration}.wav",
+    ):
+        path_no_spaces = os.path.join(search_dir, filename)
+        if os.path.exists(path_no_spaces):
+            return path_no_spaces
 
     # Try uppercase variant using lowercase_map (e.g., "neridaroberts" -> "NeridaRoberts")
     # lowercase_map structure: {"NeridaRoberts": "neridaroberts"}
@@ -332,11 +353,14 @@ def find_voice_reference(character_name: str, duration: str = "15s", language: s
 
     for upper_name, lower_name in lowercase_map.items():
         if lower_name == name_no_spaces_lower:
-            filename = f"{upper_name}_reference_{duration}.wav"
-            path = os.path.join(search_dir, filename)
-            if os.path.exists(path):
-                print(f"[Voice] Lowercase map match: '{character_name}' -> '{upper_name}' -> {filename}")
-                return path
+            for filename in (
+                f"{upper_name}_reference.wav",
+                f"{upper_name}_reference_{duration}.wav",
+            ):
+                path = os.path.join(search_dir, filename)
+                if os.path.exists(path):
+                    print(f"[Voice] Lowercase map match: '{character_name}' -> '{upper_name}' -> {filename}")
+                    return path
 
     # Try case-insensitive search with multiple name variants
     name_lower = character_name.lower()
@@ -345,7 +369,7 @@ def find_voice_reference(character_name: str, duration: str = "15s", language: s
     for f in os.listdir(search_dir):
         f_lower = f.lower()
         # Match with or without spaces in the character name
-        if f"_{duration}.wav" in f_lower:
+        if f_lower.endswith("_reference.wav") or f_lower.endswith(f"_reference_{duration}.wav"):
             if f_lower.startswith(name_lower) or f_lower.startswith(name_lower_no_spaces):
                 return os.path.join(search_dir, f)
 

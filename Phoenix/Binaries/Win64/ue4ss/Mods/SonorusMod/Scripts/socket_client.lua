@@ -7,9 +7,15 @@ local json = require("json")
 local Utils = require("Utils.Utils")
 local TimeDilation = require("Utils.TimeDilation")
 local Cache = require("Utils.Cache")
+local TickScheduler = require("Utils.TickScheduler")
+local BlueprintHelpers = require("Utils.BlueprintHelpers")
 
 -- Local dev print helper (DevPrint in logic.lua not loaded yet)
 local function DevPrint(...)
+    if _G.DevPrint then
+        _G.DevPrint(...)
+        return
+    end
     if _G.SonorusDevMode then
         print(...)
     end
@@ -61,11 +67,14 @@ _G.STTPreviewLock = _G.STTPreviewLock or nil
 local PREVIEW_LOCK_TIMEOUT = 15
 
 -- Pause state tracking for immediate context updates
-_G.LastKnownPauseState = _G.LastKnownPauseState or false
+_G.GamePauseState = _G.GamePauseState or { isPaused = true, hasBPEvent = false, updatedAt = 0 }
+_G.LastKnownPauseState = (_G.LastKnownPauseState == nil) and true or _G.LastKnownPauseState
 
 -- Activity state from Python (for ambient dialog gating)
 _G.GameWindowForeground = (_G.GameWindowForeground == nil) and true or _G.GameWindowForeground  -- Default true until Python says otherwise
 _G.PlayerIdleState = _G.PlayerIdleState or false  -- Default false until Python says otherwise
+_G.GameSubtitlesEnabled = _G.GameSubtitlesEnabled  -- nil = unknown, true/false = synced from Python
+_G.ConversationFPVTransition = _G.ConversationFPVTransition or "normal"
 
 -- Conversation mode (runtime only, cycled via Home key)
 -- "default" = normal (max turns, interjections), "1to1" = no interjections, "continuous" = no turn limit
@@ -74,10 +83,7 @@ _G.ConversationMode = _G.ConversationMode or "default"
 -- Tracking settings from config (for dialogue recording toggles)
 _G.TrackAmbientDialogue = (_G.TrackAmbientDialogue == nil) and true or _G.TrackAmbientDialogue  -- Default true
 _G.TrackCutsceneDialogue = (_G.TrackCutsceneDialogue == nil) and true or _G.TrackCutsceneDialogue  -- Default true
--- Companion callout repeat blocking: 0 = disabled, -1 = never repeat, >0 = block within N game minutes
--- Default: 1440 (24 hours = 1 game day)
-_G.CompanionCalloutBlockMinutes = (_G.CompanionCalloutBlockMinutes == nil) and 1440 or _G.CompanionCalloutBlockMinutes
-
+_G.AutoMuteAmbientEnabled = (_G.AutoMuteAmbientEnabled == nil) and true or _G.AutoMuteAmbientEnabled  -- Default true
 -- Significant NPCs list (synced from Python on connect)
 -- voiceName -> true for quick lookup
 _G.SignificantNPCs = _G.SignificantNPCs or {}
@@ -87,59 +93,80 @@ _G.InsignificantPrefixes = _G.InsignificantPrefixes or {"t3", "midres"}
 -- NOTE: Always use _G.SonorusState directly (no local State shadows) to avoid
 -- closure capture issues that could corrupt UE4SS Lua registry references
 
--- Fast socket poll: temporary 25ms loop for when Python is waiting on a response.
+-- Fast socket poll: temporary 25ms task for when Python is waiting on a response.
 -- The unified loop runs at 100ms, so messages can wait 0-100ms to be read.
 -- When we know a follow-up message is imminent (e.g. after sending turn_ready,
--- Python will send lipsync_start), we spin up a fast poll to cut that wait.
--- Persists across F11 reloads via _G, self-cancels after expiry.
--- Cancel any stale fast poll from previous F11 reload
+-- Python will send lipsync_start), the shared tick scheduler polls faster.
 if _G._FastPoll and _G._FastPoll.handle then
     pcall(CancelDelayedAction, _G._FastPoll.handle)
 end
 _G._FastPoll = { handle = nil, expiry = 0 }
 
+local function FastPollTick()
+    if os.clock() > (_G._FastPoll.expiry or 0) then
+        return
+    end
+
+    -- Only do socket I/O (cheap, non-blocking)
+    if client and connectionState.connected then
+        pcall(SocketClient.update)
+    end
+end
+
 local function EnableFastPoll(durationSeconds)
     local fp = _G._FastPoll
     fp.expiry = os.clock() + (durationSeconds or 2.0)
-
-    if fp.handle then return end  -- already running
-
-    fp.handle = LoopInGameThreadWithDelay(25, function()
-        if os.clock() > _G._FastPoll.expiry then
-            CancelDelayedAction(_G._FastPoll.handle)
-            _G._FastPoll.handle = nil
-            return
-        end
-        -- Only do socket I/O (cheap, non-blocking)
-        if client and connectionState.connected then
-            pcall(SocketClient.update)
-        end
-    end)
 end
 
 local function DisableFastPoll()
     local fp = _G._FastPoll
-    fp.expiry = 0  -- loop will self-cancel on next tick
+    fp.expiry = 0
 end
 
--- Pause state monitor (500ms interval) - pushes context update on change
-if not _G.PauseMonitorStarted then
-    _G.PauseMonitorStarted = true
-    _G.PauseMonitorHandle = LoopInGameThreadWithDelay(500, function()
-        local currentPaused = Utils.IsGamePaused()
+TickScheduler.Register("socket_fast_poll", 23, FastPollTick)
+
+local function GetActorIdentityKey(actor)
+    if not actor or not Utils.SafeIsValid(actor) then
+        return nil
+    end
+
+    local fullName = nil
+    pcall(function() fullName = actor:GetFullName() end)
+    if fullName and fullName ~= "" then
+        return fullName
+    end
+
+    return tostring(actor)
+end
+
+-- Pause + cinematic monitor (500ms interval)
+-- Owns BOTH pause state and cinematic detection in a single callback so
+-- the ViewTarget cinematic check always sees fresh pause state (no race).
+-- Cinematic runs every other tick (~1000ms), after the pause boolean update.
+_G.PauseMonitorStarted = true
+_G._PauseMonitorTick = _G._PauseMonitorTick or 0
+local function PauseMonitorTick()
+        if not _G.SonorusState.playerLoaded then return end
+        -- 1) Pause state (every tick)
+        local ok_pause, currentPaused = pcall(Utils.IsGamePaused)
+        if not ok_pause then
+            DevPrint("[PauseMon] IsGamePaused error: " .. tostring(currentPaused))
+            currentPaused = _G.LastKnownPauseState or false
+        end
+        -- DevPrint("[PauseMon] paused=" .. tostring(currentPaused) .. " last=" .. tostring(_G.LastKnownPauseState))
         if currentPaused ~= _G.LastKnownPauseState then
             _G.LastKnownPauseState = currentPaused
             print("[SocketClient] Pause state changed: " .. tostring(currentPaused))
-            -- Send immediate context update to Python
-            -- Use _G.SocketClient so this works after F11 reload (closure has stale reference)
-            -- If paused and chat was active, close it locally (even if Python is dead)
+            if currentPaused and StopAmbientGaze then
+                DevPrint("[PauseMon] stopping ambient gaze")
+                pcall(function() StopAmbientGaze("pause changed") end)
+            end
             if currentPaused and _G.ChatInputState.active then
-                -- Restore normal game input first
+                DevPrint("[PauseMon] clearing chat input (paused)")
                 if SetInputModeGameOnly then
                     SetInputModeGameOnly()
                 end
-                -- Clear the hint immediately (already on game thread)
-                local uiManager = FindFirstOf("UIManager")
+                local uiManager = Cache.Get("UIManager", function() return FindFirstOf("UIManager") end)
                 if Utils.SafeIsValid(uiManager) then
                     pcall(function()
                         uiManager:ClearHintMessage()
@@ -147,46 +174,38 @@ if not _G.PauseMonitorStarted then
                 end
                 _G.ChatInputState.active = false
                 _G.ChatInputState.text = ""
-                -- Release chat preview lock if active AND in interruptible state
                 if _G.ChatPreviewLock then
                     local lockState = _G.ChatPreviewLock.state
                     if lockState == "typing" then
-                        -- Still typing, release on pause
                         if ReleaseNPC then
                             ReleaseNPC(_G.ChatPreviewLock.lockId)
                         end
                         _G.ChatPreviewLock = nil
                         print("[Chat] Preview lock released (game paused while typing)")
                     else
-                        -- submitted state - keep lock, let timeout handle it
-                        -- (user might unpause and server might still respond)
                         print("[Chat] Game paused but lock state=" .. tostring(lockState) .. ", keeping for timeout")
                     end
                 end
-                -- Release STT preview lock if active AND in interruptible state
                 if _G.STTPreviewLock then
                     local lockState = _G.STTPreviewLock.state
                     if lockState == "speaking" then
-                        -- Still speaking, release on pause
                         if ReleaseNPC then
                             ReleaseNPC(_G.STTPreviewLock.lockId)
                         end
                         _G.STTPreviewLock = nil
                         print("[STT] Preview lock released (game paused while speaking)")
                     else
-                        -- processing state - keep lock, let timeout handle it
                         print("[STT] Game paused but lock state=" .. tostring(lockState) .. ", keeping for timeout")
                     end
                 end
             end
 
-            -- Send pause state to Python (if connected)
             if _G.SocketClient and _G.SocketClient.isConnected() then
+                DevPrint("[PauseMon] sending pause_state to server")
                 _G.SocketClient.send({
                     type = "pause_state",
                     paused = currentPaused
                 })
-                -- Tell Python to close chat input capture
                 if currentPaused and _G.ChatInputState then
                     _G.SocketClient.send({
                         type = "force_close_chat",
@@ -195,9 +214,76 @@ if not _G.PauseMonitorStarted then
                 end
             end
         end
-    end)
-    print("[SocketClient] Pause state monitor started")
+
+        -- 2) Cinematic detection every other tick (~1000ms)
+        -- Guaranteed to see fresh currentPaused from step 1 above.
+        _G._PauseMonitorTick = _G._PauseMonitorTick + 1
+        if _G._PauseMonitorTick % 2 == 0
+            and _G.SonorusState and _G.SonorusState.playerLoaded
+        then
+            -- DevPrint("[PauseMon] cinematic check tick=" .. tostring(_G._PauseMonitorTick))
+            local inCinematic = false
+            local ok_cin, cin_err = pcall(function()
+                local bpCinematic = BlueprintHelpers and BlueprintHelpers.IsInCinematic and BlueprintHelpers.IsInCinematic()
+                if bpCinematic ~= nil then
+                    inCinematic = bpCinematic == true
+                    return
+                end
+
+                local staticData = GetStaticCache and GetStaticCache()
+                if not staticData then
+                    DevPrint("[PauseMon] no staticData")
+                    return
+                end
+                local player = staticData.player
+                if not player or not player:IsValid() then
+                    DevPrint("[PauseMon] player nil or invalid")
+                    return
+                end
+
+                -- Native InCinematic flag
+                if IsInCinematicState then
+                    inCinematic = IsInCinematicState(player)
+                else
+                    inCinematic = player.InCinematic or false
+                end
+                -- DevPrint("[PauseMon] native inCinematic=" .. tostring(inCinematic))
+
+                -- ViewTarget check — skip when paused (pause menus swap ViewTarget)
+                if not inCinematic and not currentPaused then
+                    local pc = staticData.playerController
+                    if pc and pc:IsValid() and pc.GetViewTarget then
+                        local vt = pc:GetViewTarget()
+                        if vt and vt:IsValid() then
+                            local vtClass = vt:GetClass():GetFName():ToString()
+                            -- DevPrint("[PauseMon] ViewTarget class=" .. tostring(vtClass))
+                            if vtClass ~= "BP_ThirdPersonCameraStackActor_C" then
+                                inCinematic = true
+                            end
+                        else
+                            DevPrint("[PauseMon] ViewTarget nil or invalid")
+                        end
+                    else
+                        DevPrint("[PauseMon] playerController nil/invalid or no GetViewTarget")
+                    end
+                end
+            end)
+            if not ok_cin then
+                DevPrint("[PauseMon] cinematic check error: " .. tostring(cin_err))
+            end
+
+            if Events and Events.setState then
+                if Events.setState("cinematic", inCinematic) then
+                    DevPrint("[PauseMon] cinematic state changed to " .. tostring(inCinematic))
+                    _G.CinematicState = _G.CinematicState or {}
+                    _G.CinematicState.active = inCinematic
+                end
+            end
+        end
+        -- DevPrint("[PauseMon] tick end")
 end
+TickScheduler.Register("socket_pause_monitor", 413, PauseMonitorTick)
+print("[SocketClient] Pause + cinematic monitor registered")
 
 -- NOTE: 30ms chat input poll loop REMOVED - consolidated into 100ms unified loop in logic.lua
 -- The 100ms interval is fast enough for responsive chat input while reducing CPU load
@@ -273,6 +359,22 @@ function SocketClient.connect()
         if RefreshHousePoints then
             RefreshHousePoints()
         end
+
+        -- Re-send player handshake on reconnect (for server restarts)
+        -- so the server can initialize per-player DBs
+        if _G.SonorusState and _G.SonorusState.playerLoaded and _G.SonorusState.playerName
+           and _G.SonorusState.playerName ~= ""
+           and _G.SonorusState.playerNameConfirmed == true
+           and _G.SonorusState.playerNameHandshakeGeneration == (_G.SonorusState.loadGeneration or 0) then
+            SocketClient.send({
+                type = "player_handshake",
+                data = { playerName = _G.SonorusState.playerName }
+            })
+            print("[SocketClient] Sent player_handshake on reconnect: " .. _G.SonorusState.playerName)
+        elseif _G.SonorusState and _G.SonorusState.playerLoaded and _G.SonorusState.playerName
+           and _G.SonorusState.playerName ~= "" then
+            print("[SocketClient] Skipped reconnect player_handshake; player name not confirmed for current load")
+        end
     else
         -- Failed - track retries
         connectionState.connected = false
@@ -339,7 +441,7 @@ function SocketClient.update()
             return
         end
     end
-
+    
     -- Process complete messages (newline-delimited JSON)
     while true do
         local newlinePos = string.find(buffer, "\n")
@@ -359,6 +461,96 @@ function SocketClient.update()
     end
 end
 
+-- Execute NPC actions (companion join/leave, follow/stop) from a queue item
+local function ExecuteNPCAction(currentItem)
+    if not currentItem or not currentItem.action or currentItem.action == "None" then return end
+    local action = currentItem.action
+    local speakerId = currentItem.speakerId or currentItem.speaker
+
+    if action == "JoinAsCompanion" then
+        if speakerId and MakeCompanion then
+            -- Remove from followers first if they were following
+            if _G.CompanionFollow and _G.CompanionFollow.isFollower and _G.CompanionFollow.isFollower(speakerId) then
+                pcall(function() _G.CompanionFollow.removeFollower(speakerId) end)
+                print("[Socket] Removed " .. speakerId .. " from followers before making companion")
+            end
+            local ok = MakeCompanion(speakerId)
+            print("[Socket] JoinAsCompanion: " .. tostring(speakerId) .. " -> " .. (ok and "OK" or "FAILED") .. "\n")
+        else
+            print("[Socket] Cannot JoinAsCompanion - no speaker ID or MakeCompanion unavailable\n")
+        end
+    elseif action == "LeaveCompanion" then
+        if ClearCompanion then
+            local ok = ClearCompanion()
+            print("[Socket] LeaveCompanion -> " .. (ok and "OK" or "FAILED") .. "\n")
+        else
+            print("[Socket] Cannot LeaveCompanion - ClearCompanion unavailable\n")
+        end
+    elseif action == "Follow" then
+        if speakerId and _G.CompanionFollow and _G.CompanionFollow.addFollower then
+            local speakerActor = currentItem.speakerActor
+            if speakerActor then
+                local ok = _G.CompanionFollow.addFollower(speakerActor, speakerId)
+                print("[Socket] Follow: " .. tostring(speakerId) .. " -> " .. (ok and "OK" or "FAILED") .. "\n")
+            else
+                print("[Socket] Cannot Follow - no speaker actor\n")
+            end
+        else
+            print("[Socket] Cannot Follow - no speaker ID or CompanionFollow unavailable\n")
+        end
+    elseif action == "StopFollowing" then
+        if speakerId and _G.CompanionFollow and _G.CompanionFollow.removeFollower then
+            local ok = _G.CompanionFollow.removeFollower(speakerId)
+            print("[Socket] StopFollowing: " .. tostring(speakerId) .. " -> " .. (ok and "OK" or "FAILED") .. "\n")
+        else
+            print("[Socket] Cannot StopFollowing - no speaker ID or CompanionFollow unavailable\n")
+        end
+    end
+end
+
+-- Execute house point actions from a queue item
+local function ExecuteHousePointActions(currentItem)
+    if not currentItem or not currentItem.housePointActions or #currentItem.housePointActions == 0 then return end
+    for _, hpAction in ipairs(currentItem.housePointActions) do
+        local actionType = hpAction.action
+        local house = hpAction.house
+        local amount = hpAction.amount
+
+        if actionType and house and amount then
+            local statName = house .. "_Housepoints"
+            local pointsToAdd = amount
+            if actionType == "DeductPoints" then
+                pointsToAdd = -amount
+            end
+
+            pcall(function()
+                local statsManager = Cache.Get("StatsManager", function()
+                    return FindFirstOf("StatsManager")
+                end)
+                if statsManager then
+                    local statFName = FName(statName)
+                    local exists = statsManager:StatExists(statFName)
+                    if exists then
+                        statsManager:UpdateStat(statFName, pointsToAdd)
+                        local verb = actionType == "AwardPoints" and "Awarded" or "Deducted"
+                        print(string.format("[Socket] House Points: %s %d points %s %s\n",
+                            verb, amount, actionType == "AwardPoints" and "to" or "from", house))
+                    else
+                        print("[Socket] House Points stat not found: " .. statName .. " (mod may not be installed)\n")
+                    end
+                else
+                    print("[Socket] StatsManager not found for house points\n")
+                end
+            end)
+        end
+    end
+    if RefreshHousePoints then
+        ExecuteInGameThreadWithDelay(500, function()
+            RefreshHousePoints()
+        end)
+    end
+end
+
 function SocketClient.handleMessage(data)
     local msgType = data.type
 
@@ -368,6 +560,7 @@ function SocketClient.handleMessage(data)
         activity_state = true,
         tracking_settings = true,
         sync_significant_npcs = true,
+        ambient_blocklist = true,
         reset = true,
         reload_history = true,
         notification = true,
@@ -375,6 +568,9 @@ function SocketClient.handleMessage(data)
         fast_poll = true,
         activate_commitment = true,
         deactivate_commitment = true,
+        start_guide_path = true,
+        stop_guide_path = true,
+        player_ready = true,
     }
 
     -- Block active mod functionality when mod is disabled
@@ -396,13 +592,23 @@ function SocketClient.handleMessage(data)
         return
     end
 
+    -- Handle player_ready early - handshake response from server
+    if msgType == "player_ready" then
+        print("[SocketClient] Received player_ready\n")
+        if OnPlayerReady then
+            OnPlayerReady()
+        end
+        return
+    end
+
     -- Handle request_context early - doesn't need SonorusState/VisemeData
     if msgType == "request_context" then
         local groups = data.groups
+        local params = data.params  -- optional per-group parameters from server
         if groups and #groups > 0 and groups[1] ~= "all" then
             if WriteSelectiveContext then
                 print("[Socket] Sending selective context: " .. table.concat(groups, ", "))
-                WriteSelectiveContext(groups)
+                WriteSelectiveContext(groups, params)
             else
                 print("[Socket] WriteSelectiveContext not available, falling back to full context")
                 if WriteGameContext then WriteGameContext() end
@@ -444,11 +650,18 @@ function SocketClient.handleMessage(data)
         end
         _G.TrackAmbientDialogue = data.track_ambient
         _G.TrackCutsceneDialogue = data.track_cutscene
-        -- Companion callout repeat blocking: 0 = disabled, -1 = never repeat, >0 = N game minutes
-        _G.CompanionCalloutBlockMinutes = data.companion_callout_block_minutes or 1440
+        if data.auto_mute_ambient ~= nil then
+            _G.AutoMuteAmbientEnabled = data.auto_mute_ambient
+        end
         -- Preview lock: lock NPC while typing/speaking (before sending message)
         if data.preview_lock ~= nil then
             _G.PreviewLockEnabled = data.preview_lock
+        end
+        -- Synced from Python's GameUserSettings.ini check; nil means unknown/unreadable
+        if data.subtitles_enabled ~= nil then
+            _G.GameSubtitlesEnabled = data.subtitles_enabled
+        else
+            _G.GameSubtitlesEnabled = nil
         end
         -- Sync dev mode from Python settings
         if data.dev_mode ~= nil then
@@ -475,10 +688,45 @@ function SocketClient.handleMessage(data)
             _G.CompanionFollowDistanceUU = data.companion_follow_distance_m * 100
             if CompanionFollow then pcall(CompanionFollow.applySettings) end
         end
+        -- NPC followers enabled
+        if data.followers_enabled ~= nil then
+            local wasEnabled = _G.FollowersEnabled
+            _G.FollowersEnabled = data.followers_enabled
+            if wasEnabled and not data.followers_enabled then
+                print("[Socket] Followers DISABLED - releasing all followers")
+                if _G.CompanionFollow and _G.CompanionFollow.removeAllFollowers then
+                    pcall(_G.CompanionFollow.removeAllFollowers)
+                end
+            end
+        end
+        if data.floo_companions_installed ~= nil then
+            _G.FlooCompanionsInstalled = data.floo_companions_installed
+        end
+        -- Conversation FPV (auto first-person during conversations)
+        if data.conversation_fpv ~= nil then
+            _G.ConversationFPVEnabled = data.conversation_fpv
+        end
+        if data.conversation_fpv_transition ~= nil then
+            _G.ConversationFPVTransition = data.conversation_fpv_transition
+        end
+        -- Conversation look-at-speaker (camera faces speaking NPC)
+        if data.conversation_look_at_speaker ~= nil then
+            _G.ConversationLookAtSpeakerEnabled = data.conversation_look_at_speaker
+        end
+        -- Attention meter settings
+        if data.attention_meter_enabled ~= nil then
+            _G.AttentionMeterEnabled = data.attention_meter_enabled
+        end
+        if data.attention_cold_approach_enabled ~= nil then
+            _G.AttentionColdApproachEnabled = data.attention_cold_approach_enabled
+        end
+        if data.gaze_enabled ~= nil then
+            _G.NPCAmbientGazeEnabled = data.gaze_enabled
+        end
         -- TTS provider ("none" = disabled, shows bracketed text in subtitles)
         _G.TtsProvider = data.tts_provider or ""
-        print(string.format("[Socket] Tracking settings: mod_enabled=%s, ambient=%s, cutscene=%s, companion_block_mins=%s, dev_mode=%s, lang=%s, tts=%s",
-            tostring(data.mod_enabled), tostring(data.track_ambient), tostring(data.track_cutscene), tostring(_G.CompanionCalloutBlockMinutes), tostring(_G.SonorusDevMode), newLang, _G.TtsProvider))
+        print(string.format("[Socket] Tracking settings: mod_enabled=%s, ambient=%s, cutscene=%s, auto_mute_ambient=%s, dev_mode=%s, lang=%s, tts=%s, followers=%s, floo=%s, conv_fpv=%s",
+            tostring(data.mod_enabled), tostring(data.track_ambient), tostring(data.track_cutscene), tostring(_G.AutoMuteAmbientEnabled), tostring(_G.SonorusDevMode), newLang, _G.TtsProvider, tostring(_G.FollowersEnabled), tostring(_G.FlooCompanionsInstalled), tostring(_G.ConversationFPVEnabled)))
         return
     end
 
@@ -503,6 +751,27 @@ function SocketClient.handleMessage(data)
         end
         print(string.format("[Socket] Synced %d significant NPC names (%d voice + %d display)",
             #voiceNames + #displayNames, #voiceNames, #displayNames))
+        return
+    end
+
+    -- Handle ambient_blocklist - per-NPC line ID numbers of heard ambient dialogue
+    if msgType == "ambient_blocklist" then
+        local blocklist = data.data or {}
+        local newBlocklist = {}
+        local npcCount = 0
+        local totalIds = 0
+        for voiceName, ids in pairs(blocklist) do
+            local idSet = {}
+            for _, id in ipairs(ids) do
+                idSet[id] = true
+            end
+            newBlocklist[voiceName] = idSet
+            npcCount = npcCount + 1
+            totalIds = totalIds + #ids
+        end
+        local oldBlocklist = _G._AmbientBlocklist
+        _G._AmbientBlocklist = newBlocklist
+        print(string.format("[Socket] Ambient blocklist: %d NPCs, %d line IDs", npcCount, totalIds))
         return
     end
 
@@ -538,6 +807,8 @@ function SocketClient.handleMessage(data)
 
             -- Phase-based state machine
             _G.SonorusState.phase = "playing"
+            _G.SonorusState.pendingIdle = false
+            _G.SonorusState.pendingIdleAt = 0
             -- CRITICAL: Reset messageShown for new turn
             -- This fixes race condition where lipsync_start arrives before closing phase completes
             -- Without this, messageShown stays true from previous turn and subtitle is skipped
@@ -571,8 +842,8 @@ function SocketClient.handleMessage(data)
             end
         end
 
-        -- NOTE: OnTick loop is now persistent (started once at module load)
-        -- using LoopInGameThreadWithDelay for proper timer control
+        -- NOTE: OnTick loop is now persistent (registered once at module load)
+        -- using the shared TickScheduler for proper timer control
         print("[Socket] Lipsync active - OnTick loop will process\n")
 
         -- Initialize timing - this is our t=0 reference
@@ -581,6 +852,16 @@ function SocketClient.handleMessage(data)
         vd.audioOffset = 0      -- Drift correction offset
         vd.pausedAt = nil       -- Clear any stale pause state
         vd.syncPrinted = false
+
+        -- Reset smoothed blendshape values so new turn starts from neutral
+        vd.currentJaw = 0
+        vd.currentSmile = 0
+        vd.currentFunnel = 0
+        vd.currentPress = 0
+        vd.currentLipUp = 0
+        vd.currentEE = 0
+        vd.currentO = 0
+        vd.currentShh = 0
 
         -- Clear old frames and load initial visemes from this message
         vd.frames = {}
@@ -611,17 +892,13 @@ function SocketClient.handleMessage(data)
         -- Store per-character lipsync scale (default 1.0)
         vd.scale = data.scale or 1.0
 
-        -- Handle lipsync fallback (force direct mode)
-        local BlueprintHelpers = require("Utils.BlueprintHelpers")
-        BlueprintHelpers.SetForceDirect(data.fallback == true)
-
         local scaleStr = vd.scale ~= 1.0 and string.format(", scale=%.2f", vd.scale) or ""
         print("[Socket] Lipsync start - turn=" .. tostring(turnId) ..
               ", speaker=" .. tostring(data.speaker) ..
               ", visemes=" .. tostring(initialVisemes and #initialVisemes or 0) .. scaleStr .. "\n")
 
         -- Lock NPCs for this turn (now that it's actually playing)
-        -- NOTE: Already on game thread via LoopInGameThreadWithDelay, no wrapper needed
+        -- NOTE: Already on game thread via shared TickScheduler, no wrapper needed
         DevPrint("[DEBUG] lipsync_start lock NPCs START turn=" .. tostring(turnId))
 
         -- Find the queue item for this turn (declared outside if block so actions can use it)
@@ -635,28 +912,56 @@ function SocketClient.handleMessage(data)
             end
         end
 
-        if currentItem and LockNPCToTarget then
+        _G.CurrentSonorusTarget = currentItem and currentItem.targetActor or nil
+
+        if currentItem then
+            local speakerId = currentItem.speakerId
+            local targetId = currentItem.targetId
+            local isPlayerSpeaking = (speakerId == "player")
+
+            -- Re-resolve actor refs fresh — play_turn cached these but voice
+            -- cloning delay means they may be stale by the time lipsync starts.
             local speakerActor = currentItem.speakerActor
             local targetActor = currentItem.targetActor
-            local targetId = currentItem.targetId
-            local speakerId = currentItem.speakerId
-            local isPlayerSpeaking = (speakerId == "player")
+
+            if not isPlayerSpeaking and speakerId then
+                local freshSpeaker = Utils.GetFreshActorByVoiceId(speakerId)
+                if freshSpeaker then
+                    speakerActor = freshSpeaker
+                    currentItem.speakerActor = freshSpeaker
+                    _G.TurnActorCache[turnId] = freshSpeaker
+                end
+            end
+
+            if targetId then
+                local freshTarget = Utils.GetFreshActorByVoiceId(targetId)
+                if freshTarget then
+                    targetActor = freshTarget
+                    currentItem.targetActor = freshTarget
+                end
+            end
+
+            _G.CurrentSonorusTarget = targetActor
 
             if speakerActor and targetActor then
                 -- Only lock speaker if it's an NPC (not the player)
-                if not isPlayerSpeaking then
+                if LockNPCToTarget and not isPlayerSpeaking then
                     LockNPCToTarget(speakerActor, targetActor)
                     -- Stop any ambient lip sync before AI lipsync starts
                     if StopNPCDialogueLipSync then
                         StopNPCDialogueLipSync(speakerActor)
                     end
                     print("[Socket] Turn start: locked speaker facing target\n")
+                elseif not isPlayerSpeaking then
+                    if StopNPCDialogueLipSync then
+                        StopNPCDialogueLipSync(speakerActor)
+                    end
                 else
                     print("[Socket] Turn start: player is speaking, not locking player\n")
                 end
 
                 -- If target is NPC (not player), target faces speaker
-                if targetId and targetId ~= "player" then
+                if LockNPCToTarget and targetId and targetId ~= "player" then
                     LockNPCToTarget(targetActor, speakerActor)
                     print("[Socket] Turn start: locked target facing speaker\n")
                 end
@@ -666,88 +971,40 @@ function SocketClient.handleMessage(data)
                     OrientCompanionToPlayer(speakerActor)
                 end
             end
+
+            -- Auto look-at speaker during conversations
+            if _G.ConversationLookAtSpeakerEnabled
+                and not isPlayerSpeaking
+                and speakerActor
+                and not (_G.MountState and _G.MountState.mounted)
+                and not (_G.CombatState and _G.CombatState.active)
+                and FirstPerson and FirstPerson.lookAt
+            then
+                FirstPerson.lookAt(speakerActor)
+            end
         end
         DevPrint("[DEBUG] lipsync_start lock NPCs END")
 
-        -- Execute action if specified (JoinAsCompanion / LeaveCompanion)
-        -- Uses SetSystemicCompanionBP via MakeCompanion/ClearCompanion (works with Floo mod)
-        if currentItem and currentItem.action and currentItem.action ~= "None" then
-            local action = currentItem.action
-            local speakerId = currentItem.speakerId or currentItem.speaker
-
-            if action == "JoinAsCompanion" then
-                if speakerId and MakeCompanion then
-                    local ok = MakeCompanion(speakerId)
-                    print("[Socket] JoinAsCompanion: " .. tostring(speakerId) .. " -> " .. (ok and "OK" or "FAILED") .. "\n")
-                else
-                    print("[Socket] Cannot JoinAsCompanion - no speaker ID or MakeCompanion unavailable\n")
-                end
-            elseif action == "LeaveCompanion" then
-                if ClearCompanion then
-                    local ok = ClearCompanion()
-                    print("[Socket] LeaveCompanion -> " .. (ok and "OK" or "FAILED") .. "\n")
-                else
-                    print("[Socket] Cannot LeaveCompanion - ClearCompanion unavailable\n")
-                end
-            end
-        end
-
-        -- Execute house point actions if specified (professor awards/deducts points)
-        if currentItem and currentItem.housePointActions and #currentItem.housePointActions > 0 then
-            for _, hpAction in ipairs(currentItem.housePointActions) do
-                local actionType = hpAction.action  -- "AwardPoints" or "DeductPoints"
-                local house = hpAction.house        -- "Gryffindor", "Slytherin", etc.
-                local amount = hpAction.amount      -- Number of points
-
-                if actionType and house and amount then
-                    -- The House Points mod uses stats like "Gryffindor_Housepoints"
-                    -- Adding to this stat awards points, negative values deduct
-                    local statName = house .. "_Housepoints"
-                    local pointsToAdd = amount
-                    if actionType == "DeductPoints" then
-                        pointsToAdd = -amount
-                    end
-
-                    pcall(function()
-                        local statsManager = Cache.Get("StatsManager", function()
-                            return FindFirstOf("StatsManager")
-                        end)
-                        if statsManager then
-                            local statFName = FName(statName)
-                            -- Check if stat exists (mod is installed)
-                            local exists = statsManager:StatExists(statFName)
-                            if exists then
-                                -- UpdateStat adds to the current value
-                                statsManager:UpdateStat(statFName, pointsToAdd)
-                                local verb = actionType == "AwardPoints" and "Awarded" or "Deducted"
-                                print(string.format("[Socket] House Points: %s %d points %s %s\n",
-                                    verb, amount, actionType == "AwardPoints" and "to" or "from", house))
-                            else
-                                print("[Socket] House Points stat not found: " .. statName .. " (mod may not be installed)\n")
-                            end
-                        else
-                            print("[Socket] StatsManager not found for house points\n")
-                        end
-                    end)
-                end
-            end
-            -- Refresh house points cache after processing actions (delay to let mod update readout stats)
-            if RefreshHousePoints then
-                ExecuteInGameThreadWithDelay(500, function()
-                    RefreshHousePoints()
-                end)
-            end
-        end
+        -- Execute NPC actions and house point actions
+        ExecuteNPCAction(currentItem)
+        ExecuteHousePointActions(currentItem)
 
         -- ACK to Python: We're ready, start audio now!
         -- This completes the handshake - Python waits for this before playing audio
         SocketClient.send({ type = "lipsync_ready", turn_id = turnId })
         -- Handshake complete - no more urgent messages expected
         DisableFastPoll()
+        DevPrint("[DEBUG] lipsync_start ACK END")
 
     elseif msgType == "lipsync_stop" then
         -- Audio ended - trigger closing sequence
         DevPrint("[Socket] Lipsync stop received\n")
+        _G.CurrentSonorusTarget = nil
+        -- Fade out any active facial emote
+        if _G.EmoteState and _G.EmoteState.active then
+            local Emotes = require("Utils.Emotes")
+            Emotes.Stop()
+        end
         -- Clear frames for next utterance
         vd.frames = {}
         vd.loaded = false
@@ -761,7 +1018,7 @@ function SocketClient.handleMessage(data)
             _G.CloseLipsIterations = 0  -- Reset timeout counter for new close
         end
         -- Clear subtitle immediately when turn ends (don't wait for idle)
-        -- Already on game thread via LoopInGameThreadWithDelay
+        -- Already on game thread via shared TickScheduler
         if _G.SonorusState then
             _G.SonorusState.messageShown = false
         end
@@ -835,6 +1092,11 @@ function SocketClient.handleMessage(data)
         local turnId = data.turn_id
         local subtitleText = data.text or ""
         local sentenceIdx = data.sentence_idx or 0
+        local function fmtSeconds(value)
+            local n = tonumber(value)
+            if n == nil then return "n/a" end
+            return string.format("%.2fs", n)
+        end
 
         -- Find the queue item for this turn
         local pState = _G.PlaybackState
@@ -861,6 +1123,13 @@ function SocketClient.handleMessage(data)
                 displayText = string.gsub(displayText, "%s+", " ")
                 displayText = string.gsub(displayText, "^%s+", "")
                 displayText = string.gsub(displayText, "%s+$", "")
+
+                if displayText == "" then
+                    currentItem._subtitleReceived = true
+                    currentItem._lastSubtitleUpdateAt = os.clock()
+                    DevPrint(string.format("[Socket] Subtitle update [%d] suppressed after bracket stripping\n", sentenceIdx))
+                    return
+                end
 
                 -- Narration detection fallback:
                 -- Prefer explicit flag from server, but also detect pre-formatted
@@ -894,21 +1163,61 @@ function SocketClient.handleMessage(data)
 
                 if sentenceIdx == 0 then
                     -- First sentence: ShowMessage (remove+add)
-                    ShowMessage(displayMessage)
+                    ShowAIMessage(displayMessage)
                 else
                     -- Subsequent sentences: prefer in-place update (no flash).
                     -- If there has been a long gap (e.g., narration span), the
                     -- standalone subtitle widget may have expired; re-show it.
                     if (not _G.SonorusState.messageShown) or updateGap > 3.5 then
-                        ShowMessage(displayMessage)
+                        ShowAIMessage(displayMessage)
                     else
-                        UpdateMessage(displayMessage)
+                        UpdateAIMessage(displayMessage)
                     end
                 end
-                _G.SonorusState.messageShown = true
+                _G.SonorusState.messageShown = AreSubtitlesEnabled()
                 currentItem._subtitleReceived = true
                 currentItem._lastSubtitleUpdateAt = now
-                DevPrint(string.format("[Socket] Subtitle update [%d]: %s\n", sentenceIdx, displayText:sub(1, 50)))
+                DevPrint(string.format(
+                    "[Socket] Subtitle update turn=%s idx=%d/%s reason=%s audio_pos=%s boundary=%s source=%s first_word=%s fed_audio=%s text=%s\n",
+                    tostring(turnId),
+                    sentenceIdx,
+                    tostring(data.total_sentences or "?"),
+                    tostring(data.subtitle_reason or "unknown"),
+                    fmtSeconds(data.audio_pos),
+                    fmtSeconds(data.boundary_start),
+                    tostring(data.boundary_source or "unknown"),
+                    fmtSeconds(data.first_word_start),
+                    fmtSeconds(data.fed_audio_duration),
+                    displayText:sub(1, 160)
+                ))
+            else
+                print(string.format("[Socket] subtitle_update ignored: no queue item for turn=%s (queue=%d)",
+                    tostring(turnId), #(pState.queue or {})))
+            end
+        else
+            local currentTurn = _G.SonorusState and _G.SonorusState.currentTurnId or nil
+            print(string.format("[Socket] subtitle_update ignored: turn mismatch update=%s current=%s",
+                tostring(turnId), tostring(currentTurn)))
+        end
+
+    elseif msgType == "emote" then
+        -- Facial emote from server: play emotion blendshapes on current speaker
+        -- name=nil means sentence has no emotion tag -> fade out current emote
+        local emoteName = data.name
+        local turnId = data.turn_id
+        local Emotes = dofile(_G.SonorusScriptsPath .. "Utils/Emotes.lua")
+        Emotes.init()
+        if emoteName then
+            local actor = _G.GetCurrentSpeakerActor and _G.GetCurrentSpeakerActor()
+            if actor then
+                Emotes.Play(actor, emoteName, 1.0, 0.3, 1.5)
+            else
+                DevPrint("[Socket] emote: no speaker actor for '" .. emoteName .. "'\n")
+            end
+        else
+            -- No emotion on this sentence: fade out any active emote
+            if _G.EmoteState and _G.EmoteState.active then
+                Emotes.Stop()
             end
         end
 
@@ -943,60 +1252,9 @@ function SocketClient.handleMessage(data)
             if _G.SonorusState and _G.SonorusState.currentTurnId == turnId then
                 print("[Socket] Turn already playing - executing deferred actions now\n")
 
-                -- Execute companion action (same logic as lipsync_start)
-                if action and action ~= "None" then
-                    local speakerId = currentItem.speakerId or currentItem.speaker
-
-                    if action == "JoinAsCompanion" then
-                        if speakerId and MakeCompanion then
-                            local ok = MakeCompanion(speakerId)
-                            print("[Socket] Deferred JoinAsCompanion: " .. tostring(speakerId) .. " -> " .. (ok and "OK" or "FAILED") .. "\n")
-                        end
-                    elseif action == "LeaveCompanion" then
-                        if ClearCompanion then
-                            local ok = ClearCompanion()
-                            print("[Socket] Deferred LeaveCompanion -> " .. (ok and "OK" or "FAILED") .. "\n")
-                        end
-                    end
-                end
-
-                -- Execute house point actions (same logic as lipsync_start)
-                if housePointActions and #housePointActions > 0 then
-                    for _, hpAction in ipairs(housePointActions) do
-                        local actionType = hpAction.action
-                        local house = hpAction.house
-                        local amount = hpAction.amount
-
-                        if actionType and house and amount then
-                            local statName = house .. "_Housepoints"
-                            local pointsToAdd = amount
-                            if actionType == "DeductPoints" then
-                                pointsToAdd = -amount
-                            end
-
-                            pcall(function()
-                                local statsManager = Cache.Get("StatsManager", function()
-                                    return FindFirstOf("StatsManager")
-                                end)
-                                if statsManager then
-                                    local statFName = FName(statName)
-                                    local exists = statsManager:StatExists(statFName)
-                                    if exists then
-                                        statsManager:UpdateStat(statFName, pointsToAdd)
-                                        local verb = actionType == "AwardPoints" and "Awarded" or "Deducted"
-                                        print(string.format("[Socket] Deferred House Points: %s %d points %s %s\n",
-                                            verb, amount, actionType == "AwardPoints" and "to" or "from", house))
-                                    end
-                                end
-                            end)
-                        end
-                    end
-                    if RefreshHousePoints then
-                        ExecuteInGameThreadWithDelay(500, function()
-                            RefreshHousePoints()
-                        end)
-                    end
-                end
+                -- Execute deferred actions (same helpers as lipsync_start)
+                ExecuteNPCAction(currentItem)
+                ExecuteHousePointActions(currentItem)
             else
                 print("[Socket] Turn not yet playing - actions stored for lipsync_start\n")
             end
@@ -1070,9 +1328,17 @@ function SocketClient.handleMessage(data)
                 pState.currentIndex = 1
                 pState.playing = false
                 _G.TurnActorCache = {}
+                -- Reset all attention meters so stale charge doesn't fire when conversation ends
+                if _G.AttentionMeters then
+                    for _, meter in pairs(_G.AttentionMeters) do
+                        meter.charge = 0.0
+                    end
+                end
                 if _G.SonorusState then
                     _G.SonorusState.phase = "preparing"
                     _G.SonorusState.currentTurnId = nil
+                    _G.SonorusState.pendingIdle = false
+                    _G.SonorusState.pendingIdleAt = 0
                 end
                 print("[Socket] New conversation - cleared queue\n")
 
@@ -1091,19 +1357,36 @@ function SocketClient.handleMessage(data)
                 if TimeDilation then
                     TimeDilation.OnConversationStart()
                 end
+
+                -- Auto first-person view during conversations (skip on mount — camera is different)
+                if _G.ConversationFPVEnabled and FirstPerson and not (_G.MountState and _G.MountState.mounted) then
+                    if not FirstPerson.isEnabled() then
+                        ExecuteInGameThread(function() FirstPerson.enable() end)
+                        _G.ConversationFPVActive = true
+                    else
+                        _G.ConversationFPVActive = false  -- already on, don't touch on end
+                    end
+                end
             end
 
             -- Handle idle state
             if data.state == "idle" and _G.SonorusState then
+                local endBehavior = data.end_behavior or "linger"
                 -- If we're still closing the mouth, defer the idle transition
-                -- The OnTick closing handler in logic.lua will complete the cleanup
-                if _G.SonorusState.phase == "closing" or _G.SonorusState.closing then
+                -- The OnTick handler in logic.lua will complete the cleanup once
+                -- the current close/handoff window has safely finished.
+                local phase = _G.SonorusState.phase
+                if phase == "closing" or _G.SonorusState.closing or phase == "preparing" then
                     _G.SonorusState.pendingIdle = true
-                    DevPrint("[Socket] Deferring idle - still closing mouth\n")
+                    _G.SonorusState.pendingIdleAt = os.clock()
+                    _G.SonorusState.pendingEndBehavior = endBehavior
+                    DevPrint("[Socket] Deferring idle - phase=" .. tostring(phase) .. "\n")
                 else
                     _G.SonorusState.phase = "idle"
                     _G.SonorusState.currentTurnId = nil
                     _G.SonorusState.pendingIdle = false
+                    _G.SonorusState.pendingIdleAt = 0
+                    _G.SonorusState.pendingEndBehavior = nil
                     _G.TurnActorCache = {}
 
                     -- Unmute all speakers when conversation ends
@@ -1122,7 +1405,9 @@ function SocketClient.handleMessage(data)
                     end
 
                     -- Linger NPCs instead of releasing — they stay frozen ~10s
-                    if LingerAllNPCs then
+                    if endBehavior == "release_all" and ReleaseAllNPCs then
+                        ReleaseAllNPCs()
+                    elseif LingerAllNPCs then
                         LingerAllNPCs()
                     end
 
@@ -1138,10 +1423,41 @@ function SocketClient.handleMessage(data)
                     if TimeDilation then
                         TimeDilation.OnConversationEnd()
                     end
+
+                    -- Auto first-person view: restore third-person
+                    if _G.ConversationFPVActive and FirstPerson then
+                        ExecuteInGameThread(function() FirstPerson.disable() end)
+                        _G.ConversationFPVActive = false
+                    end
                 end
             end
 
             print("[Socket] Conversation state: " .. tostring(data.state))
+        end
+
+    elseif msgType == "conversation_finished" then
+        -- Conversation truly ended (no follow-up pending) — record per-NPC timestamps
+        local speakers = data.speakers or {}
+        local now = os.clock()
+        for _, speakerId in ipairs(speakers) do
+            _G.LastConversationEnd[speakerId] = now
+        end
+        if #speakers > 0 then
+            DevPrint("[Socket] Conversation finished for: " .. table.concat(speakers, ", "))
+        end
+
+    elseif msgType == "linger_goodbye_claim" then
+        local generation = tonumber(data.generation or -1)
+        local speakerIds = data.speaker_ids or {}
+        if generation >= 0 and ClaimLingerGoodbye then
+            ClaimLingerGoodbye(generation, speakerIds)
+        end
+
+    elseif msgType == "linger_goodbye_abort" then
+        local generation = tonumber(data.generation or -1)
+        local reason = data.reason or "unknown"
+        if generation >= 0 and AbortLingerGoodbye then
+            AbortLingerGoodbye(generation, reason)
         end
 
     elseif msgType == "player_message" then
@@ -1156,8 +1472,8 @@ function SocketClient.handleMessage(data)
             _G.SubtitleGen = (_G.SubtitleGen or 0) + 1
             local myGen = _G.SubtitleGen
             local ok, err = pcall(function()
-                if _G.ShowMessage then
-                    _G.ShowMessage(msg)
+                if _G.ShowAIMessage then
+                    _G.ShowAIMessage(msg)
                 end
             end)
             if not ok then DevPrint("[DEBUG] player_message show error: " .. tostring(err)) end
@@ -1256,9 +1572,15 @@ function SocketClient.handleMessage(data)
                                     npc = npc,
                                     state = "typing",
                                     startTime = os.clock(),
-                                    interruptLock = createdInterruptLock  -- Preserve during reset if true
+                                    interruptLock = createdInterruptLock,  -- Preserve during reset if true
+                                    excludeFromTargetSelection = createdInterruptLock
                                 }
-                                print("[Chat] Preview locked: " .. npcName .. " (distance: " .. string.format("%.0f", distance) .. ")")
+                                if createdInterruptLock then
+                                    print("[Chat] Preview locked for interrupt only: " .. npcName .. " (distance: " ..
+                                        string.format("%.0f", distance) .. ")")
+                                else
+                                    print("[Chat] Preview locked: " .. npcName .. " (distance: " .. string.format("%.0f", distance) .. ")")
+                                end
 
                                 -- Soft-orient companion to face player
                                 if OrientCompanionToPlayer then
@@ -1324,7 +1646,7 @@ function SocketClient.handleMessage(data)
             -- Lock will be absorbed by conversation system or released by timeout
         end
 
-        local uiManager = FindFirstOf("UIManager")
+        local uiManager = Cache.Get("UIManager", function() return FindFirstOf("UIManager") end)
         if Utils.SafeIsValid(uiManager) then
             pcall(function()
                 uiManager:ClearHintMessage()
@@ -1550,6 +1872,25 @@ function SocketClient.handleMessage(data)
         local actor = nil
         local isPlayerSpeaker = (speakerId == "player")
 
+        -- Try fresh engine lookup first (bypasses all Lua caches)
+        if not isPlayerSpeaker and speakerId then
+            local fresh = Utils.GetFreshActorByVoiceId(speakerId)
+            if fresh then
+                actor = fresh
+                actorFound = true
+                _G.SpeakerActorCache[speakerId] = fresh
+                print("[Socket] Speaker from PM: " .. speakerId .. "\n")
+            end
+        end
+        if targetId and targetId ~= "player" then
+            local freshTarget = Utils.GetFreshActorByVoiceId(targetId)
+            if freshTarget then
+                targetActor = freshTarget
+                _G.SpeakerActorCache[targetId] = freshTarget
+                print("[Socket] Target from PM: " .. targetId .. "\n")
+            end
+        end
+
         if isPlayerSpeaker then
             -- Player is speaking - use player actor
             if Utils.SafeIsValid(player) then
@@ -1647,6 +1988,24 @@ function SocketClient.handleMessage(data)
         -- Cache actor by turn ID (for 3D audio/lipsync)
         _G.TurnActorCache[turnId] = actor
 
+        -- If a conversation is about to take over gaze, only keep the ambient
+        -- override alive when this turn will adopt the same NPC.
+        local ambientState = _G.NPCAmbientGazeState
+        if ambientState and ambientState.npcKey and StopAmbientGaze then
+            local keepAmbient = false
+            local speakerKey = GetActorIdentityKey(actor)
+            local targetKey = GetActorIdentityKey(targetActor)
+            if speakerKey and ambientState.npcKey == speakerKey then
+                keepAmbient = true
+            elseif targetKey and ambientState.npcKey == targetKey then
+                keepAmbient = true
+            end
+
+            if not keepAmbient then
+                pcall(function() StopAmbientGaze("play_turn handoff") end)
+            end
+        end
+
         -- Add to playback queue (with target info for NPC attention)
         local pState = _G.PlaybackState
         if pState then
@@ -1675,6 +2034,8 @@ function SocketClient.handleMessage(data)
         if _G.SonorusState and _G.SonorusState.phase == "idle" then
             _G.SonorusState.phase = "preparing"
             _G.SonorusState.currentTurnId = turnId  -- Only set if idle (first turn)
+            _G.SonorusState.pendingIdle = false
+            _G.SonorusState.pendingIdleAt = 0
         end
 
         -- Mute the speaker's original game audio (skip for player - no game audio to mute)
@@ -1761,6 +2122,19 @@ function SocketClient.handleMessage(data)
     elseif msgType == "player_turn_start" then
         -- FAST PATH: Lightweight player turn setup (no NPC scanning)
         -- Used when player TTS is buffered early and we just need lip sync setup
+        if not _G.SonorusState.playerLoaded or Utils.IsGamePaused() then
+            print("[Socket] player_turn_start blocked (not ready)")
+            -- Send failure response so Python doesn't hang waiting
+            SocketClient.send({
+                type = "turn_ready",
+                turn_id = data.turn_id or "",
+                actor_found = false,
+                is_player_speaker = true,
+                first_person_active = false,
+                has_positions = false
+            })
+            return
+        end
         local turnId = data.turn_id
         local playerName = data.player_name
         local text = data.text
@@ -1803,6 +2177,8 @@ function SocketClient.handleMessage(data)
         if _G.SonorusState and _G.SonorusState.phase == "idle" then
             _G.SonorusState.phase = "preparing"
             _G.SonorusState.currentTurnId = turnId
+            _G.SonorusState.pendingIdle = false
+            _G.SonorusState.pendingIdleAt = 0
         end
 
         -- Get initial positions for 3D audio (player voice spatialized at player actor)
@@ -1855,11 +2231,13 @@ function SocketClient.handleMessage(data)
         end)
 
         -- Send ready response with positions and reverb (same as NPC path)
+        local fpvActive = _G.FirstPersonState and _G.FirstPersonState.active or false
         SocketClient.send({
             type = "turn_ready",
             turn_id = turnId,
             actor_found = actorFound,
             is_player_speaker = true,
+            first_person_active = fpvActive,
             -- Initial positions for 3D audio
             camX = camX, camY = camY, camZ = camZ,
             camYaw = camYaw, camPitch = camPitch,
@@ -1876,12 +2254,13 @@ function SocketClient.handleMessage(data)
 
     elseif msgType == "reset" then
         -- Server requests full state reset (triggered by stop conversation hotkey)
+        -- NOTE: Commitments are NOT released here — they persist across conversations
+        -- and are managed by explicit activate/deactivate messages.
+        -- MarkAllDirty + ReapplyAll handles fast travel/loading screen reapplication.
         print("[Socket] Reset requested from server")
         if ResetState then
             ResetState()
         end
-        -- Release all commitment schedule overrides
-        if _G.CommitmentManager then pcall(_G.CommitmentManager.ReleaseAll) end
 
     elseif msgType == "reload_history" then
         -- Legacy: Lua no longer maintains dialogue history (Python is sole owner)
@@ -1893,11 +2272,30 @@ function SocketClient.handleMessage(data)
         local npcId = data.npc_id or ""
         local activityId = data.activity_id or ""
         local locationId = data.location_id or ""
+        local spotLabel = data.spot_label
         if npcId ~= "" and _G.CommitmentManager then
             ExecuteInGameThread(function()
-                pcall(function()
-                    _G.CommitmentManager.Apply(npcId, activityId, locationId)
+                if not _G.SonorusState.playerLoaded or Utils.IsGamePaused() then
+                    print("[Socket] activate_commitment deferred (not ready)")
+                    return
+                end
+                -- Skip if already applied (ReapplyAll handles dirty commitments)
+                local existing = _G.ActiveCommitments and _G.ActiveCommitments[npcId]
+                if existing and existing.applied and not existing.dirty then
+                    print("[Socket] activate_commitment skipped (already applied): " .. npcId)
+                    return
+                end
+                local ok, err = pcall(function()
+                    local success = _G.CommitmentManager.Apply(npcId, activityId, locationId, spotLabel)
+                    -- Auto-start guide path to the newly committed NPC
+                    if success and _G.PathNav then
+                        print("[Socket] Commitment applied, starting guide to " .. npcId)
+                        pcall(_G.PathNav.GuideToNearest)
+                    end
                 end)
+                if not ok then
+                    print("[Socket] activate_commitment error: " .. tostring(err))
+                end
             end)
         else
             print("[Socket] activate_commitment: missing npc_id or CommitmentManager not loaded")
@@ -1914,6 +2312,30 @@ function SocketClient.handleMessage(data)
             end)
         else
             print("[Socket] deactivate_commitment: missing npc_id or CommitmentManager not loaded")
+        end
+
+    elseif msgType == "start_guide_path" then
+        -- Python requests guide trail to nearest (or specific) committed NPC
+        if _G.PathNav then
+            ExecuteInGameThread(function()
+                if data.npc_id and data.npc_id ~= "" then
+                    pcall(_G.PathNav.StartGuide, data.npc_id)
+                else
+                    pcall(_G.PathNav.GuideToNearest)
+                end
+            end)
+        else
+            print("[Socket] start_guide_path: PathNav not loaded")
+        end
+
+    elseif msgType == "stop_guide_path" then
+        -- Python requests guide trail removal
+        if _G.PathNav then
+            ExecuteInGameThread(function()
+                pcall(_G.PathNav.StopGuide)
+            end)
+        else
+            print("[Socket] stop_guide_path: PathNav not loaded")
         end
 
     elseif msgType == "notification" then
@@ -1941,6 +2363,15 @@ function SocketClient.handleMessage(data)
         end
         print("[Socket] Conversation mode: " .. tostring(data.mode))
 
+    elseif msgType == "toggle_fpv" then
+        -- First-person view toggle (via configurable hotkey, default Insert)
+        ExecuteInGameThread(function()
+            if FirstPerson then
+                FirstPerson.toggle()
+            end
+        end)
+        print("[Socket] FPV toggled")
+
     elseif msgType == "cast_spell" then
         -- Voice spell casting from Python
         local spellName = data.spell
@@ -1961,16 +2392,21 @@ function SocketClient.handleMessage(data)
                         end
                     end)
                 end
-                if not shouldCast then return end
+                if not shouldCast then
+                    print("[Socket] cast_spell suppressed: shouldCast=false, VROffset=" .. tostring(_G.VROffset ~= nil))
+                    return
+                end
             end
 
             -- Get display name for notifications
             local displayName = GetDisplayName(spellName) or spellName
             -- Check if spell is unlocked first
-            if not IsSpellUnlocked(spellName) then
+            if false and not IsSpellUnlocked(spellName) then
+                print("[Socket] cast_spell: " .. spellName .. " NOT UNLOCKED")
                 ShowNotification("You haven't learned " .. displayName .. " yet")
                 return
             end
+            print("[Socket] cast_spell: calling CastSpellByName(" .. spellName .. ")")
             local success = CastSpellByName(spellName)
             if not success then
                 ShowNotification("Cannot cast " .. displayName .. " right now")
@@ -1992,11 +2428,9 @@ function SocketClient.handleMessage(data)
         end
 
     elseif msgType == "vr_offset" then
-        -- VR headset yaw/pitch offset for gaze targeting
+        -- World-space HMD direction (stereo callback rotation, includes head tracking)
         _G.VROffset = { yaw = data.yaw or 0, pitch = data.pitch or 0 }
-        if data.debug then
-            _G.VRDebug = data.debug
-        end
+        _G.VRCamRot = { Yaw = data.yaw or 0, Pitch = data.pitch or 0 }
 
     elseif msgType == "refresh_house_points" then
         -- On-demand house points refresh (for fresh context before professor conversations)
@@ -2040,26 +2474,8 @@ function SocketClient.handleMessage(data)
             end)
             if not camLoc or not camRot then return end
 
-            -- Trace origin: VR = player head, flat = camera
-            local vrOff = _G.VROffset
+            -- Trace origin: always use camera position (tracks HMD in VR)
             local originX, originY, originZ = camLoc.X, camLoc.Y, camLoc.Z
-            local player = staticData.player
-            if vrOff and player then
-                local playerLoc
-                pcall(function() playerLoc = player:K2_GetActorLocation() end)
-                if playerLoc then
-                    local playerHalfHeight = 88
-                    pcall(function()
-                        local capsule = player.CapsuleComponent
-                        if capsule and capsule.CapsuleHalfHeight then
-                            playerHalfHeight = capsule.CapsuleHalfHeight
-                        end
-                    end)
-                    originX = playerLoc.X
-                    originY = playerLoc.Y
-                    originZ = playerLoc.Z + playerHalfHeight * 2
-                end
-            end
 
             -- Raycast to find world hit position
             local KismetSystem = staticData.kismetSystem
@@ -2221,6 +2637,29 @@ function SocketClient.handleMessage(data)
             end)
         end)
 
+    elseif msgType == "dismiss_companion" then
+        ExecuteInGameThread(function()
+            if ClearCompanion then
+                local ok = ClearCompanion()
+                print("[Socket] dismiss_companion -> " .. (ok and "OK" or "FAILED"))
+            else
+                print("[Socket] dismiss_companion - ClearCompanion unavailable")
+            end
+        end)
+
+    elseif msgType == "dismiss_follower" then
+        local voiceName = data.voice_name
+        if voiceName then
+            ExecuteInGameThread(function()
+                if _G.CompanionFollow and _G.CompanionFollow.removeFollower then
+                    local ok = _G.CompanionFollow.removeFollower(voiceName)
+                    print("[Socket] dismiss_follower " .. voiceName .. " -> " .. (ok and "OK" or "FAILED"))
+                else
+                    print("[Socket] dismiss_follower - CompanionFollow unavailable")
+                end
+            end)
+        end
+
     end
 end
 
@@ -2322,27 +2761,26 @@ end
 _G.SocketClient = SocketClient
 
 -- ============================================
--- Persistent OnTick Loop (25ms interval)
+-- Persistent OnTick Loop (disabled for lag isolation)
 -- ============================================
--- Started once at module load, runs forever, checks state to decide if it should process
--- Uses LoopInGameThreadWithDelay for proper timer control
-if not _G.OnTickLoopStarted then
-    _G.OnTickLoopStarted = true
-    _G.OnTickLoopHandle = LoopInGameThreadWithDelay(25, function()
-        -- Only process if we're in an active conversation phase
-        local state = _G.SonorusState
-        if not state then return end
-
-        local phase = state.phase or "idle"
-        if phase == "idle" then return end  -- Keep running, just skip processing
-
-        -- Call OnTick if available (defined in logic.lua)
-        if _G.OnTick then
-            pcall(_G.OnTick)
-        end
-    end)
-    print("[SocketClient] Persistent OnTick loop started (50ms)")
+-- Registered once per module load on the shared tick scheduler.
+if _G.OnTickLoopHandle and CancelDelayedAction then
+    pcall(CancelDelayedAction, _G.OnTickLoopHandle)
 end
+
+local function SocketOnTick()
+    -- Only process if we're in an active conversation phase
+
+    local phase = _G.SonorusState.phase or "idle"
+    local emoteActive = _G.EmoteState and _G.EmoteState.active
+    if phase == "idle" and not _G.SonorusState.active and not emoteActive then return end
+
+    pcall(_G.OnTick, phase, emoteActive)
+end
+_G.OnTickLoopStarted = true
+_G.OnTickLoopHandle = nil
+    TickScheduler.Register("socket_on_tick", 23, SocketOnTick)
+    print("[SocketClient] Persistent OnTick task registered (23ms)")
 
 print("[SocketClient] Module loaded")
 return SocketClient

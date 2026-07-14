@@ -57,6 +57,13 @@ local function NormalizeEnemyId(rawId)
     return normalized
 end
 
+local function NormalizeEnemyDisplayName(name)
+    if not name or name == "" or name == "None" or name == "nil" then
+        return "Unknown"
+    end
+    return name
+end
+
 --- Get instigator type from actor (Player, Companion, or nil for other/enemy)
 --- @param instigator userdata The instigator actor
 --- @return string|nil "Player", "Companion", or nil
@@ -129,7 +136,7 @@ function Combat.FormatSummary()
     -- Collect enemy kills by display name
     local enemyKills = {}  -- { displayName = count }
     for enemyType, data in pairs(stats.enemies) do
-        local displayName = getDisplayName and getDisplayName(enemyType) or enemyType
+        local displayName = NormalizeEnemyDisplayName(getDisplayName and getDisplayName(enemyType) or enemyType)
         local kills = (data.playerKills or 0) + (data.companionKills or 0)
         if kills > 0 then
             enemyKills[displayName] = (enemyKills[displayName] or 0) + kills

@@ -75,7 +75,10 @@ _SOUND_TOGGLE_OFF = os.path.join(_SOUNDS_DIR, 'stt-toggle-off.wav')
 
 def _play_sound(path, delay=0):
     """Play a wav file in background thread (non-blocking)."""
-    import winsound
+    try:
+        import winsound
+    except (ImportError, OSError):
+        return
     def _play():
         try:
             if delay > 0:
@@ -598,9 +601,12 @@ class STTCapture:
                     "type": "cast_spell",
                     "spell": game_spell,
                 })
+                print(f"[SpellDetect] Sent cast_spell to Lua: {game_spell}")
                 return True
             except Exception as e:
                 print(f"[SpellDetect] Failed to send cast_spell: {e}")
+        else:
+            print(f"[SpellDetect] No lua_socket, cannot send cast_spell: {game_spell}")
         return False
 
     # ==================== PTT Mode Methods ====================
@@ -1016,106 +1022,136 @@ class STTCapture:
                 except queue.Full:
                     pass
 
-        try:
-            self._stream = sd.InputStream(
-                samplerate=sample_rate,
-                channels=1,
-                dtype='int16',
-                callback=audio_callback,
-                blocksize=chunk_size,
-                latency='low'
-            )
-            self._stream.start()
+        max_retries = 10
+        retry_delay = 2  # seconds between retries
 
-            # Main loop: process audio queue and run VAD
-            while self._open_mic_active and not self._open_mic_stop_event.is_set():
-                # Get pending audio chunks
-                with self._audio_queue_lock:
-                    chunks_to_process = self._audio_queue
-                    self._audio_queue = []
-
-                # Process each chunk through ring buffer and VAD
-                for chunk in chunks_to_process:
-                    # Write to ring buffer
-                    self._ring_buffer.write(chunk)
-                    # Process VAD
-                    if self._open_mic_active:
-                        self._process_vad_chunk(chunk)
-
-                # Check guards periodically
-                with self._open_mic_lock:
-                    if self._speech_in_progress:
-                        # Check if we should discard in-progress speech
-                        should_discard = False
-                        discard_reason = ""
-
-                        if not is_game_window_active():
-                            should_discard = True
-                            discard_reason = "game lost focus"
-                        elif self.check_pause:
-                            pause_reason = self.check_pause()
-                            if pause_reason:
-                                should_discard = True
-                                discard_reason = pause_reason if isinstance(pause_reason, str) else "game paused/cinematic"
-
-                        if should_discard:
-                            print(f"[STT] Open mic: {discard_reason}, discarding utterance")
-                            self._utterance_buffer = []
-                            self._speech_in_progress = False
-                            self._silence_start_time = 0
-                            self._turn_check_pending = False
-                            self._last_turn_check_time = 0
-                            self._vad_processor.reset()
-                            if self.on_soft_interrupt_cancel:
-                                try:
-                                    self.on_soft_interrupt_cancel()
-                                except Exception as e:
-                                    print(f"[STT] Soft interrupt cancel error: {e}")
-                            _send_stt_state(False, "open_mic")
-
-                    # Check for silence and run turn detection
-                    if self._speech_in_progress and self._silence_start_time > 0:
-                        silence_duration = time.time() - self._silence_start_time
-
-                        # Hard timeout - force complete after turn_timeout seconds of silence
-                        if silence_duration >= self._turn_timeout:
-                            print(f"[STT] Silence timeout ({silence_duration:.1f}s), forcing turn complete")
-                            self._on_turn_complete_locked()
-                        # After minimum silence gap, check turn detection (re-check every 1s)
-                        elif self._turn_check_pending and silence_duration >= self._min_silence_for_turn and self._utterance_buffer:
-                            now = time.time()
-                            time_since_last_check = now - self._last_turn_check_time if self._last_turn_check_time > 0 else float('inf')
-
-                            if time_since_last_check >= 1.0:
-                                self._last_turn_check_time = now
-                                audio_array = np.concatenate(self._utterance_buffer)
-                                duration = len(audio_array) / self._current_sample_rate
-
-                                if duration >= 0.3:
-                                    try:
-                                        result = self._turn_detector.predict(audio_array)
-                                        print(f"[STT] Turn detection: complete={result['complete']}, prob={result['probability']:.2f}")
-
-                                        if result['complete']:
-                                            self._on_turn_complete_locked()
-                                        else:
-                                            print("[STT] Turn incomplete, re-checking in 1s")
-                                    except Exception as e:
-                                        print(f"[STT] Turn detection error: {e}")
-
-                # Small sleep to avoid busy-waiting, but fast enough for responsive VAD
-                time.sleep(0.01)  # 10ms
-
-        except Exception as e:
-            print(f"[STT] Open mic loop error: {e}")
-        finally:
-            if self._stream:
+        while self._open_mic_active and not self._open_mic_stop_event.is_set():
+            try:
+                default_device = sd.default.device[0]
                 try:
-                    self._stream.stop()
-                    self._stream.close()
-                except:
-                    pass
-                self._stream = None
+                    device_info = sd.query_devices(default_device, 'input')
+                    print(f"[STT] Opening mic: device {default_device} '{device_info['name']}'")
+                except Exception:
+                    print(f"[STT] Opening mic: device {default_device} (query failed)")
+                self._stream = sd.InputStream(
+                    samplerate=sample_rate,
+                    channels=1,
+                    dtype='int16',
+                    callback=audio_callback,
+                    blocksize=chunk_size,
+                    latency='low'
+                )
+                self._stream.start()
+            except Exception as e:
+                print(f"[STT] Open mic stream error: {e}")
+                max_retries -= 1
+                if max_retries <= 0 or not self._open_mic_active:
+                    print("[STT] Open mic: max retries exceeded, giving up")
+                    return
+                print(f"[STT] Retrying in {retry_delay}s... ({max_retries} retries left)")
+                self._open_mic_stop_event.wait(retry_delay)
+                continue
+
+            # Reset retry count on successful connection
+            max_retries = 10
+
+            try:
+                # Main loop: process audio queue and run VAD
+                while self._open_mic_active and not self._open_mic_stop_event.is_set():
+                    # Get pending audio chunks
+                    with self._audio_queue_lock:
+                        chunks_to_process = self._audio_queue
+                        self._audio_queue = []
+
+                    # Process each chunk through ring buffer and VAD
+                    for chunk in chunks_to_process:
+                        # Write to ring buffer
+                        self._ring_buffer.write(chunk)
+                        # Process VAD
+                        if self._open_mic_active:
+                            self._process_vad_chunk(chunk)
+
+                    # Check guards periodically
+                    with self._open_mic_lock:
+                        if self._speech_in_progress:
+                            # Check if we should discard in-progress speech
+                            should_discard = False
+                            discard_reason = ""
+
+                            if not is_game_window_active():
+                                should_discard = True
+                                discard_reason = "game lost focus"
+                            elif self.check_pause:
+                                pause_reason = self.check_pause()
+                                if pause_reason:
+                                    should_discard = True
+                                    discard_reason = pause_reason if isinstance(pause_reason, str) else "game paused/cinematic"
+
+                            if should_discard:
+                                print(f"[STT] Open mic: {discard_reason}, discarding utterance")
+                                self._utterance_buffer = []
+                                self._speech_in_progress = False
+                                self._silence_start_time = 0
+                                self._turn_check_pending = False
+                                self._last_turn_check_time = 0
+                                self._vad_processor.reset()
+                                if self.on_soft_interrupt_cancel:
+                                    try:
+                                        self.on_soft_interrupt_cancel()
+                                    except Exception as e:
+                                        print(f"[STT] Soft interrupt cancel error: {e}")
+                                _send_stt_state(False, "open_mic")
+
+                        # Check for silence and run turn detection
+                        if self._speech_in_progress and self._silence_start_time > 0:
+                            silence_duration = time.time() - self._silence_start_time
+
+                            # Hard timeout - force complete after turn_timeout seconds of silence
+                            if silence_duration >= self._turn_timeout:
+                                print(f"[STT] Silence timeout ({silence_duration:.1f}s), forcing turn complete")
+                                self._on_turn_complete_locked()
+                            # After minimum silence gap, check turn detection (re-check every 1s)
+                            elif self._turn_check_pending and silence_duration >= self._min_silence_for_turn and self._utterance_buffer:
+                                now = time.time()
+                                time_since_last_check = now - self._last_turn_check_time if self._last_turn_check_time > 0 else float('inf')
+
+                                if time_since_last_check >= 1.0:
+                                    self._last_turn_check_time = now
+                                    audio_array = np.concatenate(self._utterance_buffer)
+                                    duration = len(audio_array) / self._current_sample_rate
+
+                                    if duration >= 0.3:
+                                        try:
+                                            result = self._turn_detector.predict(audio_array)
+                                            print(f"[STT] Turn detection: complete={result['complete']}, prob={result['probability']:.2f}")
+
+                                            if result['complete']:
+                                                self._on_turn_complete_locked()
+                                            else:
+                                                print("[STT] Turn incomplete, re-checking in 1s")
+                                        except Exception as e:
+                                            print(f"[STT] Turn detection error: {e}")
+
+                    # Small sleep to avoid busy-waiting, but fast enough for responsive VAD
+                    time.sleep(0.01)  # 10ms
+
+            except Exception as e:
+                print(f"[STT] Open mic loop error: {e}")
+                # Stream died mid-loop — retry unless we're shutting down
+                max_retries -= 1
+                if max_retries <= 0 or not self._open_mic_active:
+                    print("[STT] Open mic: max retries exceeded, giving up")
+                    return
+                print(f"[STT] Reconnecting stream in {retry_delay}s... ({max_retries} retries left)")
+                self._open_mic_stop_event.wait(retry_delay)
+            finally:
+                if self._stream:
+                    try:
+                        self._stream.stop()
+                        self._stream.close()
+                    except:
+                        pass
+                    self._stream = None
 
     def _process_vad_chunk(self, audio_chunk: np.ndarray):
         """Process audio chunk through VAD."""
@@ -1245,6 +1281,8 @@ class STTCapture:
         if not self._speech_in_progress:
             return
 
+        turn_decision_ms = (time.time() - self._silence_start_time) * 1000 if self._silence_start_time > 0 else 0
+
         self._speech_in_progress = False
         self._silence_start_time = 0
         self._turn_check_pending = False
@@ -1260,7 +1298,7 @@ class STTCapture:
         audio_array = np.concatenate(self._utterance_buffer)
         duration = len(audio_array) / self._current_sample_rate
 
-        print(f"[STT] Turn complete ({duration:.1f}s)")
+        print(f"[STT] Turn complete ({duration:.1f}s audio, {turn_decision_ms:.0f}ms since VAD silence)")
 
         if duration < 0.3:
             print("[STT] Utterance too short, ignoring")

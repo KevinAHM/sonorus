@@ -19,6 +19,15 @@
      (this folder). Sonorus now lives inside your game directory.
 
   -----------------------------------------------
+  Enabling / Disabling Sonorus
+  -----------------------------------------------
+
+  To temporarily disable Sonorus without uninstalling,
+  run disable_or_enable_sonorus.bat and choose Disable.
+
+  Run it again and choose Enable to turn it back on.
+
+  -----------------------------------------------
   Uninstalling Sonorus
   -----------------------------------------------
 

@@ -22,6 +22,9 @@ package.loaded["Utils.NPCLock"] = nil
 package.loaded["Utils.PlayerGear"] = nil
 package.loaded["Utils.Combat"] = nil
 package.loaded["Utils.TimeDilation"] = nil
+package.loaded["Utils.FirstPerson"] = nil
+package.loaded["Utils.PathNav"] = nil
+package.loaded["Utils.TickScheduler"] = nil
 
 -- Lipsync enabled (was disabled for lag diagnosis)
 _G.DisableLipsync = false
@@ -47,6 +50,9 @@ local json = require "json"
 -- Unified caching utility (persists across F11 reloads)
 local Cache = require "Utils.Cache"
 
+-- Shared main-loop scheduler (single UE4SS timer for recurring Lua tasks)
+local TickScheduler = require "Utils.TickScheduler"
+
 -- Utils module
 local Utils = require "Utils.Utils"
 
@@ -62,6 +68,7 @@ local BlueprintHelpers = require "Utils.BlueprintHelpers"
 
 -- Audio muting helpers
 local AudioMute = require "Utils.AudioMute"
+_G.AudioMute = AudioMute
 
 -- NPC facial component helpers
 local NPCFacial = require "Utils.NPCFacial"
@@ -74,7 +81,13 @@ local LipSync = require "Utils.LipSync"
 
 -- NPC attention lock system (dofile forces fresh file read on F11 - require uses stale cache)
 local NPCLock = dofile(_G.SonorusScriptsPath .. "Utils/NPCLock.lua")
+_G.NPCLockModule = NPCLock
 local CompanionFollow = dofile(_G.SonorusScriptsPath .. "Utils/CompanionFollow.lua")
+local FOLLOWING_COMPANION_EARSHOT_DISTANCE = 3000
+local BROOM_COMPANION_EARSHOT_DISTANCE = 10000
+
+-- Attention meter system
+local AttentionMeter = require "Utils.AttentionMeter"
 
 -- Player gear system
 local PlayerGear = require "Utils.PlayerGear"
@@ -88,6 +101,18 @@ local UEHelpers = require("UEHelpers")
 -- Time dilation system
 local TimeDilation = require "Utils.TimeDilation"
 
+-- Facial emotes system (dofile forces fresh file read on F11 - require uses stale cache)
+local Emotes = dofile(_G.SonorusScriptsPath .. "Utils/Emotes.lua")
+
+-- First-person view camera system (helpers only - no auto-register)
+local FirstPerson = require "Utils.FirstPerson"
+_G.FirstPerson = FirstPerson  -- Expose for socket_client.lua
+
+-- Location registry (mod key lookups, display names, schedule IDs)
+-- dofile forces fresh file read on F11 so commitment_spots.json changes take effect
+local LocationRegistry = dofile(_G.SonorusScriptsPath .. "Utils/LocationRegistry.lua")
+_G.LocationRegistryModule = LocationRegistry
+
 -- Helper to expose all module functions as globals
 local function expose(...)
     for _, module in ipairs({...}) do
@@ -100,14 +125,23 @@ local function expose(...)
     end
 end
 
+-- Local alias for the shared angle utility (used by NPC lock facing checks)
+local GetAngleToTarget = Utils.GetAngleToTarget
+
+-- Debug system (dofile forces fresh file read on F11 - require uses stale cache)
+local Debug = dofile(_G.SonorusScriptsPath .. "Utils/Debug.lua")
+
 -- Auto-expose module functions as globals (import *)
-expose(BlueprintHelpers, AudioZone, PlayerGear, NPCLock, NPCFacial, FileIO, AudioMute, LipSync, TimeDilation)
+expose(BlueprintHelpers, AudioZone, PlayerGear, NPCLock, NPCFacial, FileIO, AudioMute, LipSync, TimeDilation, Debug)
 
 -- Safe IsValid check (from BlueprintHelpers)
 local SafeIsValid = BlueprintHelpers.SafeIsValid
 
 -- Clear event listeners on reload (states persist, handlers re-register below)
 Events.clear()
+
+-- Re-apply FPV if it was active before F11 reload (no-op on fresh start)
+FirstPerson.onReload()
 
 -- Socket client for Python server communication (lipsync, visemes)
 -- NOTE: socket_client.lua sets _G.SocketClient, use that directly (no local shadow)
@@ -123,6 +157,9 @@ print("[Sonorus] Socket reconnect triggered")
 
 -- Commitment manager for NPC schedule overrides (dofile for hot reload)
 _G.CommitmentManager = dofile(_G.SonorusScriptsPath .. "Utils/CommitmentManager.lua")
+
+-- Path navigation for guiding player to committed NPCs (dofile for hot reload)
+_G.PathNav = dofile(_G.SonorusScriptsPath .. "Utils/PathNav.lua")
 
 -- ============================================
 -- Access global state from main.lua
@@ -151,10 +188,6 @@ _G.CachedHousePoints = _G.CachedHousePoints or {
 -- File paths
 -- ============================================
 local FILES = {
-    dialogueHistory = "sonorus\\data\\dialogue_history.json",
-    subtitles = "sonorus\\data\\subtitles.json",
-    locations = "sonorus\\data\\locations.json",
-    localization = "sonorus\\data\\main_localization.json",
     voiceManifest = "sonorus\\data\\voice_manifest.json",
     spellMappings = "sonorus\\data\\spell_mappings.json",
 }
@@ -204,7 +237,11 @@ local function EnsurePermanentStatics(data)
 end
 
 -- Dynamic refresh: only objects that change on load/fast travel
-local function RefreshStaticData(data)
+local function RefreshStaticData(data, force)
+    if not force and not _G.SonorusState.playerLoaded then
+        print("[Sonorus] Player not loaded, skipping RefreshStaticData")
+        return
+    end
     -- Permanent statics (fetched once, then just copied)
     EnsurePermanentStatics(data)
 
@@ -230,6 +267,7 @@ local function RefreshStaticData(data)
     data.companionManager = FindFirstOf("CompanionManager")
     data.gearManager = FindFirstOf("GearManager")
     data.populationManager = FindFirstOf("PopulationManager")
+    pcall(function() data.missionManager = FindFirstOf("MissionManager") end)
 
     -- Mark primary object for validity checks
     data._primary = data.playerController
@@ -283,8 +321,28 @@ _G.CompanionFollow = CompanionFollow
 -- Initialize LipSync module
 LipSync.init()
 
--- Export GetStaticCache globally (needed by LipSync and other modules)
+-- Initialize Emotes module
+Emotes.init()
+
+-- Export GetStaticCache and GetCachedNPCs globally (needed by LipSync, AudioMute, and other modules)
 _G.GetStaticCache = GetStaticCache
+_G.GetCachedNPCs = GetCachedNPCs
+-- Force-refresh static cache, bypassing playerLoaded guard
+_G.ForceRefreshStaticCache = function()
+    Cache.GetStatic(function(data) RefreshStaticData(data, true) end, 0)
+end
+
+--- Check if player is in a cinematic state
+--- @param player UObject|nil The Biped_Player actor
+--- @return boolean
+function IsInCinematicState(player)
+    if player then
+        local native = false
+        pcall(function() native = player.InCinematic or false end)
+        if native then return true end
+    end
+    return false
+end
 
 --- Check if companion is on broom via CharacterMovementComponent
 --- @param companionPawn UObject The companion pawn actor
@@ -336,44 +394,17 @@ end
 --   MissionUID (IntProperty) - unique mission ID
 
 -- ============================================
--- NPC Animation System (Blueprint-based)
--- ============================================
--- Animation via Lua crashes the game - use Blueprint instead
--- Call PlayNPCEmote(actor, emoteName) which delegates to Blueprint
-
--- Play emote on NPC via Blueprint ModActor
--- emoteName: "laugh", "shrug", "think", "greet", "wave", "nod"
-function PlayNPCEmote(actor, emoteName)
-    local mod = GetSonorusModActor()
-    if not mod then
-        print("[Anim] ModActor not found - can't play emote")
-        return false
-    end
-    if not actor then
-        print("[Anim] No actor provided")
-        return false
-    end
-
-    -- Call Blueprint function: playemote(actor, emoteName)
-    local ok, err = pcall(function()
-        mod:playemote(actor, emoteName)
-    end)
-
-    if not ok then
-        print("[Anim] Blueprint playemote error: " .. tostring(err))
-        return false
-    end
-
-    print("[Anim] Triggered emote '" .. emoteName .. "' via Blueprint")
-    return true
-end
-
--- ============================================
 -- Player Voice ID Detection
 -- ============================================
 -- Returns "PlayerMale" or "PlayerFemale" based on character gender
 -- Must be called from game thread (or inside ExecuteInGameThread)
+-- Cached in _G.SonorusState.playerVoiceId; cleared in InvalidateWorld
 function GetPlayerVoiceId()
+    local state = _G.SonorusState or {}
+    if state.playerVoiceId and state.playerVoiceId ~= "" then
+        return state.playerVoiceId
+    end
+
     local voiceId = "PlayerMale"  -- Default fallback
 
     pcall(function()
@@ -388,1199 +419,8 @@ function GetPlayerVoiceId()
         end
     end)
 
+    state.playerVoiceId = voiceId
     return voiceId
-end
-
--- PropTypeIDs enum -> NPC-friendly description
--- From /Script/Phoenix.PropTypeIDs in UE4SS object dump
-local PROP_TYPE_LABELS = {
-    [0]  = "bed",
-    [1]  = "bench",
-    [2]  = "bench",
-    [3]  = "bespoke",
-    [4]  = "bookshelf",
-    [5]  = "browsing shelf",
-    [6]  = "candy display",
-    [7]  = "chair",
-    [8]  = "chair",
-    [9]  = "chest",
-    [10] = "cleaning shelves",
-    [11] = "couch",
-    [12] = "couch",
-    [13] = "couch",
-    [14] = "couch",
-    [15] = "desk",
-    [16] = "desk",
-    [17] = "dresser",
-    [18] = "drinking tea",
-    [19] = "fireside",
-    [20] = "fireside bench",
-    [21] = "fluid",
-    [22] = "globe",
-    [23] = "great hall table",
-    [24] = "great hall table",
-    [25] = "great hall table",
-    [26] = "sitting on ground",
-    [27] = "guard post",
-    [28] = "herbology station",
-    [29] = "investigating",
-    [30] = "job station",
-    [31] = "lounge chair",
-    [32] = "mail interaction",
-    [33] = "mission interaction",
-    [34] = nil, -- NONE (area/zone marker, not a real station)
-    [35] = "occupation",
-    [36] = "office desk",
-    [37] = "patrol",
-    [38] = "potion station",
-    [39] = "railing lean",
-    [40] = "railing lean",
-    [41] = "shop register",
-    [42] = "service counter",
-    [43] = "stairs",
-    [44] = "sitting on stairs",
-    [45] = "sitting on stairs",
-    [46] = "standing",
-    [47] = "standing",
-    [48] = "standing",
-    [49] = "standing",
-    [50] = "standing",
-    [51] = "standing",
-    [52] = "standing in queue",
-    [53] = "tall stool",
-    [54] = "study desk",
-    [55] = "table",
-    [56] = "table",
-    [57] = "table",
-    [58] = "table",
-    [59] = "table",
-    [60] = "taking notes",
-    [61] = "teacher's chair",
-    [62] = "drinking tea",
-    [63] = "telescope",
-    [64] = "vendor stall",
-    [65] = "wall lean",
-    [66] = "wall sit",
-    [67] = "wardrobe",
-    [68] = "window shopping",
-}
-
--- Clean up stale gaze state from previous session (survives F11 reload)
-if _G.DebugGazeLoop then
-    pcall(function() CancelDelayedAction(_G.DebugGazeLoop) end)
-    _G.DebugGazeLoop = nil
-end
-_G.DebugGazeTarget = nil
-_G.DebugFaceTarget = nil
--- Test counter: cycles through tests one at a time (persists across F11)
-_G.DebugGazeTestIdx = _G.DebugGazeTestIdx or 0
-
--- Clean up stale blendshape debug state from previous session
-if _G.DebugBlendshapeLoop then
-    pcall(function() CancelDelayedAction(_G.DebugBlendshapeLoop) end)
-    _G.DebugBlendshapeLoop = nil
-end
-if _G._OrigGetCurrentSpeakerActor then
-    _G.GetCurrentSpeakerActor = _G._OrigGetCurrentSpeakerActor
-    _G._OrigGetCurrentSpeakerActor = nil
-end
-_G.DebugBlendshapeTestIdx = _G.DebugBlendshapeTestIdx or 0
-_G.DebugBlendshapeActor = nil
-
--- ============================================
--- F7 Debug Function - Blendshape/Morph Target Tuning
--- Press F7 to cycle through each morph target at max and mapped amplitude
--- Look at an NPC before pressing F7 to select them as the target
--- ============================================
-
--- Morph target names for the 6 new direct targets
-local MORPH_NAMES = {"mouth_press", "upr_lip_up_l", "upr_lip_up_r", "ee", "o", "shh"}
-
--- Helper: reset all morph targets on an actor (both Blueprint and direct)
-local function ResetAllMorphTargets(actor)
-    BlueprintHelpers.CallSetBlendshapes(actor, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-    pcall(function()
-        local mesh = actor.Mesh
-        if mesh then
-            for _, name in ipairs(MORPH_NAMES) do
-                mesh:SetMorphTarget(FName(name), 0, false)
-            end
-        end
-    end)
-end
-
--- Helper: apply a blendshape test configuration
--- config = { jaw=0, smile=0, funnel=0, press=0, lip_up=0, ee=0, o=0, shh=0 }
-local function ApplyBlendshapeConfig(actor, config)
-    local jaw = config.jaw or 0
-    local smile = config.smile or 0
-    local funnel = config.funnel or 0
-
-    -- Apply Blueprint-driven shapes
-    BlueprintHelpers.CallSetBlendshapes(
-        actor,
-        jaw,                -- jaw_drop
-        smile,              -- smile_l
-        smile,              -- smile_r
-        funnel,             -- lwr_lip_funl_l
-        funnel,             -- lwr_lip_funl_r
-        funnel * 0.7,       -- upr_lip_funl_l
-        funnel * 0.7,       -- upr_lip_funl_r
-        jaw * 0.3,          -- lwr_lip_dn_l
-        jaw * 0.3           -- lwr_lip_dn_r
-    )
-
-    -- Apply direct morph targets
-    pcall(function()
-        local mesh = actor.Mesh
-        if mesh then
-            mesh:SetMorphTarget(FName("mouth_press"), config.press or 0, false)
-            mesh:SetMorphTarget(FName("upr_lip_up_l"), config.lip_up or 0, false)
-            mesh:SetMorphTarget(FName("upr_lip_up_r"), config.lip_up or 0, false)
-            mesh:SetMorphTarget(FName("ee"), config.ee or 0, false)
-            mesh:SetMorphTarget(FName("o"), config.o or 0, false)
-            mesh:SetMorphTarget(FName("shh"), config.shh or 0, false)
-        end
-    end)
-end
-
--- ============================================================
--- Schedule Override Probe (F7 toggle) - Hardcoded to GladwinMoon
--- All references fetched fresh each time (safe across fast travel)
--- First press: override schedule to Three Broomsticks
--- Second press: undo override, restore normal schedule
--- ============================================================
-_G._ScheduleOverrideState = _G._ScheduleOverrideState or nil
-
-function DebugF7_ScheduleOverride()
-    ExecuteInGameThread(function()
-        local TAG = "[SchedProbe]"
-        local ENTITY_NAME = "GladwinMoon"
-
-        -- Helper: get fresh references every time (safe after fast travel)
-        local function GetFreshRefs()
-            local refs = {}
-            local staticData = GetStaticCache()
-            if not staticData then print(TAG .. " No static cache") return nil end
-            refs.staticData = staticData
-
-            refs.popManager = staticData.populationManager
-            if not refs.popManager or not SafeIsValid(refs.popManager) then
-                print(TAG .. " No PopulationManager")
-                return nil
-            end
-
-            -- Get ScheduledEntity by name (works even when not in flesh)
-            pcall(function() refs.se = refs.popManager:GetScheduledEntityFromName(ENTITY_NAME) end)
-            if not refs.se then
-                print(TAG .. " Could not get ScheduledEntity for " .. ENTITY_NAME)
-                return nil
-            end
-            local seValid = false
-            pcall(function() seValid = refs.se:IsValid() end)
-            if not seValid then
-                print(TAG .. " ScheduledEntity not valid")
-                return nil
-            end
-
-            -- Provider: mod actor or player controller
-            pcall(function() refs.provider = _G.SonorusState and _G.SonorusState.sonorusModActor end)
-            if not refs.provider or not SafeIsValid(refs.provider) then
-                refs.provider = staticData.playerController
-            end
-
-            -- WorldEventActor (fresh find)
-            pcall(function() refs.weActor = FindFirstOf("WorldEventActor") end)
-
-            return refs
-        end
-
-        -- Helper: print current schedule
-        local function PrintSchedule(refs, label)
-            local info = Utils.GetNPCScheduleInfo(ENTITY_NAME, refs.staticData)
-            if info then
-                print(string.format("%s %s: location=%s, activity=%s, type=%s, inFlesh=%s, inTransit=%s",
-                    TAG, label, tostring(info.locationName), tostring(info.activity),
-                    tostring(info.activityType), tostring(info.inFlesh), tostring(info.isInTransit)))
-            else
-                print(string.format("%s %s: GetNPCScheduleInfo returned nil", TAG, label))
-            end
-
-            -- Also read raw activity data
-            pcall(function()
-                local out, out2 = {}, {}
-                refs.se:GetCurrentActivity(out, out2)
-                local activity = out.Activity
-                pcall(function() activity = out.Activity:ToString() end)
-                local locKey = out.LocationKey
-                pcall(function() locKey = out.LocationKey:ToString() end)
-                print(string.format("%s %s (raw): activity=%s, locKey=%s, start=%s, end=%s",
-                    TAG, label, tostring(activity), tostring(locKey),
-                    tostring(out.StartTime), tostring(out.EndTime)))
-            end)
-
-            -- Check flesh/transit state
-            pcall(function()
-                print(string.format("%s %s: inFlesh=%s, isInTransit=%s, isEnabled=%s",
-                    TAG, label, tostring(refs.se:CurrentlyInFlesh()),
-                    tostring(refs.se:IsInTransit()), tostring(refs.se:IsEnabled())))
-            end)
-        end
-
-        -- ============================================================
-        -- RELEASE PATH
-        -- ============================================================
-        if _G._ScheduleOverrideState then
-            print(string.format("%s === RELEASING %s ===", TAG, ENTITY_NAME))
-            local refs = GetFreshRefs()
-            if not refs then
-                print(TAG .. " Can't get fresh refs - clearing state anyway")
-                _G._ScheduleOverrideState = nil
-                return
-            end
-
-            PrintSchedule(refs, "PRE-RELEASE")
-
-            -- RemoveDynamicActivityFromSE (fresh WorldEventActor)
-            if refs.weActor and SafeIsValid(refs.weActor) and _G._ScheduleOverrideState.injectedActivity then
-                local ok, err = pcall(function()
-                    local result = refs.weActor:RemoveDynamicActivityFromSE(refs.se, _G._ScheduleOverrideState.injectedActivity)
-                    print(string.format("%s RemoveDynamicActivityFromSE: %s", TAG, tostring(result)))
-                end)
-                if not ok then print(string.format("%s RemoveDynamic FAILED: %s", TAG, tostring(err))) end
-            else
-                print(TAG .. " No WorldEventActor for RemoveDynamic (or no activity to remove)")
-            end
-
-            -- FinishSchedulingOverride (fresh provider)
-            local ok2, err2 = pcall(function()
-                local result = refs.se:FinishSchedulingOverride(4, refs.provider, true, false, true)
-                print(string.format("%s FinishSchedulingOverride(priority=4): %s", TAG, tostring(result)))
-            end)
-            if not ok2 then print(string.format("%s FinishOverride FAILED: %s", TAG, tostring(err2))) end
-
-            -- Re-enable scheduling
-            pcall(function() refs.se:EnableScheduling(true, false, true) end)
-            print(TAG .. " EnableScheduling(true) called")
-
-            -- Print after release (with delay for scheduler to process)
-            ExecuteInGameThreadWithDelay(1000, function()
-                local refs2 = GetFreshRefs()
-                if refs2 then PrintSchedule(refs2, "POST-RELEASE (1s)") end
-            end)
-
-            _G._ScheduleOverrideState = nil
-            print(string.format("%s === RELEASE COMPLETE ===", TAG))
-            return
-        end
-
-        -- ============================================================
-        -- OVERRIDE PATH
-        -- ============================================================
-        print(string.format("%s === SCHEDULE OVERRIDE: %s -> Three Broomsticks ===", TAG, ENTITY_NAME))
-        local refs = GetFreshRefs()
-        if not refs then return end
-
-        PrintSchedule(refs, "BEFORE")
-
-        local state = { injectedActivity = nil }
-
-        -- NOTE: FinishSchedulingOverride always returns true regardless of existing overrides.
-        -- It's an action, not a query. Cannot be used to detect existing overrides.
-
-        -- Step 1: StartSchedulingOverride
-        local overrideResult = false
-        local ok1, err1 = pcall(function()
-            overrideResult = refs.se:StartSchedulingOverride(true, 4, refs.provider, true, true, true)
-            print(string.format("%s StartSchedulingOverride(priority=4): %s", TAG, tostring(overrideResult)))
-        end)
-        if not ok1 then print(string.format("%s StartSchedulingOverride FAILED: %s", TAG, tostring(err1))) end
-
-        -- Print current game time for time window testing
-        pcall(function()
-            local timeData = GetTimeOfDay and GetTimeOfDay()
-            if timeData then
-                print(string.format("%s Current game time: %02d:%02d (minute of day: %d)",
-                    TAG, timeData.hour or 0, timeData.minute or 0, timeData.minuteOfDay or 0))
-            end
-        end)
-
-        -- Step 2: InsertDynamicActivityOnSE
-        -- Testing TWO activities: one all-day (0-2400) and one restricted (600-2130)
-        if refs.weActor and SafeIsValid(refs.weActor) then
-            -- Test A: Restricted window activity (600-2130)
-            local okA, errA = pcall(function()
-                local result = refs.weActor:InsertDynamicActivityOnSE(refs.se, "ThreeBroomsticksHours", "HM_ThreeBroomsticks")
-                print(string.format("%s InsertDynamic('ThreeBroomsticksHours' [600-2130]): %s", TAG, tostring(result)))
-                if result then state.injectedActivity = "ThreeBroomsticksHours" end
-            end)
-            if not okA then print(string.format("%s InsertDynamic(restricted) FAILED: %s", TAG, tostring(errA))) end
-
-            -- Test B: All-day activity (0-2400) - only if restricted one failed
-            if not state.injectedActivity then
-                local okB, errB = pcall(function()
-                    local result = refs.weActor:InsertDynamicActivityOnSE(refs.se, "HM_ThreeBroomsticksHours", "HM_ThreeBroomsticks")
-                    print(string.format("%s InsertDynamic('HM_ThreeBroomsticksHours' [0-2400]) FALLBACK: %s", TAG, tostring(result)))
-                    if result then state.injectedActivity = "HM_ThreeBroomsticksHours" end
-                end)
-                if not okB then print(string.format("%s InsertDynamic(allday) FAILED: %s", TAG, tostring(errB))) end
-            end
-        else
-            print(TAG .. " No WorldEventActor available")
-        end
-
-        -- Print after override (with delay)
-        ExecuteInGameThreadWithDelay(1000, function()
-            local refs2 = GetFreshRefs()
-            if refs2 then PrintSchedule(refs2, "AFTER (1s)") end
-        end)
-
-        _G._ScheduleOverrideState = state
-        print(string.format("%s === OVERRIDE APPLIED (press F7 again to release) ===", TAG))
-    end)
-end
-
--- ============================================================
--- F7 Debug: Floo Companion Dismiss Test
--- Finds BP_Student_Mod_C, sets DismissedCompanion, fires CompanionChanged
--- ============================================================
--- Persistent state for TurnInPlace test toggle
-_G._TurnInPlaceState = _G._TurnInPlaceState or nil
-
-_G._DebugDugbog = _G._DebugDugbog or nil
-
-function DebugF7()
-    ExecuteInGameThread(function()
-        local TAG = "[DugbogSpawn]"
-
-        -- Toggle: second press destroys
-        if _G._DebugDugbog and SafeIsValid(_G._DebugDugbog) then
-            print(TAG .. " === DESTROYING DUGBOG ===")
-            pcall(function() _G._DebugDugbog:K2_DestroyActor() end)
-            _G._DebugDugbog = nil
-            print(TAG .. " Destroyed")
-            return
-        end
-        _G._DebugDugbog = nil
-
-        print(TAG .. " === SPAWN DUGBOG (NON-HOSTILE) ===")
-
-        local staticData = GetStaticCache()
-        if not staticData then print(TAG .. " No static cache") return end
-
-        local player = staticData.player
-        if not player or not SafeIsValid(player) then print(TAG .. " No player") return end
-
-        local playerLoc = player:K2_GetActorLocation()
-        local playerRot = player:K2_GetActorRotation()
-
-        -- Spawn ~500 units in front of player (~5m), ~150 units up (~5ft)
-        local yawRad = math.rad(playerRot.Yaw)
-        local spawnX = playerLoc.X + math.cos(yawRad) * 500
-        local spawnY = playerLoc.Y + math.sin(yawRad) * 500
-        local spawnZ = playerLoc.Z + 150
-
-        print(string.format("%s Player at (%.0f, %.0f, %.0f) yaw=%.1f", TAG, playerLoc.X, playerLoc.Y, playerLoc.Z, playerRot.Yaw))
-        print(string.format("%s Spawn target: (%.0f, %.0f, %.0f)", TAG, spawnX, spawnY, spawnZ))
-
-        -- Find dugbog Blueprint class
-        local classPath = "/Game/Pawn/NPC/Enemy/Character/Dugbog/BP_Dugbog.BP_Dugbog_C"
-        local dugbogClass = StaticFindObject(classPath)
-        if not dugbogClass then
-            print(TAG .. " Class not in memory, trying LoadAsset...")
-            pcall(function()
-                LoadAsset("/Game/Pawn/NPC/Enemy/Character/Dugbog/BP_Dugbog")
-            end)
-            dugbogClass = StaticFindObject(classPath)
-        end
-        if not dugbogClass then
-            print(TAG .. " FAILED: Could not find or load BP_Dugbog class")
-            return
-        end
-        print(TAG .. " Class: " .. dugbogClass:GetFullName())
-
-        -- GameplayStatics for spawning
-        local gps = StaticFindObject("/Script/Engine.Default__GameplayStatics")
-        if not gps then
-            print(TAG .. " FAILED: No GameplayStatics")
-            return
-        end
-
-        local spawnTransform = {
-            Translation = { X = spawnX, Y = spawnY, Z = spawnZ },
-            Rotation = { X = 0, Y = 0, Z = 0, W = 1 },
-            Scale3D = { X = 1, Y = 1, Z = 1 }
-        }
-
-        -- BeginDeferredActorSpawnFromClass (2 = AdjustIfPossibleButAlwaysSpawn)
-        local dugbog = nil
-        local ok, err = pcall(function()
-            dugbog = gps:BeginDeferredActorSpawnFromClass(player, dugbogClass, spawnTransform, 2, player)
-        end)
-        if not ok then
-            print(TAG .. " BeginDeferredActorSpawnFromClass FAILED: " .. tostring(err))
-            return
-        end
-        if not dugbog then
-            print(TAG .. " BeginDeferredActorSpawnFromClass returned nil")
-            return
-        end
-
-        local ok2, err2 = pcall(function()
-            gps:FinishSpawningActor(dugbog, spawnTransform)
-        end)
-        if not ok2 then
-            print(TAG .. " FinishSpawningActor FAILED: " .. tostring(err2))
-        end
-
-        print(TAG .. " Dugbog spawned: " .. tostring(dugbog:GetFullName()))
-        _G._DebugDugbog = dugbog
-
-        -- === MAKE NON-HOSTILE (delay 200ms for AI components to initialize) ===
-        ExecuteInGameThreadWithDelay(200, function()
-            if not dugbog or not SafeIsValid(dugbog) then
-                print(TAG .. " Dugbog gone before pacify")
-                return
-            end
-
-            print(TAG .. " --- Pacifying dugbog ---")
-
-            -- EnemyAIComponent: disable attacks + wander mode
-            pcall(function()
-                local aiClass = StaticFindObject("/Script/Phoenix.EnemyAIComponent")
-                if aiClass then
-                    local aiComp = dugbog:GetComponentByClass(aiClass)
-                    if aiComp then
-                        aiComp:SetCanAttack(false)
-                        print(TAG .. " EnemyAIComponent:SetCanAttack(false): OK")
-                        aiComp:ForceDisengagedState()
-                        print(TAG .. " EnemyAIComponent:ForceDisengagedState(): OK")
-                        aiComp:SetWanderMode()
-                        print(TAG .. " EnemyAIComponent:SetWanderMode(): OK")
-                    else
-                        print(TAG .. " No EnemyAIComponent on actor")
-                    end
-                end
-            end)
-
-            -- CharacterStateInfo: non-targetable
-            pcall(function()
-                local csi = dugbog:GetCharacterStateInfo()
-                if csi then
-                    csi:SetAttackable(false)
-                    print(TAG .. " CharacterStateInfo:SetAttackable(false): OK")
-                else
-                    print(TAG .. " No CharacterStateInfo")
-                end
-            end)
-
-            print(TAG .. " --- Pacify complete ---")
-        end)
-
-        print(TAG .. " Press F7 again to destroy")
-    end)
-end
-
-function DebugF7_TurnInPlace()
-    ExecuteInGameThread(function()
-        local TAG = "[TurnInPlace]"
-
-        -- ============================================================
-        -- RELEASE PATH (second press)
-        -- ============================================================
-        if _G._TurnInPlaceState then
-            print(TAG .. " === RELEASING ===")
-            local st = _G._TurnInPlaceState
-            local npcId = st.npcName
-
-            local staticData = GetStaticCache()
-            if not staticData then
-                print(TAG .. " No static cache - clearing state")
-                _G._TurnInPlaceState = nil
-                return
-            end
-
-            local popManager = staticData.populationManager
-            if popManager and SafeIsValid(popManager) then
-                local se = nil
-                pcall(function() se = popManager:GetScheduledEntityFromName(npcId) end)
-                if se then
-                    -- Clear AI focus
-                    local flesh = nil
-                    pcall(function() flesh = se:GetFlesh() end)
-                    if flesh and SafeIsValid(flesh) then
-                        local ctrl = nil
-                        pcall(function() ctrl = flesh.Controller end)
-                        if ctrl and SafeIsValid(ctrl) then
-                            pcall(function() ctrl:K2_ClearFocus() end)
-                            print(TAG .. " K2_ClearFocus OK")
-                        end
-                    end
-
-                    -- Re-enable scheduling (was disabled to freeze NPC)
-                    pcall(function() se:EnableScheduling(true, false, true) end)
-                    print(TAG .. " Scheduling re-enabled")
-                end
-            end
-
-            _G._TurnInPlaceState = nil
-            print(TAG .. " === RELEASED (press F7 again to test) ===")
-            return
-        end
-
-        -- ============================================================
-        -- APPLY PATH (first press)
-        -- ============================================================
-        print(TAG .. " === NPC SetTargetLocationTurnInPlace TEST ===")
-
-        local staticData = GetStaticCache()
-        if not staticData then print(TAG .. " No static cache") return end
-
-        local player = staticData.player
-        if not player or not SafeIsValid(player) then print(TAG .. " No player") return end
-
-        local playerLoc = player:K2_GetActorLocation()
-        print(string.format("%s Player at (%.0f, %.0f, %.0f)", TAG, playerLoc.X, playerLoc.Y, playerLoc.Z))
-
-        -- Find nearest NPC
-        local nearestNpc = nil
-        local nearestDist = math.huge
-        local nearestName = nil
-        local playerFullName = staticData.playerFullName or ""
-
-        local npcResult = nil
-        pcall(function() npcResult = GetNearbyNPCs(2000, 0.9) end)
-
-        if not npcResult or not npcResult.nearbyList or #npcResult.nearbyList == 0 then
-            print(TAG .. " No nearby NPCs found")
-            return
-        end
-
-        for _, entry in ipairs(npcResult.nearbyList) do
-            if entry.actor and SafeIsValid(entry.actor) then
-                local entryFullName = entry.actor:GetFullName()
-                if entryFullName ~= playerFullName then
-                    local npcLoc = entry.actor:K2_GetActorLocation()
-                    local dx = npcLoc.X - playerLoc.X
-                    local dy = npcLoc.Y - playerLoc.Y
-                    local dist = math.sqrt(dx * dx + dy * dy)
-                    if dist < nearestDist then
-                        nearestDist = dist
-                        nearestNpc = entry.actor
-                        nearestName = entry.name or "?"
-                    end
-                end
-            end
-        end
-
-        if not nearestNpc then
-            print(TAG .. " No valid NPC found")
-            return
-        end
-
-        local npcLoc = nearestNpc:K2_GetActorLocation()
-        local npcRot = nearestNpc:K2_GetActorRotation()
-        print(string.format("%s Nearest NPC: %s (dist=%.0f, yaw=%.1f)", TAG, nearestName, nearestDist, npcRot.Yaw or 0))
-
-        -- Get ScheduledEntity + PopulationManager
-        local popManager = staticData.populationManager
-        if not popManager or not SafeIsValid(popManager) then
-            print(TAG .. " No PopulationManager")
-            return
-        end
-
-        local se = nil
-        pcall(function() se = popManager:GetScheduledEntityFromActor(nearestNpc, false) end)
-        if not se then
-            print(TAG .. " No ScheduledEntity for this NPC")
-            return
-        end
-
-        -- NPCLock-style: brief enable window for animated turn, then freeze
-
-        -- Step 1: Break from station
-        pcall(function() se:AbandonStations(0) end)
-        print(TAG .. " AbandonStations(0)")
-
-        -- Step 2: Enable scheduling (allows turn animation to play)
-        pcall(function() se:EnableScheduling(true, false, true) end)
-        print(TAG .. " EnableScheduling(true)")
-
-        -- Step 3: Get NPC_Component and call SetTargetLocationTurnInPlace
-        local npcComp = nil
-        pcall(function()
-            local npcCompClass = staticData.npcComponentClass
-            if npcCompClass then
-                npcComp = nearestNpc:GetComponentByClass(npcCompClass)
-            end
-        end)
-
-        if not npcComp then
-            print(TAG .. " Could not get NPC_Component")
-            return
-        end
-
-        local ok2, err2 = pcall(function()
-            npcComp:SetTargetLocationTurnInPlace(playerLoc)
-        end)
-        print(TAG .. " SetTargetLocationTurnInPlace: " .. (ok2 and "OK" or tostring(err2)))
-
-        -- Step 4: After delay, freeze NPC before scheduler reassigns a station
-        ExecuteInGameThreadWithDelay(700, function()
-            pcall(function()
-                if SafeIsValid(nearestNpc) then
-                    se:EnableScheduling(false, true, true)
-                    print(TAG .. " EnableScheduling(false) - frozen after 700ms")
-                end
-            end)
-        end)
-
-        -- Save state for release toggle
-        _G._TurnInPlaceState = {
-            npcName = nearestName,
-            activityId = nil,
-            startYaw = npcRot.Yaw or 0,
-        }
-
-        -- Check rotation after delays
-        ExecuteInGameThreadWithDelay(1500, function()
-            pcall(function()
-                if SafeIsValid(nearestNpc) then
-                    local newRot = nearestNpc:K2_GetActorRotation()
-                    print(string.format("%s After 1.5s: yaw=%.1f (was %.1f, delta=%.1f)",
-                        TAG, newRot.Yaw or 0, npcRot.Yaw or 0, (newRot.Yaw or 0) - (npcRot.Yaw or 0)))
-                end
-            end)
-        end)
-
-        ExecuteInGameThreadWithDelay(3000, function()
-            pcall(function()
-                if SafeIsValid(nearestNpc) then
-                    local newRot = nearestNpc:K2_GetActorRotation()
-                    print(string.format("%s After 3s: yaw=%.1f (was %.1f, delta=%.1f)",
-                        TAG, newRot.Yaw or 0, npcRot.Yaw or 0, (newRot.Yaw or 0) - (npcRot.Yaw or 0)))
-                end
-            end)
-        end)
-
-        print(TAG .. " === TEST FIRED (press F7 again to release) ===")
-    end)
-end
-
-function DebugF7_ScheduleExplorer()
-    ExecuteInGameThread(function()
-        print("[DebugF7] === SCHEDULE EXPLORER ===")
-        local staticData = GetStaticCache()
-        if not staticData then print("[DebugF7] No static cache") return end
-
-        local popManager = staticData.populationManager
-        if not popManager or not SafeIsValid(popManager) then
-            print("[DebugF7] No PopulationManager")
-            return
-        end
-
-        -- Test subjects - mix of nearby and distant NPCs
-        local testNames = {
-            "PhineasBlack",
-            "SebastianSallow",
-            "NatasaiOnai",
-            "Natsai",
-            "NatsaiOnai",
-            "PoppySweeting",
-            "AbrahamRonen",
-            "MatildaWeasley",
-        }
-
-        for _, entityName in ipairs(testNames) do
-            print(string.format("\n[DebugF7] --- %s ---", entityName))
-            local se = nil
-            local ok, err = pcall(function()
-                se = popManager:GetScheduledEntityFromName(entityName)
-            end)
-            if not ok then
-                print(string.format("[DebugF7]   GetSEFromName FAILED: %s", tostring(err)))
-                goto nextEntity
-            end
-            if not se then
-                print("[DebugF7]   ScheduledEntity = nil (not found)")
-                goto nextEntity
-            end
-
-            -- Check if valid
-            local seValid = false
-            pcall(function() seValid = se:IsValid() end)
-            print(string.format("[DebugF7]   SE valid: %s", tostring(seValid)))
-            if not seValid then goto nextEntity end
-
-            -- Identity
-            pcall(function()
-                local myName = se:GetMyName()
-                local nameStr = nil
-                pcall(function() nameStr = myName:ToString() end)
-                print(string.format("[DebugF7]   GetMyName: %s", tostring(nameStr or myName)))
-            end)
-
-            pcall(function()
-                local myId = se:GetMyID()
-                print(string.format("[DebugF7]   GetMyID: %s", tostring(myId)))
-            end)
-
-            -- Is in flesh (streamed in)?
-            pcall(function()
-                local inFlesh = se:CurrentlyInFlesh()
-                print(string.format("[DebugF7]   CurrentlyInFlesh: %s", tostring(inFlesh)))
-            end)
-
-            -- Get flesh actor if loaded
-            pcall(function()
-                local flesh = se:GetFlesh()
-                if flesh and SafeIsValid(flesh) then
-                    print(string.format("[DebugF7]   Flesh: %s", flesh:GetFullName()))
-                else
-                    print("[DebugF7]   Flesh: nil/invalid (not streamed in)")
-                end
-            end)
-
-            -- Location (works even without flesh)
-            pcall(function()
-                local loc = se:GetLocation()
-                if loc then
-                    print(string.format("[DebugF7]   Location: (%.0f, %.0f, %.0f)", loc.X or 0, loc.Y or 0, loc.Z or 0))
-                else
-                    print("[DebugF7]   Location: nil")
-                end
-            end)
-
-            -- Enabled / state
-            pcall(function() print(string.format("[DebugF7]   IsEnabled: %s", tostring(se:IsEnabled()))) end)
-            pcall(function() print(string.format("[DebugF7]   IsStudent: %s", tostring(se:IsStudent()))) end)
-            pcall(function() print(string.format("[DebugF7]   IsGhost: %s", tostring(se:IsGhost()))) end)
-            pcall(function() print(string.format("[DebugF7]   IsHobo: %s", tostring(se:IsHobo()))) end)
-            pcall(function() print(string.format("[DebugF7]   IsInTransit: %s", tostring(se:IsInTransit()))) end)
-
-            -- Current activity
-            pcall(function()
-                local out = {}
-                local out2 = {}
-                se:GetCurrentActivity(out, out2)
-                if out.ActivityIsValid then
-                    local activity = nil
-                    pcall(function() activity = out.Activity:ToString() end)
-                    local actType = nil
-                    pcall(function() actType = out.ActivityType:ToString() end)
-                    local location = nil
-                    pcall(function() location = out.Location:ToString() end)
-                    local locKey = nil
-                    pcall(function() locKey = out.LocationKey:ToString() end)
-                    local stationKey = nil
-                    pcall(function() stationKey = out.StationKey:ToString() end)
-                    print(string.format("[DebugF7]   CurrentActivity: %s", tostring(activity)))
-                    print(string.format("[DebugF7]     Type: %s", tostring(actType)))
-                    print(string.format("[DebugF7]     Location: %s", tostring(location)))
-                    print(string.format("[DebugF7]     LocationKey: %s", tostring(locKey)))
-                    print(string.format("[DebugF7]     StationKey: %s", tostring(stationKey)))
-                    print(string.format("[DebugF7]     Time: %s-%s (dur %s min)",
-                        tostring(out.StartTime), tostring(out.EndTime), tostring(out.DurationMinutes)))
-                    print(string.format("[DebugF7]     DaysMask: %s  Priority: %s", tostring(out.DaysMask), tostring(out.Priority)))
-                else
-                    print("[DebugF7]   CurrentActivity: NONE (ActivityIsValid=false)")
-                end
-            end)
-
-            -- Upcoming activity
-            pcall(function()
-                local out = {}
-                local out2 = {}
-                se:GetUpcomingActivity(out, out2)
-                if out.ActivityIsValid then
-                    local activity = nil
-                    pcall(function() activity = out.Activity:ToString() end)
-                    local location = nil
-                    pcall(function() location = out.Location:ToString() end)
-                    print(string.format("[DebugF7]   UpcomingActivity: %s @ %s", tostring(activity), tostring(location)))
-                    print(string.format("[DebugF7]     Time: %s-%s", tostring(out.StartTime), tostring(out.EndTime)))
-                else
-                    print("[DebugF7]   UpcomingActivity: NONE")
-                end
-            end)
-
-            -- Minutes to upcoming
-            pcall(function()
-                local out = {}
-                local out2 = {}
-                se:GetMinutesToUpcomingActivity(out, out2)
-                if out.ActivityIsValid ~= nil then
-                    print(string.format("[DebugF7]   MinutesToUpcoming: %s (valid=%s)",
-                        tostring(out.MinutesToUpcomingActivity), tostring(out.ActivityIsValid)))
-                end
-            end)
-
-            ::nextEntity::
-        end
-
-        print("\n[DebugF7] === SCHEDULE EXPLORER DONE ===")
-    end)
-end
-
-function DebugF7_CompanionOrient()
-    ExecuteInGameThread(function()
-        print("[DebugF7] === COMPANION ORIENT TO NEAREST NPC ===")
-        local staticData = GetStaticCache()
-        if not staticData then print("[DebugF7] No static cache") return end
-
-        local companionMgr = staticData.companionManager
-        if not companionMgr then print("[DebugF7] No CompanionManager") return end
-
-        local companionPawn = nil
-        pcall(function() companionPawn = companionMgr:GetPrimaryCompanionPawn() end)
-        if not companionPawn or not SafeIsValid(companionPawn) then
-            print("[DebugF7] No companion pawn")
-            return
-        end
-
-        local compLoc = companionPawn:K2_GetActorLocation()
-        local compRot = companionPawn:K2_GetActorRotation()
-        local compName = companionPawn:GetFullName()
-        print(string.format("[DebugF7] Companion at (%.0f, %.0f, %.0f) yaw=%.1f",
-            compLoc.X, compLoc.Y, compLoc.Z, compRot.Yaw or 0))
-
-        -- Find nearest NPC that isn't the companion
-        local nearestNpc = nil
-        local nearestDist = math.huge
-        local nearestName = nil
-
-        if GetNearbyNPCs then
-            local npcResult = GetNearbyNPCs(2000, 0.9)
-            if npcResult and npcResult.nearbyList then
-                for _, entry in ipairs(npcResult.nearbyList) do
-                    if entry.actor and SafeIsValid(entry.actor) then
-                        local entryName = entry.actor:GetFullName()
-                        if entryName ~= compName then
-                            local npcLoc = entry.actor:K2_GetActorLocation()
-                            local dx = npcLoc.X - compLoc.X
-                            local dy = npcLoc.Y - compLoc.Y
-                            local dist = math.sqrt(dx * dx + dy * dy)
-                            if dist < nearestDist then
-                                nearestDist = dist
-                                nearestNpc = entry.actor
-                                nearestName = entry.name
-                            end
-                        end
-                    end
-                end
-            end
-        end
-
-        if not nearestNpc then
-            print("[DebugF7] No nearby NPC found (excluding companion)")
-            return
-        end
-
-        local tgtLoc = nearestNpc:K2_GetActorLocation()
-        local dx = tgtLoc.X - compLoc.X
-        local dy = tgtLoc.Y - compLoc.Y
-        local dist = math.sqrt(dx * dx + dy * dy)
-        local dirX = dx / dist
-        local dirY = dy / dist
-
-        -- Calculate angle
-        local angleToTarget = math.atan(dirY, dirX) * 180 / math.pi
-        local compYaw = compRot.Yaw or 0
-        local diff = angleToTarget - compYaw
-        while diff > 180 do diff = diff - 360 end
-        while diff < -180 do diff = diff + 360 end
-        local turnAngle = math.abs(diff)
-
-        print(string.format("[DebugF7] Nearest NPC: %s (dist=%.0f, angle=%.1f, turnNeeded=%.1f)",
-            nearestName, dist, angleToTarget, turnAngle))
-        print(string.format("[DebugF7] Direction: (%.3f, %.3f)", dirX, dirY))
-
-        if turnAngle < 35 then
-            print("[DebugF7] Already facing target (< 35 deg), skipping")
-            return
-        end
-
-        -- Check companion speed (already moving = shorter pulse)
-        local speed = 0
-        pcall(function()
-            local vel = companionPawn:GetVelocity()
-            if vel then
-                speed = math.sqrt(vel.X*vel.X + vel.Y*vel.Y + vel.Z*vel.Z)
-            end
-        end)
-
-        -- Kill any queued MoveToLocation on the pawn itself
-        pcall(function() companionPawn.CharacterMovement:StopMovementImmediately() end)
-        -- Also clear CompanionManager stop state
-        pcall(function() companionMgr:StopMovement(true) end)
-        pcall(function() companionMgr:StopMovement(false) end)
-
-        -- Pulse: SetCompanionForcedWaitLocation toward nearest NPC
-        local waitPos = {
-            X = compLoc.X + dirX * 200,
-            Y = compLoc.Y + dirY * 200,
-            Z = compLoc.Z
-        }
-        local waitDir = { X = dirX, Y = dirY, Z = 0 }
-        companionMgr:SetCompanionForcedWaitLocation(waitPos, waitDir)
-
-        local delay = turnAngle > 120 and 700 or 500
-        if speed > 1 then
-            delay = math.floor(delay / 2)
-        end
-        print(string.format("[DebugF7] Pulsing companion toward %s (delay=%dms, speed=%.0f)", nearestName, delay, speed))
-
-        ExecuteInGameThreadWithDelay(delay, function()
-            pcall(function() companionMgr:StopMovement(true) end)
-            pcall(function() companionMgr:StopMovement(false) end)
-            pcall(function() companionMgr:StopCompanionForcedWaiting() end)
-            print("[DebugF7] Pulse complete, follow restored")
-        end)
-
-        if ShowHint then
-            ShowHint("Orient companion -> " .. nearestName .. " (angle=" .. math.floor(turnAngle) .. ")", 3)
-        end
-    end)
-end
-
--- Preserved: Original F7 Gaze/LookAt Tests (renamed)
-function DebugF7_GazeTests()
-    ExecuteInGameThread(function()
-        if _G.DebugGazeLoop then
-            pcall(function() CancelDelayedAction(_G.DebugGazeLoop) end)
-            _G.DebugGazeLoop = nil
-        end
-        local staticData = GetStaticCache()
-        if not staticData then print("[DebugF7-Gaze] No static cache") return end
-        local player = staticData.player
-        if not player or not SafeIsValid(player) then print("[DebugF7-Gaze] No player") return end
-        local companionMgr = staticData.companionManager
-        if not companionMgr then print("[DebugF7-Gaze] No CompanionManager") return end
-        local companionPawn = nil
-        pcall(function() companionPawn = companionMgr:GetPrimaryCompanionPawn() end)
-        if not companionPawn or not SafeIsValid(companionPawn) then
-            print("[DebugF7-Gaze] No companion pawn")
-            return
-        end
-        local companionId = Utils.GetCompanionId(companionPawn) or "?"
-        _G.DebugGazeTestIdx = _G.DebugGazeTestIdx + 1
-        local idx = _G.DebugGazeTestIdx
-        print(string.format("[DebugF7-Gaze] === TEST %d === Companion: %s", idx, companionId))
-        if idx > 11 then
-            print("[DebugF7-Gaze] All tests complete. Resetting.")
-            _G.DebugGazeTestIdx = 0
-            return
-        end
-        print("[DebugF7-Gaze] (Old gaze test " .. idx .. " - see git history for full implementation)")
-    end)
-end
-
--- F7 Debug Function (Original) - Nearby Station Scanner
-function DebugF7_StationScanner()
-    ExecuteInGameThread(function()
-        if true then
-            print("[DebugF7] === VR CONTROLLER DEBUG ===")
-            local staticData = GetStaticCache()
-            if not staticData then print("[DebugF7] No static cache") return end
-            local cam = staticData.cameraManager
-            if not cam then print("[DebugF7] No camera") return end
-            local camRot
-            pcall(function() camRot = cam:GetCameraRotation() end)
-            if camRot then
-                print(string.format("[DebugF7] CamRot (=wand): yaw=%.1f pitch=%.1f", camRot.Yaw, camRot.Pitch))
-            end
-            local dbg = _G.VRDebug
-            if dbg then
-                if dbg.hmd then
-                    print(string.format("[DebugF7] HMD: yaw=%.1f pitch=%.1f", dbg.hmd.yaw, dbg.hmd.pitch))
-                end
-                if dbg.dev1 then
-                    print(string.format("[DebugF7] Dev1 (%s): yaw=%.1f pitch=%.1f", dbg.dev1.role or "?", dbg.dev1.yaw, dbg.dev1.pitch))
-                end
-                if dbg.dev2 then
-                    print(string.format("[DebugF7] Dev2 (%s): yaw=%.1f pitch=%.1f", dbg.dev2.role or "?", dbg.dev2.yaw, dbg.dev2.pitch))
-                end
-                print(string.format("[DebugF7] Using device idx: %s", tostring(dbg.using_idx)))
-            else
-                print("[DebugF7] No VRDebug data yet")
-            end
-            local vrOff = _G.VROffset
-            if vrOff then
-                print(string.format("[DebugF7] Computed offset: yaw=%.1f pitch=%.1f", vrOff.yaw, vrOff.pitch))
-            end
-            return
-        end
-
-        print("[DebugF7] === STATION SCANNER ===")
-
-        local staticData = GetStaticCache()
-        if not staticData then print("[DebugF7] No static cache") return end
-
-        local player = staticData.player
-        if not player then print("[DebugF7] No player") return end
-
-        local playerLoc = nil
-        pcall(function() playerLoc = player:K2_GetActorLocation() end)
-        if not playerLoc then print("[DebugF7] No player location") return end
-
-        local KismetSystem = staticData.kismetSystem
-        local KismetMath = staticData.kismetMath
-
-        -- Find all stations
-        local allStations = FindAllOf("Station")
-        if not allStations then
-            ShowHint("No stations found", 3)
-            return
-        end
-
-        local scanRadius = 1500 -- ~15 meters in UE units
-        local nearbyStations = {}
-
-        for _, station in pairs(allStations) do
-            pcall(function()
-                local stationLoc = station:K2_GetActorLocation()
-                local dx = stationLoc.X - playerLoc.X
-                local dy = stationLoc.Y - playerLoc.Y
-                local dz = stationLoc.Z - playerLoc.Z
-                local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
-
-                if dist <= scanRadius then
-                    local stationComp = nil
-                    pcall(function() stationComp = station:GetStationComponent() end)
-                    if not stationComp then return end
-
-                    local active = false
-                    pcall(function() active = stationComp:IsStationActive() end)
-                    if not active then return end
-
-                    local numConns = 0
-                    pcall(function() numConns = stationComp:GetNumConnections() end)
-
-                    local isChair = false
-                    pcall(function() isChair = stationComp:IsAChair() end)
-
-                    local isBed = false
-                    pcall(function() isBed = stationComp:IsABed() end)
-
-                    local propType = -1
-                    pcall(function() propType = stationComp:GetPropType() end)
-
-                    local meshName = "?"
-                    pcall(function()
-                        local mn = stationComp:GetMeshName()
-                        if mn then pcall(function() meshName = mn:ToString() end) end
-                    end)
-
-                    local stationName = "?"
-                    pcall(function() stationName = station:GetFullName():match("([^%.]+)$") end)
-
-                    local stationClass = "?"
-                    pcall(function() stationClass = station:GetClass():GetFullName():match("([^%.]+)$") end)
-
-                    -- Check occupancy
-                    local numUsers = 0
-                    pcall(function()
-                        local users = {}
-                        stationComp:GetStationUsers(users)
-                        for _ in pairs(users) do numUsers = numUsers + 1 end
-                    end)
-
-                    table.insert(nearbyStations, {
-                        station = station,
-                        stationComp = stationComp,
-                        name = stationName,
-                        class = stationClass,
-                        loc = stationLoc,
-                        dist = dist,
-                        conns = numConns,
-                        users = numUsers,
-                        isChair = isChair,
-                        isBed = isBed,
-                        propType = propType,
-                        mesh = meshName,
-                    })
-                end
-            end)
-        end
-
-        -- Sort by distance
-        table.sort(nearbyStations, function(a, b) return a.dist < b.dist end)
-
-        -- Line trace visibility check for each station
-        if KismetSystem and KismetMath then
-            local playerHalfHeight = 88
-            pcall(function()
-                local capsule = player.CapsuleComponent
-                if capsule and capsule.CapsuleHalfHeight then
-                    playerHalfHeight = capsule.CapsuleHalfHeight
-                end
-            end)
-
-            local traceStart = nil
-            pcall(function()
-                traceStart = KismetMath:MakeVector(playerLoc.X, playerLoc.Y, playerLoc.Z + playerHalfHeight * 2 + 20)
-            end)
-
-            if traceStart then
-                local ETraceTypeQuery_Visibility = 0
-                local EDrawDebugTrace_None = 0
-                local TraceColor = { R = 0, G = 0, B = 0, A = 0 }
-                local ActorsToIgnore = { player }
-
-                for _, s in ipairs(nearbyStations) do
-                    s.visible = false
-                    pcall(function()
-                        local EndVector = KismetMath:MakeVector(s.loc.X, s.loc.Y, s.loc.Z + 50)
-                        local HitResult = {}
-                        local WasHit = KismetSystem:LineTraceSingle(
-                            player, traceStart, EndVector,
-                            ETraceTypeQuery_Visibility, false, ActorsToIgnore,
-                            EDrawDebugTrace_None, HitResult, true,
-                            TraceColor, TraceColor, 0.0
-                        )
-                        s.visible = not WasHit
-                    end)
-                end
-            end
-        end
-
-        -- Filter out PROP_TYPE_NONE (area/zone markers) and assign labels
-        local filtered = {}
-        for _, s in ipairs(nearbyStations) do
-            local label = PROP_TYPE_LABELS[s.propType]
-            if label then
-                s.typeLabel = label
-                table.insert(filtered, s)
-            end
-        end
-        nearbyStations = filtered
-
-        -- Print results
-        print(string.format("[DebugF7] Found %d stations within %.0fm", #nearbyStations, scanRadius / 100))
-
-        local hintLines = {}
-        for i, s in ipairs(nearbyStations) do
-            local vis = s.visible and "VIS" or "HID"
-            local spots = s.conns - s.users
-            local spotsStr = spots .. "/" .. s.conns
-            if s.users > 0 then spotsStr = spotsStr .. " (" .. s.users .. " used)" end
-
-            local line = string.format("%s %.0fm %s spots=%s %s",
-                vis, s.dist / 100, s.typeLabel, spotsStr, s.mesh)
-
-            print(string.format("[DebugF7] [%d] %s | %s | class=%s", i, line, s.name, s.class))
-
-            if i <= 15 then
-                table.insert(hintLines, string.format("%s %.0fm %s %s", vis, s.dist / 100, s.typeLabel, spotsStr))
-            end
-        end
-
-        local hintText = string.format("STATIONS (%d within %.0fm):\n", #nearbyStations, scanRadius / 100)
-            .. table.concat(hintLines, "\n")
-        ShowHint(hintText, 15)
-
-        print("[DebugF7] === SCAN COMPLETE ===")
-    end)
 end
 
 -- ============================================
@@ -1744,12 +584,18 @@ function UnmuteAllSpeakers()
         count = count + 1
     end
 
+    local blocklist = _G._AmbientBlocklist
     if count > 0 then
         print("[Sonorus] Unmuting " .. count .. " speakers")
         for speakerName, _ in pairs(mutedSpeakers) do
-            local actor = GetSpeakerActor(speakerName)
-            if actor then
-                UnmuteNPCAudioByActor(actor)
+            -- Skip blocklist NPCs — they should stay muted
+            if blocklist and blocklist[speakerName] then
+                print("[Sonorus] Skipping unmute for blocklist NPC: " .. speakerName)
+            else
+                local actor = GetSpeakerActor(speakerName)
+                if actor then
+                    UnmuteNPCAudioByActor(actor)
+                end
             end
         end
     end
@@ -1775,8 +621,6 @@ _G.VoiceSamples = _G.VoiceSamples or {}
 _G.PendingDialogue = _G.PendingDialogue or {}
 _G.Subtitles = _G.Subtitles or {}
 _G.SubtitlesLoaded = _G.SubtitlesLoaded or false
-_G.Locations = _G.Locations or {}
-_G.LocationsLoaded = _G.LocationsLoaded or false
 _G.Localization = _G.Localization or {}
 _G.LocalizationLoaded = _G.LocalizationLoaded or false
 -- Voice manifest: maps voice IDs to their reference info
@@ -1785,8 +629,7 @@ _G.VoiceManifestLoaded = _G.VoiceManifestLoaded or false
 -- NPC ID normalization: lowercase -> proper case mapping (e.g., "neridaroberts" -> "NeridaRoberts")
 -- Built from voice_manifest.json voice keys which have proper casing
 _G.VoiceIdNormalize = _G.VoiceIdNormalize or {}
--- Companion callout history for repeat blocking: {[voiceName] = {[text] = gameTimeMinutes}}
-_G.CompanionCalloutHistory = _G.CompanionCalloutHistory or {}
+-- Companion callout history (deprecated — ambient blocklist system replaces this)
 
 -- ============================================
 -- ============================================
@@ -1929,77 +772,11 @@ function LoadSubtitles()
     return FileIO.LoadJsonCached("Subtitles", path, "subtitles.json")
 end
 
--- Load locations.json (lazy load on first use)
-function LoadLocations()
-    return FileIO.LoadJsonCached("Locations", FILES.locations, "locations.json")
-end
-
--- Get display name for a location internal ID
--- Returns name string (or nil if not found)
--- Locations can be either strings or objects with {name, desc}
+-- Get display name for a location internal ID (mod key or game localization key).
+-- Delegates to LocationRegistry which uses location_registry.json + main_localization.json.
 function GetLocationDisplayName(internalId)
-    if not _G.LocationsLoaded then
-        LoadLocations()
-    end
-
-    if not internalId or internalId == "" then
-        return nil
-    end
-
-    -- Helper to extract name from location entry (handles both string and object formats)
-    local function extractName(entry)
-        if type(entry) == "string" then
-            return entry
-        elseif type(entry) == "table" and entry.name then
-            return entry.name
-        end
-        return nil
-    end
-
-    -- Try exact match first
-    local entry = _G.Locations[internalId]
-    if entry then
-        return extractName(entry)
-    end
-
-    -- Try without "Area" suffix (HogwartsArea -> Hogwarts)
-    local withoutArea = internalId:gsub("Area$", "")
-    if withoutArea ~= internalId then
-        entry = _G.Locations[withoutArea]
-        if entry then return extractName(entry) end
-    end
-
-    -- Try case-insensitive match
-    local lowerKey = internalId:lower()
-    for key, value in pairs(_G.Locations) do
-        if key:lower() == lowerKey then
-            return extractName(value)
-        end
-    end
-
-    -- Try longest prefix match (e.g. "HOG_Class_Charms_Patrol_Prof" matches "HOG_Class_Charms")
-    local bestMatch = nil
-    local bestLen = 0
-    for key, value in pairs(_G.Locations) do
-        if #key > bestLen and internalId:sub(1, #key) == key then
-            bestLen = #key
-            bestMatch = value
-        end
-    end
-    if bestMatch then return extractName(bestMatch) end
-
-    -- Fallback to main_localization.json
-    if not _G.LocalizationLoaded then
-        LoadLocalization()
-    end
-    if _G.Localization then
-        local locEntry = _G.Localization[internalId]
-        if locEntry and type(locEntry) == "string" and locEntry ~= "" then
-            return locEntry
-        end
-    end
-
-    return nil
+    if not internalId or internalId == "" then return nil end
+    return LocationRegistry.ResolveDisplayName(internalId)
 end
 
 -- Get subtitle text for a lineID
@@ -2299,8 +1076,6 @@ end
 -- ============================================
 -- Game State Extraction
 -- ============================================
--- Set to false to disable game context collection (if it causes freezes)
-local ENABLE_GAME_CONTEXT = true
 
 -- Try to get an object, return nil on failure
 local function TryFindFirstOf(className)
@@ -2324,8 +1099,8 @@ function GetPlayerInfo()
         house = "Unknown",
     }
 
-    local uiManager = TryFindFirstOf("UIManager")
-    if not uiManager then return info end
+    local uiManager = Cache.Get("UIManager", function() return FindFirstOf("UIManager") end)
+    if not uiManager or not Utils.SafeIsValid(uiManager) then return info end
 
     -- Get player name and house using safe FString helpers
     local name = Utils.SafeMethodToString(uiManager, "GetPlayerName")
@@ -2345,6 +1120,7 @@ _G._TimeCache = _G._TimeCache or {
 -- Refresh time cache from Scheduler. Call with fresh=true on save load / fast travel.
 -- Normal calls: 1 UFunction call (GetMinuteOfTheDay). Fresh: 5 calls (all fields).
 function RefreshTimeCache(fresh)
+    -- print("[TimeCache] Refresh Time Cache")
     local scheduler = Cache.Get("Scheduler", function()
         return TryFindFirstOf("Scheduler")
     end)
@@ -2490,49 +1266,6 @@ function GetGameTimeMinutes()
     return totalMinutes
 end
 
--- Check if a companion callout should be blocked as a repeat
--- Returns true if blocked (duplicate within time window), false if allowed
--- blockMinutes: 0 = disabled (allow all), -1 = never repeat, >0 = block within N game minutes
-function IsCompanionCalloutBlocked(voiceName, text, blockMinutes)
-    if not voiceName or not text then return false end
-    if blockMinutes == 0 then return false end  -- Feature disabled
-
-    local history = _G.CompanionCalloutHistory[voiceName]
-    if not history then
-        -- First time seeing this companion's callouts
-        _G.CompanionCalloutHistory[voiceName] = {[text] = GetGameTimeMinutes()}
-        return false
-    end
-
-    local lastTime = history[text]
-    if not lastTime then
-        -- First time seeing this text from this companion
-        history[text] = GetGameTimeMinutes()
-        return false
-    end
-
-    local currentTime = GetGameTimeMinutes()
-    local timeDiff = currentTime - lastTime
-
-    -- blockMinutes < 0 means "never repeat" (always block duplicates)
-    if blockMinutes < 0 then
-        print(string.format("[CompanionCallout] Blocked repeat: %s", voiceName))
-        return true
-    end
-
-    -- Check if within time window
-    if timeDiff < blockMinutes then
-        print(string.format("[CompanionCallout] Blocked repeat: %s", voiceName))
-        return true
-    end
-
-    -- Enough time has passed, update timestamp and allow
-    history[text] = currentTime
-    -- print(string.format("[CompanionCallout] Allowing repeat (time diff=%d min): %s - '%s'",
-    --     timeDiff, voiceName, text:sub(1,50)))
-    return false
-end
-
 -- Initialize Combat module with dependencies (must be after GetTimeOfDay and GetDisplayName are defined)
 Combat.init({
     getTimeOfDay = GetTimeOfDay,
@@ -2545,27 +1278,11 @@ function GetCurrentLocation()
     local detailedLocation = nil
 
     -- Method 1: Try MapSubSystem.GetCurrentPlayerRegionInfo()
-    pcall(function()
+    local m1ok, m1err = pcall(function()
         local mapSubSystem = FindFirstOf("MapSubSystem")
         if mapSubSystem and mapSubSystem:IsValid() then
             local regionInfo = mapSubSystem:GetCurrentPlayerRegionInfo()
             if regionInfo then
-
-                -- Get RegionName FString with proper nested pcall (CLAUDE.md pattern)
-                pcall(function()
-                    local regionNameFString = regionInfo.RegionName
-                    if regionNameFString then
-                        local str = nil
-                        pcall(function()
-                            str = regionNameFString:ToString()
-                        end)
-
-                        -- If still garbage, try getting the actual text differently
-                        if str and #str > 0 and string.byte(str, 1) < 128 then
-                            detailedLocation = str
-                        end
-                    end
-                end)
 
                 -- Helper to parse location from actor/object fullName
                 local function parseLocationFromActor(actor, label)
@@ -2599,13 +1316,15 @@ function GetCurrentLocation()
                     if internalId then
                         -- Strip common suffixes before lookup
                         local cleanId = internalId:gsub("Bounds$", ""):gsub("Area$", ""):gsub("Region$", "")
-                        -- Look up display name from locations.json (try both original and cleaned)
+                        -- Look up display name from location registry (try both original and cleaned)
                         local displayName = GetLocationDisplayName(internalId) or GetLocationDisplayName(cleanId)
                         if displayName then
+                            -- print("[Location] Method 1b (" .. label .. "): displayName='" .. displayName .. "' (internalId='" .. internalId .. "')\n")
                             return displayName
                         else
                             -- Fallback: clean up the ID as display name
                             local cleaned = cleanId:gsub("(%l)(%u)", "%1 %2"):gsub("_", " ")
+                            -- print("[Location] Method 1b (" .. label .. "): fallback cleaned='" .. cleaned .. "' (internalId='" .. internalId .. "')\n")
                             return cleaned
                         end
                     end
@@ -2613,110 +1332,36 @@ function GetCurrentLocation()
                 end
 
                 -- Try regions in order of specificity: SubRegion > InnerLevelRegion > LevelRegion > Region
-                if not detailedLocation then
-                    pcall(function()
-                        -- SubRegion is often invalid, skip it for now to avoid crashes
-                        -- TODO: Find a safe way to access SubRegion for room-level detail
+                pcall(function()
+                    -- SubRegion is often invalid, skip it for now to avoid crashes
 
-                        -- Try InnerLevelRegion (e.g., "Hogwarts Castle")
-                        if not detailedLocation then
-                            detailedLocation = parseLocationFromActor(regionInfo.InnerLevelRegion, "InnerLevelRegion")
-                        end
+                    -- Try InnerLevelRegion (e.g., "Hogwarts Castle")
+                    if not detailedLocation then
+                        detailedLocation = parseLocationFromActor(regionInfo.InnerLevelRegion, "InnerLevelRegion")
+                    end
 
-                        -- Try LevelRegion (e.g., "Hogwarts")
-                        if not detailedLocation then
-                            detailedLocation = parseLocationFromActor(regionInfo.LevelRegion, "LevelRegion")
-                        end
+                    -- Try LevelRegion (e.g., "Hogwarts")
+                    if not detailedLocation then
+                        detailedLocation = parseLocationFromActor(regionInfo.LevelRegion, "LevelRegion")
+                    end
 
-                        -- Fall back to Region (broadest)
-                        if not detailedLocation then
-                            detailedLocation = parseLocationFromActor(regionInfo.Region, "Region")
-                        end
-                    end)
-                end
+                    -- Fall back to Region (broadest)
+                    if not detailedLocation then
+                        detailedLocation = parseLocationFromActor(regionInfo.Region, "Region")
+                    end
+                end)
+            else
+                print("[Location] Method 1: regionInfo is nil\n")
             end
+        else
+            print("[Location] Method 1: MapSubSystem not found or invalid\n")
         end
     end)
-
-    -- Method 2: Try PhoenixGameInstance.GetCurrentWorldName()
-    if not detailedLocation then
-        pcall(function()
-            local gameInstance = FindFirstOf("PhoenixGameInstance")
-            if gameInstance and gameInstance:IsValid() then
-                local name = Utils.SafeMethodToString(gameInstance, "GetCurrentWorldName")
-                if name then
-                    -- Convert internal names to readable names
-                    local readableNames = {
-                        ["Overland"] = "Scottish Highlands",
-                        ["HogwartsCastle"] = "Hogwarts Castle",
-                        ["Hogwarts"] = "Hogwarts",
-                        ["Hogsmeade"] = "Hogsmeade Village",
-                        ["Dungeon"] = "Underground",
-                    }
-                    detailedLocation = readableNames[name] or name
-                end
-            end
-        end)
+    if not m1ok then
+        print("[Location] Method 1: ERROR - " .. tostring(m1err) .. "\n")
     end
 
-    -- Method 3: Try MinimapManager to get active minimap type
-    if not detailedLocation then
-        pcall(function()
-            local minimapMgr = FindFirstOf("MinimapManager")
-            if minimapMgr and minimapMgr:IsValid() then
-                -- Try GetActiveMiniMap
-                local activeMinimap = minimapMgr:GetActiveMiniMap()
-                if activeMinimap then
-                    local mapName = activeMinimap:GetFullName()
-                    -- Parse minimap type from name
-                    if string.find(mapName, "Hogwarts") then detailedLocation = "Hogwarts"
-                    elseif string.find(mapName, "Hogsmeade") then detailedLocation = "Hogsmeade"
-                    elseif string.find(mapName, "Overland") then detailedLocation = "Highlands"
-                    elseif string.find(mapName, "Dungeon") then detailedLocation = "Dungeon"
-                    end
-                end
-            end
-        end)
-    end
-
-    -- Method 4: Try MapHogwarts.GetMapLocationName() if in Hogwarts
-    if not detailedLocation then
-        pcall(function()
-            local mapHogwarts = FindFirstOf("MapHogwarts")
-            if mapHogwarts and mapHogwarts:IsValid() then
-                local name = Utils.SafeMethodToString(mapHogwarts, "GetMapLocationName")
-                if name then
-                    detailedLocation = name
-                end
-            end
-        end)
-    end
-
-    -- Method 5: Fallback to player's GetFullName path parsing
-    if not detailedLocation then
-        local staticData = Cache.GetStaticData()
-        local player = staticData and staticData.player
-        if player then
-            pcall(function()
-                local fullName = player:GetFullName()
-                if fullName then
-                    local levelMatch = string.match(fullName, "/Levels/([^/]+)/")
-                    if levelMatch then
-                        -- Make level names more readable
-                        if levelMatch == "Overland" then detailedLocation = "Scottish Highlands"
-                        elseif levelMatch == "HogwartsCastle" then detailedLocation = "Hogwarts Castle"
-                        else detailedLocation = levelMatch
-                        end
-                    end
-                end
-            end)
-        end
-    end
-
-    if detailedLocation then
-        location = detailedLocation
-    end
-
+    -- print("[Location] FINAL result: '" .. location .. "'\n")
     return location
 end
 
@@ -2824,7 +1469,15 @@ function WriteGameContext()
     context.playerHouse = state.playerHouse or "Unknown"
     context.playerLoaded = state.playerLoaded or false
 
-    if ENABLE_GAME_CONTEXT then
+    if not context.playerLoaded then
+        context.isGamePaused = true
+        return context
+    end
+    
+    -- Add pause state for Python-side detection
+    context.isGamePaused = Utils.IsGamePaused()
+
+    if not context.isGamePaused then
         -- NOTE: Caller (socket_client request_context) already wraps in ExecuteInGameThread
         -- so we execute directly here - no nested ExecuteInGameThread needed
 
@@ -2875,21 +1528,22 @@ function WriteGameContext()
                     seenNames[entry.name:lower()] = true
                 end
 
-                -- When on broom, check if companion is within extended range but outside normal range
-                -- Only add companion specifically - don't extend range for other NPCs
-                if _G.BroomState and _G.BroomState.mounted then
-                    local _, companionId = Utils.GetCompanionNameAndId()
-                    if companionId and not seenNames[companionId:lower()] then
-                        -- Companion not in normal range, check extended broom range
-                        local companionDist = Utils.GetCompanionDistance()
-                        if companionDist and companionDist <= 10000 then
-                            table.insert(nearbyNpcsForContext, {
-                                name = companionId,
-                                distance = math.floor(companionDist),
-                                isLookedAt = false,
-                                onScreen = false
-                            })
-                        end
+                -- Only extend range for the active companion, not all NPCs.
+                -- This keeps conversations alive if they trail behind while walking,
+                -- and preserves the larger broom range when flying together.
+                local isFollowing, companionId = Utils.IsCompanionActivelyFollowing()
+                if isFollowing and companionId and not seenNames[companionId:lower()] then
+                    local companionDist = Utils.GetCompanionDistance()
+                    local maxCompanionRange = (_G.MountState and _G.MountState.mounted)
+                        and BROOM_COMPANION_EARSHOT_DISTANCE
+                        or FOLLOWING_COMPANION_EARSHOT_DISTANCE
+                    if companionDist and companionDist <= maxCompanionRange then
+                        table.insert(nearbyNpcsForContext, {
+                            name = companionId,
+                            distance = math.floor(companionDist),
+                            isLookedAt = false,
+                            onScreen = false
+                        })
                     end
                 end
 
@@ -2930,6 +1584,18 @@ function WriteGameContext()
 
                     -- Emit location:change event for CommitmentManager etc.
                     pcall(function() Events.emit("location:change", { location = zone.location }) end)
+                    pcall(function()
+                        if SocketClient and SocketClient.send then
+                            SocketClient.send({
+                                type = "game_event",
+                                event = "location:change",
+                                data = {
+                                    oldLocation = lastLoc or "",
+                                    newLocation = zone.location
+                                }
+                            })
+                        end
+                    end)
 
                     -- Update cached reverb on location change
                     pcall(function()
@@ -2953,9 +1619,6 @@ function WriteGameContext()
             end
         end)
 
-        -- Add pause state for Python-side detection
-        context.isGamePaused = Utils.IsGamePaused()
-
         -- Add player position (x/y/z) for vision agent movement detection
         local staticData = Cache.GetStaticData()
         pcall(function()
@@ -2973,7 +1636,7 @@ function WriteGameContext()
                 end)
                 -- Cinematic mode
                 pcall(function()
-                    context.inCinematic = player.InCinematic or false
+                    context.inCinematic = IsInCinematicState(player)
                 end)
                 -- Stealth/Disillusionment mode
                 pcall(function()
@@ -2984,7 +1647,7 @@ function WriteGameContext()
                     context.isSwimming = player:IsSwimming() or false
                 end)
                 -- Companion info (companion shares player's stealth state via Disillusionment)
-                local companionInfo = Utils.GetCompanionInfo(staticData, context.isOnBroom, context.inStealth, IsCompanionOnBroom, GetNearbyNPCs)
+                local companionInfo = Utils.GetCompanionInfo(staticData, context.isOnMount, context.inStealth, IsCompanionOnBroom, GetNearbyNPCs)
                 if companionInfo then
                     for k, v in pairs(companionInfo) do
                         context[k] = v
@@ -2993,10 +1656,12 @@ function WriteGameContext()
             end
         end)
 
-        -- Check if player is on broom (now tracked via hooks in main.lua)
-        -- Fallback to GearScreen if hooks haven't fired yet
-        if _G.BroomState then
-            context.isOnBroom = _G.BroomState.mounted or false
+        -- Check if player is on a mount (tracked via polling in unified loop)
+        if _G.MountState then
+            context.isOnMount = _G.MountState.mounted or false
+            if context.isOnMount and _G.MountState.mountType then
+                context.mountType = _G.MountState.mountType
+            end
         end
 
         -- ============================================
@@ -3024,12 +1689,58 @@ function WriteGameContext()
     return context
 end
 
+-- ============================================================
+-- World Facts: cached mission statuses (invalidated on loading screen)
+-- Probes MissionManager once per load, results cached until InvalidateWorld
+-- ============================================================
+_G._MissionStatusCache = _G._MissionStatusCache or nil
+
+local function ProbeMissionStatuses(staticData)
+    if _G._MissionStatusCache then return _G._MissionStatusCache end
+
+    local mm = staticData and staticData.missionManager
+    if not mm or not SafeIsValid(mm) then return nil end
+
+    -- Quest chains to probe (must match sonorus/data/world_facts.json probe_chains)
+    -- Each chain is sequential: if a quest isn't done, skip the rest of the chain
+    local probeChains = {
+        { "FGS_01", "EVZ_01" },
+        { "CNF_01", "EVL_01", "EVL_02", "EVL_03" },
+        { "HER_01", "HER_02", "HER_03" },
+        { "AVM_02", "NTR_01", "NTR_02", "NTR_03" },
+        { "GDW_01", "DMS_01" },
+        { "COM_01" },
+        { "COM_19" },
+    }
+
+    local statuses = {}
+    for _, chain in ipairs(probeChains) do
+        for _, id in ipairs(chain) do
+            local status = nil
+            pcall(function()
+                local fname = FName(id, FNAME_Find)
+                if fname and tostring(fname) ~= "None" then
+                    status = mm:GetMissionStatusBP(fname)
+                end
+            end)
+            if status and (status == 3 or status == 4) then
+                statuses[id] = status
+            else
+                break
+            end
+        end
+    end
+
+    _G._MissionStatusCache = statuses
+    return statuses
+end
+
 -- ============================================
 -- Selective Context Gathering
 -- ============================================
 -- Groups:
 --   position: x, y, z, location
---   state: inCombat, inCinematic, inStealth, isSwimming, isOnBroom, isGamePaused, playerLoaded
+--   state: inCombat, inCinematic, inStealth, isSwimming, isOnMount, mountType, isGamePaused, playerLoaded
 --   time: hour, minute, timePeriod, timeFormatted, dateFormatted, isDay
 --   player: playerName, playerHouse, playerVoiceId
 --   gear: hoodUp, playerGear (EXPENSIVE)
@@ -3037,10 +1748,19 @@ end
 --   zone: zoneLocation
 --   mission: currentQuest, questObjective
 --   companion: hasCompanion, companionId, companionInStealth, companionIsSwimming, companionIsOnBroom
+--   world_facts: missionStatuses (cached, cheap after first probe)
 --   mods: mods.housePoints (uses cached data, cheap)
 
-function WriteSelectiveContext(groups)
+function WriteSelectiveContext(groups, params)
     local context = {}
+    
+    local state = _G.SonorusState or {}
+    context.playerLoaded = state.playerLoaded or false
+    context.isGamePaused = Utils.IsGamePaused()
+
+    if (not context.playerLoaded or context.isGamePaused) then
+        return context
+    end
 
     -- Build group lookup set for O(1) checks
     local groupSet = {}
@@ -3048,12 +1768,16 @@ function WriteSelectiveContext(groups)
         groupSet[g] = true
     end
 
-    -- Player object - needed by position, state, gear, companion
-    -- Get from cache if any of those groups are requested
+    -- Player object + full name - needed by position, state, gear, companion
+    -- Capture full name once (crash-safe) for native calls
     local player = nil
+    local playerFullName = nil
     if groupSet["position"] or groupSet["state"] or groupSet["gear"] or groupSet["companion"] then
         local staticData = Cache.GetStaticData()
         player = staticData and staticData.player
+        if player then
+            pcall(function() playerFullName = player:GetFullName() end)
+        end
     end
 
     -- GROUP: player (cheap - from cached Blueprint state)
@@ -3067,43 +1791,45 @@ function WriteSelectiveContext(groups)
         end)
     end
 
-    -- GROUP: state (cheap - cached bools + player properties)
+    -- GROUP: state (cheap - cached bools + player properties via native C++)
     if groupSet["state"] then
-        local state = _G.SonorusState or {}
-        context.playerLoaded = state.playerLoaded or false
-        -- Auto-correct: if player actor exists but ClientRestart never fired, fix it
-        if not context.playerLoaded and Utils.SafeIsValid(player) then
-            print("[Sonorus] playerLoaded was false but player actor is valid - auto-correcting")
-            state.playerLoaded = true
-            context.playerLoaded = true
-        end
-        context.isGamePaused = Utils.IsGamePaused()
 
-        -- Broom state from cached global
-        if _G.BroomState then
-            context.isOnBroom = _G.BroomState.mounted or false
+        -- Mount state from cached global
+        if _G.MountState then
+            context.isOnMount = _G.MountState.mounted or false
+            if context.isOnMount and _G.MountState.mountType then
+                context.mountType = _G.MountState.mountType
+            end
         end
 
-        -- Player state properties
-        if player then
-            pcall(function() context.inCombat = player.bInCombatMode or false end)
-            pcall(function() context.inCinematic = player.InCinematic or false end)
-            pcall(function() context.inStealth = player.InStealthMode or false end)
-            pcall(function() context.isSwimming = player:IsSwimming() or false end)
+        -- Player state via ModActor Blueprint cache.
+        local ps = BlueprintHelpers.GetPlayerState()
+        if ps then
+            if not _G._playerDebugDone then
+                _G._playerDebugDone = true
+                local parts = {}
+                for k, v in pairs(ps) do
+                    table.insert(parts, k .. "=" .. tostring(v))
+                end
+                print("[DEBUG] GetPlayerState: " .. table.concat(parts, ", "))
+            end
+            context.inCombat = ps.inCombat
+            context.inCinematic = ps.inCinematic
+            context.inStealth = ps.inStealth
+            context.isSwimming = ps.isSwimming
+        elseif not _G._playerDebugDone then
+            _G._playerDebugDone = true
+            print("[DEBUG] GetPlayerState returned nil")
         end
     end
 
-    -- GROUP: position (cheap - player location)
+    -- GROUP: position (cheap - player location via native C++)
     if groupSet["position"] then
-        if player then
-            pcall(function()
-                local loc = player:K2_GetActorLocation()
-                if loc then
-                    context.x = loc.X
-                    context.y = loc.Y
-                    context.z = loc.Z
-                end
-            end)
+        local ps = BlueprintHelpers.GetPlayerState()
+        if ps then
+            context.x = ps.x
+            context.y = ps.y
+            context.z = ps.z
         end
         -- Broad location from player path
         pcall(function()
@@ -3150,6 +1876,18 @@ function WriteSelectiveContext(groups)
 
                     -- Emit location:change event for CommitmentManager etc.
                     pcall(function() Events.emit("location:change", { location = zone.location }) end)
+                    pcall(function()
+                        if SocketClient and SocketClient.send then
+                            SocketClient.send({
+                                type = "game_event",
+                                event = "location:change",
+                                data = {
+                                    oldLocation = lastLoc or "",
+                                    newLocation = zone.location
+                                }
+                            })
+                        end
+                    end)
                 end
             end
         end)
@@ -3157,6 +1895,7 @@ function WriteSelectiveContext(groups)
 
     -- GROUP: mission (medium - HUD widget read)
     if groupSet["mission"] then
+        DevPrint("[DEBUG] WriteSelectiveContext: mission START")
         pcall(function()
             local mission = Utils.GetCurrentMission()
             if mission.questName ~= "" or mission.objective ~= "" then
@@ -3164,10 +1903,12 @@ function WriteSelectiveContext(groups)
                 context.questObjective = mission.objective
             end
         end)
+        DevPrint("[DEBUG] WriteSelectiveContext: mission END")
     end
 
     -- GROUP: gear (EXPENSIVE - GetPlayerGear with 6 slot iterations)
     if groupSet["gear"] then
+        DevPrint("[DEBUG] WriteSelectiveContext: gear START")
         pcall(function()
             local gear = GetPlayerGear()
             if gear then
@@ -3175,10 +1916,12 @@ function WriteSelectiveContext(groups)
                 context.playerGear = FormatPlayerGearForContext(gear)
             end
         end)
+        DevPrint("[DEBUG] WriteSelectiveContext: gear END")
     end
 
     -- GROUP: npcs (EXPENSIVE - iterates all cached NPCs)
     if groupSet["npcs"] then
+        DevPrint("[DEBUG] WriteSelectiveContext: npcs START")
         pcall(function()
             local npcResult = GetNearbyNPCs(2000, 0.9)
             if npcResult and npcResult.nearbyList then
@@ -3194,21 +1937,22 @@ function WriteSelectiveContext(groups)
                     seenNames[entry.name:lower()] = true
                 end
 
-                -- When on broom, check if companion is within extended range but outside normal range
-                -- Only add companion specifically - don't extend range for other NPCs
-                if _G.BroomState and _G.BroomState.mounted then
-                    local _, companionId = Utils.GetCompanionNameAndId()
-                    if companionId and not seenNames[companionId:lower()] then
-                        -- Companion not in normal range, check extended broom range
-                        local companionDist = Utils.GetCompanionDistance()
-                        if companionDist and companionDist <= 10000 then
-                            table.insert(nearbyNpcsForContext, {
-                                name = companionId,
-                                distance = math.floor(companionDist),
-                                isLookedAt = false,
-                                onScreen = false
-                            })
-                        end
+                -- Only extend range for the active companion, not all NPCs.
+                -- This keeps conversations alive if they trail behind while walking,
+                -- and preserves the larger broom range when flying together.
+                local isFollowing, companionId = Utils.IsCompanionActivelyFollowing()
+                if isFollowing and companionId and not seenNames[companionId:lower()] then
+                    local companionDist = Utils.GetCompanionDistance()
+                    local maxCompanionRange = (_G.MountState and _G.MountState.mounted)
+                        and BROOM_COMPANION_EARSHOT_DISTANCE
+                        or FOLLOWING_COMPANION_EARSHOT_DISTANCE
+                    if companionDist and companionDist <= maxCompanionRange then
+                        table.insert(nearbyNpcsForContext, {
+                            name = companionId,
+                            distance = math.floor(companionDist),
+                            isLookedAt = false,
+                            onScreen = false
+                        })
                     end
                 end
 
@@ -3221,18 +1965,28 @@ function WriteSelectiveContext(groups)
 
         -- Include preview lock info for target selection
         -- This tells Python which NPC the player locked before typing (more reliable than isLookedAt)
-        if _G.ChatPreviewLock and _G.ChatPreviewLock.npcName then
+        if _G.ChatPreviewLock and _G.ChatPreviewLock.npcName and not _G.ChatPreviewLock.excludeFromTargetSelection then
             context.previewLockedNpc = _G.ChatPreviewLock.npcName
             context.previewLockState = _G.ChatPreviewLock.state
         elseif _G.STTPreviewLock and _G.STTPreviewLock.npcName then
             context.previewLockedNpc = _G.STTPreviewLock.npcName
             context.previewLockState = _G.STTPreviewLock.state
         end
+        DevPrint("[DEBUG] WriteSelectiveContext: npcs END")
+    end
+
+    -- GROUP: nearby_lean (CHEAP - distance only, no camera/LOS/screen)
+    if groupSet["nearby_lean"] then
+        pcall(function()
+            local maxDist = (params and params.nearby_lean_distance) or 10000
+            context.nearbyNpcs = Utils.ScanNearbyLean(maxDist)
+        end)
     end
 
     -- GROUP: vision (for vision LLM - line trace visibility checks on on-screen NPCs)
     -- Note: No broom extension here - vision is about what's visually on-screen, not conversation range
     if groupSet["vision"] then
+        DevPrint("[DEBUG] WriteSelectiveContext: vision START")
         pcall(function()
             local npcResult = GetNearbyNPCs(2000, 0.9)
             if npcResult and npcResult.nearbyList then
@@ -3247,6 +2001,7 @@ function WriteSelectiveContext(groups)
                 -- Run line trace visibility checks
                 local visibleNpcs = {}
                 if #onScreenNpcs > 0 and CheckNPCVisibility then
+                    DevPrint("[DEBUG] WriteSelectiveContext: vision traces (" .. #onScreenNpcs .. " on-screen)")
                     local visibilityResults = CheckNPCVisibility(onScreenNpcs)
                     for _, entry in ipairs(onScreenNpcs) do
                         if visibilityResults[entry.name] then
@@ -3260,21 +2015,55 @@ function WriteSelectiveContext(groups)
                 context.visibleNpcs = visibleNpcs
             end
         end)
+        DevPrint("[DEBUG] WriteSelectiveContext: vision END")
     end
 
-    -- GROUP: companion (cheap - uses cached CompanionManager)
+    -- GROUP: companion (via native C++ — crash-safe)
     if groupSet["companion"] then
-        -- Get player stealth for companion (shares state)
-        local isPlayerInStealth = false
-        if player then
-            pcall(function() isPlayerInStealth = player.InStealthMode or false end)
-        end
-
-        local staticData = Cache.GetStaticData()
-        local companionInfo = Utils.GetCompanionInfo(staticData, context.isOnBroom, isPlayerInStealth, IsCompanionOnBroom, GetNearbyNPCs)
+        DevPrint("[DEBUG] WriteSelectiveContext: companion START")
+        local ps = BlueprintHelpers.GetPlayerState()
+        local companionInfo = BlueprintHelpers.GetCompanionInfo()
         if companionInfo then
+            if not _G._companionDebugDone then
+                _G._companionDebugDone = true
+                local parts = {}
+                for k, v in pairs(companionInfo) do
+                    table.insert(parts, k .. "=" .. tostring(v))
+                end
+                print("[DEBUG] GetCompanionInfo: " .. table.concat(parts, ", "))
+            end
             for k, v in pairs(companionInfo) do
                 context[k] = v
+            end
+            context.companionInStealth = ps and ps.inStealth or false
+            context.companionIsOnBroom =
+                (context.isOnMount == true)
+                and (context.hasCompanion == true)
+                and (context.companionForcedWaiting ~= true)
+                and (_G.FlooCompanionsInstalled == true)
+        elseif not _G._companionDebugDone then
+            _G._companionDebugDone = true
+            print("[DEBUG] GetCompanionInfo returned nil")
+        end
+
+        -- Include NPC followers (pure Lua table, no UObject access)
+        local followers = {}
+        if _G.NPCFollowers then
+            for voiceName, _ in pairs(_G.NPCFollowers) do
+                table.insert(followers, voiceName)
+            end
+        end
+        context.followers = followers
+        DevPrint("[DEBUG] WriteSelectiveContext: companion END")
+    end
+
+    -- GROUP: world_facts (cached - probes MissionManager once per load)
+    if groupSet["world_facts"] then
+        local staticData = Cache.GetStaticData()
+        if staticData then
+            local statuses = ProbeMissionStatuses(staticData)
+            if statuses then
+                context.missionStatuses = statuses
             end
         end
     end
@@ -3300,6 +2089,8 @@ function WriteSelectiveContext(groups)
 
     return context
 end
+
+_G.WriteSelectiveContext = WriteSelectiveContext
 
 -- Queue updates and conversation state now handled via socket (socket_client.lua)
 -- See handleMessage() for queue_item and conversation_state handlers
@@ -3391,6 +2182,112 @@ end
 -- State: tracks if we have an active subtitle displayed
 _G.ChatInputSubtitleActive = _G.ChatInputSubtitleActive or false
 
+local function SubtitleDevPrint(...)
+    if _G.DevPrint then
+        _G.DevPrint("[Subtitle]", ...)
+    end
+end
+
+local function SelectBestSubtitlesObject(subtitleHUD)
+    local allObjs = {}
+    pcall(function() allObjs = FindAllOf("Subtitles") or {} end)
+
+    if #allObjs == 0 then
+        return nil
+    end
+
+    local hudFullName = nil
+    if subtitleHUD then
+        pcall(function() hudFullName = subtitleHUD:GetFullName() end)
+    end
+
+    -- Best case: pick the subtitle widget that belongs to the resolved live HUD.
+    if hudFullName and hudFullName ~= "" then
+        for _, obj in ipairs(allObjs) do
+            local objFullName = nil
+            pcall(function() objFullName = obj:GetFullName() end)
+            if objFullName and string.find(objFullName, hudFullName, 1, true) == 1 then
+                return obj
+            end
+        end
+    end
+
+    -- Next best: prefer the live transient widget over the /Game blueprint template.
+    for _, obj in ipairs(allObjs) do
+        local objFullName = nil
+        pcall(function() objFullName = obj:GetFullName() end)
+        if objFullName and string.find(objFullName, "/Engine/Transient", 1, true) then
+            return obj
+        end
+    end
+
+    -- Last resort: keep the old behavior.
+    return allObjs[1]
+end
+
+local function ResolveSubtitleObjects(sourceTag, requireHUD)
+    SubtitleDevPrint("Resolve ENTER", tostring(sourceTag), "requireHUD=" .. tostring(requireHUD))
+    local subtitleHUD = nil
+    if requireHUD then
+        SubtitleDevPrint("Resolve HUD Cache PRE", tostring(sourceTag))
+        subtitleHUD = Cache.Get("UI_BP_Subtitle_HUD_C", function()
+            return FindFirstOf("UI_BP_Subtitle_HUD_C")
+        end)
+        SubtitleDevPrint("Resolve HUD Cache POST", tostring(sourceTag), tostring(subtitleHUD))
+        if not subtitleHUD then
+            SubtitleDevPrint("Resolve no HUD", tostring(sourceTag))
+            return nil, nil
+        end
+
+        local hudValid = false
+        SubtitleDevPrint("Resolve HUD IsValid PRE", tostring(sourceTag), tostring(subtitleHUD))
+        pcall(function() hudValid = subtitleHUD:IsValid() end)
+        SubtitleDevPrint("Resolve HUD IsValid POST", tostring(sourceTag), tostring(hudValid))
+        if not hudValid then
+            SubtitleDevPrint("Resolve invalid HUD", tostring(sourceTag))
+            return nil, nil
+        end
+    end
+
+    SubtitleDevPrint("Resolve Subtitles Cache PRE", tostring(sourceTag))
+    local subtitles = Cache.Get("Subtitles", function()
+        return SelectBestSubtitlesObject(subtitleHUD)
+    end, requireHUD and "UI_BP_Subtitle_HUD_C" or nil)
+    SubtitleDevPrint("Resolve Subtitles Cache POST", tostring(sourceTag), tostring(subtitles))
+    if not subtitles then
+        SubtitleDevPrint("Resolve no Subtitles", tostring(sourceTag))
+        return subtitleHUD, nil
+    end
+
+    local subtitlesValid = false
+    SubtitleDevPrint("Resolve Subtitles IsValid PRE", tostring(sourceTag), tostring(subtitles))
+    pcall(function() subtitlesValid = subtitles:IsValid() end)
+    SubtitleDevPrint("Resolve Subtitles IsValid POST", tostring(sourceTag), tostring(subtitlesValid))
+    if not subtitlesValid then
+        SubtitleDevPrint("Resolve invalid Subtitles", tostring(sourceTag))
+        return subtitleHUD, nil
+    end
+
+    SubtitleDevPrint("Resolve EXIT", tostring(sourceTag), tostring(subtitleHUD), tostring(subtitles))
+    return subtitleHUD, subtitles
+end
+
+local function RunSubtitleAction(sourceTag, actionName, action, opts)
+    opts = opts or {}
+
+    SubtitleDevPrint("Action ENTER", tostring(sourceTag), tostring(actionName))
+    local _, subtitles = ResolveSubtitleObjects(sourceTag, opts.requireHUD)
+    if not subtitles then
+        SubtitleDevPrint("Action no subtitles", tostring(sourceTag), tostring(actionName))
+        return false
+    end
+
+    SubtitleDevPrint("Action CALL PRE", tostring(sourceTag), tostring(actionName), tostring(subtitles))
+    local ok, err = pcall(action, subtitles)
+    SubtitleDevPrint("Action CALL POST", tostring(sourceTag), tostring(actionName), tostring(ok), tostring(err))
+    return ok, err
+end
+
 -- Process chat input state changes (called from unified loop)
 function ProcessChatInput()
     local state = _G.ChatInputState
@@ -3405,35 +2302,6 @@ function ProcessChatInput()
     local prefix = (state.mode == "prompt") and "Prompt: " or "You: "
     local displayText = prefix .. text .. "|"
 
-    -- Check if subtitle HUD exists (required for subtitles to display)
-    local subtitleHUD = Cache.Get("UI_BP_Subtitle_HUD_C", function()
-        return FindFirstOf("UI_BP_Subtitle_HUD_C")
-    end)
-    if not subtitleHUD then
-        print("[ChatInput] WARN: Subtitle HUD not found")
-        return
-    end
-    local hudValid = false
-    pcall(function() hudValid = subtitleHUD:IsValid() end)
-    if not hudValid then
-        print("[ChatInput] WARN: Subtitle HUD invalid")
-        return
-    end
-
-    local subtitles = Cache.Get("Subtitles", function()
-        return FindFirstOf("Subtitles")
-    end)
-    if not subtitles then
-        print("[ChatInput] WARN: Subtitles object not found")
-        return
-    end
-    local valid = false
-    pcall(function() valid = subtitles:IsValid() end)
-    if not valid then
-        print("[ChatInput] WARN: Subtitles object invalid")
-        return
-    end
-
     if active then
         -- Check if text changed (for updates vs fresh add)
         local textChanged = (_G.ChatInputLastText ~= text)
@@ -3442,24 +2310,24 @@ function ProcessChatInput()
         -- Skip subtitle display in VR (immersive mode)
         if _G.VROffset then return end
 
-        local ok, err = pcall(function()
+        RunSubtitleAction("ChatInput", "show", function(subtitles)
             -- Always Remove+Add to guarantee subtitle shows (handles stale state)
+            SubtitleDevPrint("ChatInput BPRemove PRE", displayText)
             subtitles:BPRemoveStandaloneSubtitle()
+            SubtitleDevPrint("ChatInput BPRemove POST", displayText)
+            SubtitleDevPrint("ChatInput BPAdd PRE", displayText)
             subtitles:BPAddStandaloneSubtitle(displayText)
+            SubtitleDevPrint("ChatInput BPAdd POST", displayText)
             print("[ChatInput] Subtitle set: " .. displayText)
-        end)
-        if not ok then
-            print("[ChatInput] ERROR: " .. tostring(err))
-        end
+        end, { requireHUD = true })
     else
         -- Chat closing - clear state and remove subtitle
         _G.ChatInputLastText = nil
-        local ok, err = pcall(function()
+        RunSubtitleAction("ChatInput", "hide", function(subtitles)
+            SubtitleDevPrint("ChatInput hide BPRemove PRE")
             subtitles:BPRemoveStandaloneSubtitle()
-        end)
-        if not ok then
-            print("[ChatInput] ERROR removing: " .. tostring(err))
-        end
+            SubtitleDevPrint("ChatInput hide BPRemove POST")
+        end, { requireHUD = false })
         print("[ChatInput] Closed")
     end
 end
@@ -3474,26 +2342,27 @@ function ShowMessage(message)
     -- Bump generation counter to cancel any pending player_message auto-hide timers
     _G.SubtitleGen = (_G.SubtitleGen or 0) + 1
 
-    -- Mode 3 approach: Check Subtitle_HUD exists first for consistent display
-    local subtitleHUD = Cache.Get("UI_BP_Subtitle_HUD_C", function()
-        return FindFirstOf("UI_BP_Subtitle_HUD_C")
-    end)
-    if subtitleHUD and subtitleHUD:IsValid() then
-        local subtitles = Cache.Get("Subtitles", function()
-            return FindFirstOf("Subtitles")
-        end)
-        if subtitles and subtitles:IsValid() then
-            pcall(function()
-                -- Clear any existing subtitle first to avoid stacking
-                subtitles:BPRemoveStandaloneSubtitle()
-                subtitles:BPAddStandaloneSubtitle(message)
-            end)
-            return
-        end
+    local ok = RunSubtitleAction("ShowMessage", "show", function(subtitles)
+        -- Clear any existing subtitle first to avoid stacking
+        subtitles:BPRemoveStandaloneSubtitle()
+        subtitles:BPAddStandaloneSubtitle(message)
+    end, { requireHUD = true })
+    if ok then
+        return
     end
 
     -- Fallback to hint message if subtitle HUD unavailable
     ShowHint(message, 3600)
+end
+
+function ShowAIMessage(message)
+    if not AreSubtitlesEnabled() then return end
+    ShowMessage(message)
+end
+
+function UpdateAIMessage(message)
+    if not AreSubtitlesEnabled() then return end
+    UpdateMessage(message)
 end
 
 function ShowHint(message, duration, layout)
@@ -3510,14 +2379,9 @@ function ShowHint(message, duration, layout)
 end
 
 function HideMessage()
-    local subtitles = Cache.Get("Subtitles", function()
-        return FindFirstOf("Subtitles")
-    end)
-    if subtitles and subtitles:IsValid() then
-        pcall(function()
-            subtitles:BPRemoveStandaloneSubtitle()
-        end)
-    end
+    RunSubtitleAction("HideMessage", "hide", function(subtitles)
+        subtitles:BPRemoveStandaloneSubtitle()
+    end, { requireHUD = false })
 end
 
 function UpdateMessage(message)
@@ -3527,14 +2391,9 @@ function UpdateMessage(message)
     -- Convert *emphasis* to <i>emphasis</i> for UE4 rich text
     message = string.gsub(message, "%*([^%*]+)%*", "<i>%1</i>")
 
-    local subtitles = Cache.Get("Subtitles", function()
-        return FindFirstOf("Subtitles")
-    end)
-    if subtitles and subtitles:IsValid() then
-        pcall(function()
-            subtitles:BPUpdateStandaloneSubtitle(message)
-        end)
-    end
+    RunSubtitleAction("UpdateMessage", "update", function(subtitles)
+        subtitles:BPUpdateStandaloneSubtitle(message)
+    end, { requireHUD = false })
 end
 
 -- Show notification toast (top-left notification panel)
@@ -3716,6 +2575,11 @@ _G.IsSignificantNPC = IsSignificantNPC
 -- GetNearbyNPCs - MUST be called from game thread (inside ExecuteInGameThread or hook)
 -- Returns: { nearbyList = [{...}], lookedAtNpc = {...} or nil, playerInStealth = bool }
 function GetNearbyNPCs(maxDistance, lookDotThreshold)
+    if not _G.SonorusState.playerLoaded or Utils.IsGamePaused() then
+        print("[GetNearbyNPCs] EMPTY: Player not loaded")
+        return { nearbyList = {}, lookedAtNpc = nil, playerInStealth = false }
+    end
+
     maxDistance = maxDistance or 2000  -- ~20 meters default
     lookDotThreshold = lookDotThreshold or 0.9  -- How centered in view to count as "looked at"
 
@@ -3750,15 +2614,18 @@ function GetNearbyNPCs(maxDistance, lookDotThreshold)
         return { nearbyList = {}, lookedAtNpc = nil, playerInStealth = false }
     end
 
-    -- Default FOV if not available (90 degrees is common for third-person)
+    -- FOV: VR uses at least headset FOV (~110°), flat uses game camera FOV
     camFOV = camFOV or 90
+    if _G.VRCamRot and camFOV < 110 then
+        camFOV = 110
+    end
 
-    -- Calculate on-screen threshold: cos(FOV/2)
-    -- Using slightly smaller angle (0.9x) to account for character width
-    local onScreenThreshold = math.cos(math.rad(camFOV * 0.45))
-
+    -- Use shared helper for viewport + aim center (non-VR path updates screenCenterX below)
+    local fpAimInfo = _G.FirstPerson and _G.FirstPerson.getScreenAimInfo(pc, cam, camLoc, camRot)
+    local viewportX = fpAimInfo and fpAimInfo.viewportX or 1920
+    local viewportY = fpAimInfo and fpAimInfo.viewportY or 1080
+    local screenCenterX = viewportX * 0.5
     local playerFullName = staticData.playerFullName
-    local lib = staticData.bpLibrary
 
     -- Check player stealth status (Disillusionment charm)
     local playerInStealth = false
@@ -3777,34 +2644,36 @@ function GetNearbyNPCs(maxDistance, lookDotThreshold)
         return { nearbyList = {}, lookedAtNpc = nil, playerInStealth = playerInStealth }
     end
 
-    -- Calculate forward vector from camera rotation (+ VR headset offset if active)
-    local vrOff = _G.VROffset
-    local pitch = math.rad(camRot.Pitch + (vrOff and vrOff.pitch or 0))
-    local yaw = math.rad(camRot.Yaw + (vrOff and vrOff.yaw or 0))
+    -- Calculate forward vector from camera rotation
+    -- VR: use world-space HMD rotation from UEVR stereo callback (no offset math needed)
+    -- Flat: use camera rotation directly
+    local vrCam = _G.VRCamRot
+    local gazeRot = vrCam or camRot
+    local pitch = math.rad(gazeRot.Pitch)
+    local yaw = math.rad(gazeRot.Yaw)
     local forward = {
         X = math.cos(pitch) * math.cos(yaw),
         Y = math.cos(pitch) * math.sin(yaw),
         Z = math.sin(pitch)
     }
+    if vrCam then
+        forward.X = math.cos(yaw)
+        forward.Y = math.sin(yaw)
+        forward.Z = 0
+    end
 
-    -- Gaze origin: VR = player head position, flat = camera position
+    -- Gaze origin: always use camera position (tracks HMD in VR)
     local gazeOrigin = camLoc
-    if vrOff and playerLoc then
-        local playerHalfHeight = 88
-        pcall(function()
-            local capsule = player.CapsuleComponent
-            if capsule and capsule.CapsuleHalfHeight then
-                playerHalfHeight = capsule.CapsuleHalfHeight
-            end
-        end)
-        gazeOrigin = { X = playerLoc.X, Y = playerLoc.Y, Z = playerLoc.Z + playerHalfHeight * 2 }
+
+    if not vrCam and fpAimInfo then
+        screenCenterX = fpAimInfo.screenCenterX
     end
 
     local nearbyList = {}
     local lookedAtNpc = nil
-    local bestDot = lookDotThreshold
+    local bestCenterDist = vrCam and lookDotThreshold or math.huge
 
-    -- Tracking stats for logging
+    -- Tracking stats for warning/diagnostic cases
     local stats = {
         total = #npcs,
         invalid = 0,
@@ -3839,7 +2708,6 @@ function GetNearbyNPCs(maxDistance, lookDotThreshold)
                     Y = npcLoc.Y - gazeOrigin.Y,
                     Z = npcLoc.Z - gazeOrigin.Z
                 }
-                local camDist = math.sqrt(toNpc.X * toNpc.X + toNpc.Y * toNpc.Y + toNpc.Z * toNpc.Z)
 
                 if dist > 0 and dist <= maxDistance then
                     -- Get NPC id
@@ -3857,21 +2725,70 @@ function GetNearbyNPCs(maxDistance, lookDotThreshold)
 
                     stats.inRange = stats.inRange + 1
 
-                    -- Normalize direction vector (using camera distance for look direction)
-                    toNpc.X = toNpc.X / camDist
-                    toNpc.Y = toNpc.Y / camDist
-                    toNpc.Z = toNpc.Z / camDist
+                    local npcHH = 88
+                    pcall(function()
+                        local cap = npc.CapsuleComponent
+                        if cap and cap.CapsuleHalfHeight then npcHH = cap.CapsuleHalfHeight end
+                    end)
+                    local feetScreenX, feetScreenY = nil, nil
+                    local topScreenX, topScreenY = nil, nil
+                    local projected = false
+
+                    local feetProj = _G.FirstPerson.projectToScreen(pc, {X = npcLoc.X, Y = npcLoc.Y, Z = npcLoc.Z}, viewportX, viewportY)
+                    local topProj = _G.FirstPerson.projectToScreen(pc, {X = npcLoc.X, Y = npcLoc.Y, Z = npcLoc.Z + npcHH * 2.0}, viewportX, viewportY)
+
+                    if feetProj and topProj then
+                        projected = true
+                        feetScreenX, feetScreenY = feetProj.x, feetProj.y
+                        topScreenX, topScreenY = topProj.x, topProj.y
+                    end
+
+                    if vrCam then
+                        toNpc.Z = 0
+                    end
+
+                    -- Normalize direction vector
+                    local camDist2 = math.sqrt(toNpc.X * toNpc.X + toNpc.Y * toNpc.Y + toNpc.Z * toNpc.Z)
+                    toNpc.X = toNpc.X / camDist2
+                    toNpc.Y = toNpc.Y / camDist2
+                    toNpc.Z = toNpc.Z / camDist2
 
                     -- Dot product with forward (1.0 = perfectly aligned with camera)
                     local dot = forward.X * toNpc.X + forward.Y * toNpc.Y + forward.Z * toNpc.Z
+                    if dot > 1.0 then dot = 1.0 end
+                    if dot < -1.0 then dot = -1.0 end
+                    local bandCenterX = nil
+                    local bandMinY = nil
+                    local bandMaxY = nil
+                    local horizontalErrorPx = math.huge
+                    local horizontalTolerancePx = 0
+                    local onScreen = false
+                    if projected and feetScreenX and topScreenX and feetScreenY and topScreenY then
+                        bandCenterX = (feetScreenX + topScreenX) * 0.5
+                        bandMinY = math.min(feetScreenY, topScreenY)
+                        bandMaxY = math.max(feetScreenY, topScreenY)
+                        horizontalErrorPx = math.abs(bandCenterX - screenCenterX)
+                        horizontalTolerancePx = math.abs(bandMaxY - bandMinY) * 0.25
+                        onScreen =
+                            feetScreenX >= -viewportX and feetScreenX <= viewportX * 2 and
+                            topScreenX >= -viewportX and topScreenX <= viewportX * 2 and
+                            bandMaxY >= 0 and bandMinY <= viewportY
+                    end
 
-                    -- Check if NPC is within camera FOV (on screen)
-                    local onScreen = dot > onScreenThreshold
-
-                    -- Check if this is the best "looked at" candidate
                     local isLookedAt = false
-                    if dot > bestDot then
-                        bestDot = dot
+                    if vrCam then
+                        if dot > bestCenterDist
+                            or (dot > lookDotThreshold and bestCenterDist > lookDotThreshold and dist < (lookedAtNpc and lookedAtNpc.distance or math.huge)) then
+                            bestCenterDist = dot
+                            lookedAtNpc = { name = npcId, actor = npc, distance = dist }
+                            isLookedAt = true
+                        end
+                        onScreen = dot > math.cos(math.rad(camFOV * 0.45))
+                    elseif onScreen
+                        and horizontalErrorPx <= horizontalTolerancePx
+                        and (horizontalErrorPx < bestCenterDist
+                            or (math.abs(horizontalErrorPx - bestCenterDist) < 10.0 and dist < (lookedAtNpc and lookedAtNpc.distance or math.huge))) then
+                        bestCenterDist = horizontalErrorPx
                         lookedAtNpc = { name = npcId, actor = npc, distance = dist }
                         isLookedAt = true
                     end
@@ -3893,15 +2810,6 @@ function GetNearbyNPCs(maxDistance, lookDotThreshold)
         end
         ::continue::
     end
-
-    -- Log NPC filtering stats
-    local afterDedup = #nearbyList
-    local insignificantStr = ""
-    if #stats.insignificantNames > 0 then
-        insignificantStr = " [" .. table.concat(stats.insignificantNames, ", ") .. (stats.insignificant > 5 and "..." or "") .. "]"
-    end
-    print(string.format("[GetNearbyNPCs] Cache:%d | InRange:%d | Insignificant:%d%s | OutOfRange:%d | Invalid:%d",
-        stats.total, stats.inRange, stats.insignificant, insignificantStr, stats.outOfRange, stats.invalid))
 
     -- Sort by distance (closest first)
     table.sort(nearbyList, function(a, b) return a.distance < b.distance end)
@@ -3951,15 +2859,8 @@ function GetNearbyNPCs(maxDistance, lookDotThreshold)
         end
     end
 
-    -- Log final result
     if #nearbyList == 0 and stats.inRange > 0 then
         print("[GetNearbyNPCs] WARNING: All " .. stats.inRange .. " in-range NPCs were filtered (check visibility)")
-    elseif #nearbyList > 0 then
-        local names = {}
-        for i, entry in ipairs(nearbyList) do
-            if i <= 5 then table.insert(names, entry.name) end
-        end
-        print("[GetNearbyNPCs] Result: " .. #nearbyList .. " NPCs [" .. table.concat(names, ", ") .. (#nearbyList > 5 and "..." or "") .. "]")
     end
 
     return { nearbyList = nearbyList, lookedAtNpc = lookedAtNpc, playerInStealth = playerInStealth }
@@ -3985,6 +2886,18 @@ end
 --- Uses multi-ray traces ignoring all characters to detect only world geometry
 --- @param npcList table List of NPC data with .actor and .name
 --- @return table Map of npcName -> boolean (true = visible, false = behind wall)
+-- Portrait NPCs are embedded in walls; their WallFrame mesh blocks LOS traces
+local PORTRAIT_NPCS = {
+    ["FerdinandOctaviusPratt"] = true,
+    ["FatLady"] = true,
+    ["MaryDunne"] = true,
+    ["LethiaBurbley"] = true,
+    ["SirCadogan"] = true,
+    ["MusicConductor"] = true,
+    ["SylviaPembroke"] = true,
+    ["OgleThePortrait"] = true,
+}
+
 function CheckNPCVisibility(npcList)
     if not npcList or #npcList == 0 then
         return {}
@@ -4035,15 +2948,30 @@ function CheckNPCVisibility(npcList)
         return {}
     end
 
-    -- Build ignore list: player + ALL NPCs (so trace only hits world geometry)
+    -- Pre-validate all actors once (same game frame, avoids per-trace revalidation)
+    -- Filter out stale actors BEFORE building ignore list or doing traces,
+    -- since passing dangling pointers to C++ LineTraceSingle crashes uncatchably
+    local validNpcList = {}
+    local droppedCount = 0
+    for _, npcData in ipairs(npcList) do
+        if npcData.actor and SafeIsValid(npcData.actor) then
+            table.insert(validNpcList, npcData)
+        else
+            droppedCount = droppedCount + 1
+            DevPrint("[Visibility] Dropped stale actor: " .. tostring(npcData.name))
+        end
+    end
+    if droppedCount > 0 then
+        print("[Sonorus] CheckNPCVisibility: dropped " .. droppedCount .. " stale actors")
+    end
+
+    -- Build ignore list: player + validated NPCs (so trace only hits world geometry)
     local ActorsToIgnore = {}
     if player then
         table.insert(ActorsToIgnore, player)
     end
-    for _, npcData in ipairs(npcList) do
-        if npcData.actor then
-            table.insert(ActorsToIgnore, npcData.actor)
-        end
+    for _, npcData in ipairs(validNpcList) do
+        table.insert(ActorsToIgnore, npcData.actor)
     end
 
     -- Trace settings
@@ -4053,14 +2981,16 @@ function CheckNPCVisibility(npcList)
 
     local visibilityResults = {}
 
+    -- Also mark any dropped actors as not visible
     for _, npcData in ipairs(npcList) do
+        if not npcData.actor or not SafeIsValid(npcData.actor) then
+            visibilityResults[npcData.name] = false
+        end
+    end
+
+    for _, npcData in ipairs(validNpcList) do
         local npcActor = npcData.actor
         local npcName = npcData.name
-
-        if not npcActor then
-            visibilityResults[npcName] = false
-            goto continue
-        end
 
         -- Get NPC base location
         local npcLoc = nil
@@ -4122,6 +3052,25 @@ function CheckNPCVisibility(npcList)
             if not WasHit then
                 isVisible = true
                 break  -- One clear ray is enough
+            elseif PORTRAIT_NPCS[npcName] then
+                -- Portrait NPCs sit inside wall frames; check if the hit is just their frame
+                local hitActorName = nil
+                pcall(function()
+                    local a = HitResult.Actor
+                    if a then
+                        local obj = nil
+                        pcall(function() obj = a:Get() end)
+                        if obj then
+                            hitActorName = obj:GetFullName()
+                        else
+                            hitActorName = a:GetFullName()
+                        end
+                    end
+                end)
+                if hitActorName and hitActorName:find("WallFrame") then
+                    isVisible = true
+                    break
+                end
             end
 
             ::nextRay::
@@ -4131,6 +3080,7 @@ function CheckNPCVisibility(npcList)
         ::continue::
     end
 
+    DevPrint("[DEBUG] CheckNPCVisibility: " .. #validNpcList .. " traced, " .. droppedCount .. " dropped")
     return visibilityResults
 end
 
@@ -4153,19 +3103,69 @@ local function _AnimateLipsWrapper()
     end
 end
 
-function OnTick()
-    if not _G.SonorusState then return end
-
+function OnTick(phase, emoteActive)
     -- NOTE: Socket updates, position writes, and context writes are now handled by
     -- the unified 100ms loop (runs always). OnTick only handles lipsync/conversation logic.
 
-    -- Queue updates now come via socket (queue_item messages)
-    local pState = _G.PlaybackState
+    -- Tick emotes if active (runs even during idle for fade-out)
+    if emoteActive then
+        if not _G._emoteFirstTickLogged then
+            _G._emoteFirstTickLogged = true
+            print("[Emotes] First OnTick emote tick START")
+        end
+        pcall(Emotes._Tick)
+        if _G._emoteFirstTickLogged == true then
+            _G._emoteFirstTickLogged = "done"
+            print("[Emotes] First OnTick emote tick END")
+        end
+    else
+        _G._emoteFirstTickLogged = nil
+    end
 
-    -- NEW: Use phase-based state machine (with legacy fallback)
-    local phase = _G.SonorusState.phase or "idle"
+    -- Queue updates now come via socket (queue_item messages)
     if phase == "idle" and not _G.SonorusState.active then return end
 
+    -- If idle arrived while we were handing off to the next queued turn, give
+    -- lipsync_start a brief grace window before final cleanup.
+    if phase == "preparing" and _G.SonorusState.pendingIdle then
+        local pendingIdleAt = _G.SonorusState.pendingIdleAt or 0
+        if pendingIdleAt > 0 and (os.clock() - pendingIdleAt) >= 1.0 then
+            print("[Sonorus] Deferred idle expired during preparing - finalizing conversation")
+            _G.SonorusState.phase = "idle"
+            _G.SonorusState.currentTurnId = nil
+            _G.SonorusState.active = false
+            _G.SonorusState.closing = false
+            _G.SonorusState.pendingIdle = false
+            _G.SonorusState.pendingIdleAt = 0
+            local endBehavior = _G.SonorusState.pendingEndBehavior or "linger"
+            _G.SonorusState.pendingEndBehavior = nil
+            _G.CloseLipsComplete = false
+            _G.CloseLipsIterations = 0
+            _G.TurnActorCache = {}
+            ClearSpeakerCache()
+            UnmuteAllSpeakers()
+            if endBehavior == "release_all" and ReleaseAllNPCs then
+                ReleaseAllNPCs()
+            else
+                LingerAllNPCs()
+            end
+            ResetPlaybackState()
+            if HideMessage and not (_G.ChatInputState and _G.ChatInputState.active) then
+                HideMessage()
+            end
+            if TimeDilation then
+                TimeDilation.OnConversationEnd()
+            end
+            if _G.ConversationFPVActive and _G.FirstPerson then
+                _G.FirstPerson.disable()
+                _G.ConversationFPVActive = false
+            end
+            print("[Sonorus] Ready for next conversation")
+        end
+        return
+    end
+
+    local pState = _G.PlaybackState
     -- Handle closing phase - keep loop running to smoothly close mouth
     if phase == "closing" or _G.SonorusState.closing then
         -- Check if closing completed (flag set by CloseLips on game thread)
@@ -4194,6 +3194,7 @@ function OnTick()
                 _G.SonorusState.phase = "preparing"
                 _G.SonorusState.closing = false
                 _G.SonorusState.pendingIdle = false  -- Clear deferred idle (continuing conversation)
+                _G.SonorusState.pendingIdleAt = 0
                 _G.CloseLipsComplete = false
                 _G.SonorusState.lipsyncStarted = false
                 _G.SonorusState.messageShown = false
@@ -4228,11 +3229,18 @@ function OnTick()
                 _G.SonorusState.active = false
                 _G.SonorusState.closing = false
                 _G.SonorusState.pendingIdle = false  -- Clear deferred idle flag
+                _G.SonorusState.pendingIdleAt = 0
+                local endBehavior = _G.SonorusState.pendingEndBehavior or "linger"
+                _G.SonorusState.pendingEndBehavior = nil
                 _G.CloseLipsComplete = false
                 _G.TurnActorCache = {}  -- Clear turn-based cache
                 ClearSpeakerCache()     -- Clear legacy cache
                 UnmuteAllSpeakers()
-                LingerAllNPCs()         -- NPCs stay frozen ~10s before returning to schedule
+                if endBehavior == "release_all" and ReleaseAllNPCs then
+                    ReleaseAllNPCs()
+                else
+                    LingerAllNPCs()     -- NPCs stay frozen ~10s before returning to schedule
+                end
                 ResetPlaybackState()
                 -- Hide subtitles now that closing is complete
                 if HideMessage then
@@ -4241,6 +3249,11 @@ function OnTick()
                 -- Time dilation: Restore day/night rate
                 if TimeDilation then
                     TimeDilation.OnConversationEnd()
+                end
+                -- Auto first-person view: restore third-person
+                if _G.ConversationFPVActive and _G.FirstPerson then
+                    _G.FirstPerson.disable()
+                    _G.ConversationFPVActive = false
                 end
                 print("[Sonorus] Ready for next conversation")
             end
@@ -4331,8 +3344,8 @@ function OnTick()
 
         if displayMessage then
             print("[Sonorus] Showing message: " .. displayMessage)
-            ShowMessage(displayMessage)
-            _G.SonorusState.messageShown = true
+            ShowAIMessage(displayMessage)
+            _G.SonorusState.messageShown = AreSubtitlesEnabled()
         end
     end
 
@@ -4342,12 +3355,28 @@ function OnTick()
         -- Viseme data now comes via socket - no need for LoadVisemes()
         -- DISABLE LIPSYNC FOR TESTING: set _G.DisableLipsync = true
         if not _G.DisableLipsync then
-            -- Already on game thread via LoopInGameThreadWithDelay
+            if not _G._lipsyncFirstTickLogged then
+                _G._lipsyncFirstTickLogged = true
+                print("[LipSync] First OnTick lipsync tick START")
+            end
+            -- Already on game thread via shared TickScheduler
             _AnimateLipsWrapper()
+            if _G._lipsyncFirstTickLogged == true then
+                _G._lipsyncFirstTickLogged = "done"
+                print("[LipSync] First OnTick lipsync tick END")
+            end
         end
         -- DISABLE 3D AUDIO FOR TESTING: set _G.Disable3DAudio = true
         if not _G.Disable3DAudio then
+            if not _G._writePositionsFirstTickLogged then
+                _G._writePositionsFirstTickLogged = true
+                print("[WritePositions] First OnTick WritePositions START")
+            end
             WritePositions()
+            if _G._writePositionsFirstTickLogged == true then
+                _G._writePositionsFirstTickLogged = "done"
+                print("[WritePositions] First OnTick WritePositions END")
+            end
         end
     end
 end
@@ -4358,9 +3387,13 @@ end
 function ResetState()
     print("[Sonorus] Resetting state...")
 
-    -- First: Reset blendshapes on ALL nearby NPCs (fixes stuck lip sync)
+    -- First: Reset blendshapes on ALL nearby NPCs (fixes stuck lip sync / emotes)
     -- This runs first so users can use F8 as a general "fix broken NPCs" button
     ResetNearbyNPCLips()
+    -- Stop any active emote and reset emote morph targets
+    if _G.EmoteState and _G.EmoteState.active then
+        Emotes._Finish()
+    end
 
     if not _G.SonorusState then return end
 
@@ -4369,11 +3402,20 @@ function ResetState()
     _G.SonorusState.active = false
     _G.SonorusState.closing = false  -- Must reset or next conversation breaks
     _G.SonorusState.pendingIdle = false  -- Clear deferred idle flag
+    _G.SonorusState.pendingIdleAt = 0
+    -- If conversation auto-enabled FPV, disable it now
+    if _G.ConversationFPVActive and _G.FirstPerson then
+        pcall(function() _G.FirstPerson.disable() end)
+    end
+    _G.ConversationFPVActive = false
     _G.SonorusState.lipsyncStarted = false
+    _G._lipsyncFirstTickLogged = nil
+    _G._writePositionsFirstTickLogged = nil
     _G.SonorusState.messageShown = false
     _G.SonorusState.playerMessageShown = false
     _G.SonorusState.playerMessage = nil
     _G.CloseLipsComplete = false  -- Reset async flag
+    _G.CurrentSonorusTarget = nil
     ClearSpeakerCache()
 
     -- Signal server to reset via socket
@@ -4388,6 +3430,11 @@ function ResetState()
 
     -- Unmute ALL nearby NPCs (safety net - not just tracked participants)
     UnmuteAllNearbyNPCs()
+
+    -- Stop any ambient eye-contact override before releasing/clearing state
+    if StopAmbientGaze then
+        pcall(function() StopAmbientGaze("reset state") end)
+    end
 
     -- Release all locked NPCs
     ReleaseAllNPCs()
@@ -4474,7 +3521,7 @@ function ProcessInitDialogueData(Context, AudioDialogueLineData)
 
     if not elem then return end
 
-    ExecuteInGameThreadWithDelay(50, function()
+    ExecuteInGameThreadAfterFrames(1, function()
         local lineID, voiceName, duration = "", "", 0
 
         pcall(function()
@@ -4502,32 +3549,118 @@ function ProcessInitDialogueData(Context, AudioDialogueLineData)
             }
             print(string.format("[Sonorus] Dialogue: %s (%s, %.1fs)", lineID, voiceName, duration))
 
-            -- Block ambient lip sync if NPC is in AI conversation
+            local lineBlocked = false
+            local convoBlock = false
+
+            -- Block ambient if NPC is in AI conversation
             if IsNPCInConversation and IsNPCInConversation(voiceName) then
-                local npcActor = _G.SpeakerActorCache and _G.SpeakerActorCache[voiceName]
-                if npcActor and StopNPCDialogueLipSync then
-                    StopNPCDialogueLipSync(npcActor)
-                    print(string.format("[Sonorus] Blocked ambient lip sync for %s", voiceName))
-                end
+                lineBlocked = true
+                convoBlock = true
+                print(string.format("[Sonorus] Blocked ambient for in-conversation NPC: %s", voiceName))
             end
 
-            -- Lookup subtitle text
-            local subtitleText = ""
-            if GetSubtitleText then
-                subtitleText = GetSubtitleText(lineID) or ""
+            -- Ambient blocklist check (server-driven)
+            -- Skip during cinematics and post-load cooldown
+            local inCinematic = _G.CinematicState and _G.CinematicState.active or false
+            local inLoadCooldown = AudioMute and AudioMute.InLoadCooldown() or false
+            local isBlocklistNPC = not inCinematic and not inLoadCooldown and _G._AmbientBlocklist and _G._AmbientBlocklist[voiceName]
+            if not lineBlocked and isBlocklistNPC then
+                -- Check if this specific lineID number is blocked
+                -- Extract numeric suffix: "GarrethWeasley_10946" -> 10946
+                local lineNum = lineID and tonumber(lineID:match("_(%d+)$"))
+                if lineNum then
+                    lineBlocked = isBlocklistNPC[lineNum] == true
+                else
+                    -- Can't extract number — block by default
+                    lineBlocked = true
+                end
             end
-            if subtitleText ~= "" then
-                print(string.format("[Sonorus] Subtitle: \"%s\"", subtitleText))
+            if lineBlocked then
+                -- Heard before — block everything
+                local npcActor = GetSpeakerActor(voiceName)
+                if npcActor then
+                    NPCFacial.StopNPCDialogueLipSync(npcActor)
+                    -- Ensure muted (covers fresh spawns not yet muted)
+                    AudioMute.MuteNPCAudio(npcActor)
+                end
+                pcall(function()
+                    if elem and elem:IsValid() then
+                        elem:SetVisibility(1)
+                    end
+                end)
+                -- Capture stable identifiers while objects are valid (before the delay)
+                local capElemPath = nil
+                pcall(function()
+                    local fn = elem:GetFullName()
+                    capElemPath = fn:match(" (.+)$") or fn
+                end)
+                -- Backup mute/lip sync stop + elem visibility at 50ms.
+                -- Use voiceName -> BP volume path so we don't rely on native delayed volume.
+                ExecuteInGameThreadWithDelay(50, function()
+                    if not _G.SonorusState or not _G.SonorusState.playerLoaded then return end
+                    AudioMute.MuteNPCAudio(voiceName)
+                    local actor = GetSpeakerActor(voiceName)
+                    if actor then
+                        NPCFacial.StopNPCDialogueLipSync(actor)
+                    end
+                    -- Fresh lookup for elem (never touch the stale closure ref)
+                    if capElemPath then
+                        pcall(function()
+                            local freshElem = StaticFindObject(capElemPath)
+                            if freshElem and freshElem:IsValid() then
+                                freshElem:SetVisibility(1)
+                            end
+                        end)
+                    end
+                end)
+                if not convoBlock then
+                    print(string.format("[Sonorus] Ambient BLOCKED: %s (heard before)", voiceName))
+                end
+                return
+            elseif isBlocklistNPC then
+                -- New line from blocklist NPC — unmute, let it play, re-mute after duration + buffer
+                local npcActor = GetSpeakerActor(voiceName)
+                if npcActor then
+                    AudioMute.UnmuteNPCAudioByActor(npcActor)
+                end
+                local remutDelay = math.floor(math.max((duration or 2) + 2, 4) * 1000)  -- duration + 2s buffer, min 4s
+                ExecuteInGameThreadWithDelay(remutDelay, function()
+                    if not _G.SonorusState or not _G.SonorusState.playerLoaded then return end
+                    local inCutscene = _G.CinematicState and _G.CinematicState.active or false
+                    if inCutscene then return end
+                    local inConvo = IsNPCInConversation and IsNPCInConversation(voiceName)
+                    if inConvo then return end
+                    if _G._AmbientBlocklist and _G._AmbientBlocklist[voiceName] then
+                        local actor = GetSpeakerActor(voiceName)
+                        if actor then
+                            AudioMute.MuteNPCAudio(actor)
+                        end
+                    end
+                end)
+                print(string.format("[Sonorus] Ambient ALLOWED (new line): %s | re-mute in %.1fs", voiceName, remutDelay / 1000))
+                -- Don't return — let recording proceed so server learns this line
             end
 
             -- Use _G lookup to survive F11 reload (closure captures stale ref)
             if _G.RecordDialogueLine then
-                _G.RecordDialogueLine(voiceName, lineID, duration, "", nil, nil)
+                -- Lookup subtitle text (needed early for blocklist hash)
+                local subtitleText = ""
+                if GetSubtitleText and not convoBlock then
+                    subtitleText = GetSubtitleText(lineID) or ""
+                end
+                if subtitleText ~= "" then
+                    print(string.format("[Sonorus] Subtitle: \"%s\"", subtitleText))
+                end
+                _G.RecordDialogueLine(voiceName, lineID, duration, subtitleText, nil, nil)
             end
 
             -- Suppress native subtitle in VR (immersive mode)
             if false and _G.VROffset then
-                pcall(function() elem:SetVisibility(1) end)  -- ESlateVisibility::Collapsed
+                pcall(function()
+                    if elem and elem:IsValid() then
+                        elem:SetVisibility(1)
+                    end
+                end)
             end
         end
     end)
@@ -4545,9 +3678,14 @@ function IsGameWindowActive()
 end
 _G.IsGameWindowActive = IsGameWindowActive
 
+function AreSubtitlesEnabled()
+    return _G.GameSubtitlesEnabled ~= false  -- Default true if unknown/unset
+end
+_G.AreSubtitlesEnabled = AreSubtitlesEnabled
+
 function RecordDialogueLine(voiceName, lineID, duration, subtitleText, speakingActor, targetName)
     -- Skip recording when game is paused/menu open
-    if Utils.IsGamePaused() then
+    if not _G.SonorusState.playerLoaded or Utils.IsGamePaused() then
         return
     end
 
@@ -4580,16 +3718,6 @@ function RecordDialogueLine(voiceName, lineID, duration, subtitleText, speakingA
             return
         end
 
-        -- Track companion callout state for later repeat checking (after we have text)
-        -- Note: actual blocking is deferred until we have subtitle text
-    end
-
-    -- Check if this is a companion callout outside combat/broom (for repeat blocking)
-    local isCompanionCallout = false
-    local inCombat = _G.CombatState and _G.CombatState.active or false
-    local onBroom = _G.BroomState and _G.BroomState.mounted or false
-    if not inCinematic and not inCombat and not onBroom then
-        isCompanionCallout = IsCompanion(speakingActor) or IsCompanion(voiceName)
     end
 
     local timestamp = os.time()
@@ -4639,20 +3767,6 @@ function RecordDialogueLine(voiceName, lineID, duration, subtitleText, speakingA
         return
     end
 
-    -- Block repeated companion callouts within time window (if enabled)
-    -- _G.CompanionCalloutBlockMinutes: 0 = disabled, -1 = never repeat, >0 = block within N game minutes
-    local blockMinutes = _G.CompanionCalloutBlockMinutes or 0
-    if isCompanionCallout and blockMinutes ~= 0 then
-        if IsCompanionCalloutBlocked(voiceName, text, blockMinutes) then
-            -- Stop the dialogue lip sync if we have the actor
-            if StopNPCDialogueLipSync and speakingActor then
-                StopNPCDialogueLipSync(speakingActor)
-            end
-            -- Don't log to history
-            return
-        end
-    end
-
     -- Get game time
     local gameTime = GetTimeOfDay()
 
@@ -4698,6 +3812,11 @@ function RecordDialogueLine(voiceName, lineID, duration, subtitleText, speakingA
 
     -- Send to Python for persistence
     sendDialogueEntry(entry)
+
+    -- Reset attention meter for the speaking NPC so they don't immediately re-trigger
+    if not isPlayer and not inCinematic then
+        pcall(function() AttentionMeter.OnAmbientDialogue(speakerVoiceId) end)
+    end
 
     if voiceName and voiceName ~= "" and voiceName ~= "Unknown" then
         _G.VoiceSamples[voiceName] = _G.VoiceSamples[voiceName] or {}
@@ -4937,9 +4056,8 @@ function RecordSpellCast(blueprintClassName)
         playerName, spellName, category))
 end
 
--- Record a broom mount/dismount event to DialogueHistory
--- Called from the broom tracker hooks in main.lua
-function RecordBroomEvent(broomAction)
+-- Record a mount/dismount event to DialogueHistory
+function RecordMountEvent(mountAction, mountType)
     local timestamp = os.time()
     local gameTime = GetTimeOfDay()
 
@@ -4949,8 +4067,11 @@ function RecordBroomEvent(broomAction)
         playerName = _G.SonorusState.playerName
     end
 
-    -- Create broom event entry
-    local actionText = broomAction == "mounted" and "Mounted broom" or "Dismounted from broom"
+    -- Create mount event entry with specific mount name
+    local mountName = mountType or "broom"
+    local actionText = mountAction == "mounted"
+        and ("Mounted " .. mountName)
+        or ("Dismounted from " .. mountName)
 
     -- Get earshot witnesses (nearby named NPCs)
     local earshot = GetEarshotWitnesses("Player")
@@ -4961,12 +4082,12 @@ function RecordBroomEvent(broomAction)
         gameDate = gameTime.dateShort or gameTime.dateFormatted,
         speaker = playerName,
         voiceName = "Player",
-        lineID = "broom_" .. broomAction,
+        lineID = "mount_" .. mountAction,
         text = actionText,
         duration = 0,
         isAIResponse = false,
         isPlayer = true,
-        type = "broom",  -- Broom event
+        type = "mount",
         earshot = earshot,
     }
 
@@ -4974,7 +4095,7 @@ function RecordBroomEvent(broomAction)
     sendDialogueEntry(entry)
 
     -- Log for debugging
-    print(string.format("[Sonorus] Broom: %s %s", playerName, actionText:lower()))
+    print(string.format("[Sonorus] Mount: %s %s", playerName, actionText:lower()))
 end
 
 -- ============================================
@@ -5078,14 +4199,13 @@ function MonitorServerHeartbeat()
     return false  -- Continue loop
 end
 
--- Start monitor loop only once (survives hot reload)
-if not _G.ServerMonitor.loopStarted then
-    _G.ServerMonitor.loopStarted = true
-    _G.ServerMonitor.loopHandle = LoopInGameThreadWithDelay(5000, function()
-        MonitorServerHeartbeat()
-    end)
-    print("[Sonorus] Server heartbeat monitor started (5s interval)")
-end
+-- Registered on the shared tick scheduler; re-registers on hot reload.
+_G.ServerMonitor.loopStarted = true
+_G.ServerMonitor.loopHandle = nil
+TickScheduler.Register("server_heartbeat", 4987, function()
+    MonitorServerHeartbeat()
+end)
+print("[Sonorus] Server heartbeat monitor registered (5s interval)")
 
 -- Unified loop - handles socket updates and periodic game context
 -- CRITICAL: This loop handles socket reconnection when not in conversation
@@ -5103,7 +4223,7 @@ end
 -- Static wrapper for NPC lock check (runs every 1s when NPCs locked)
 local function _NPCLockCheckWrapper()
     local ok, err = pcall(function()
-        -- First check combat/broom
+        -- First check combat/mount
         local canLock, reason = CanLockNPCs()
         if not canLock then
             print("[NPCLock] Releasing NPCs: " .. tostring(reason))
@@ -5111,7 +4231,7 @@ local function _NPCLockCheckWrapper()
             return
         end
 
-        -- Check if any locked NPC needs to re-face their target (angle > 45 degrees)
+        -- Check if any locked NPC needs to re-face their target (angle > 50 degrees)
         -- Collect NPCs that need re-facing first (can't modify table during iteration)
         -- Skip companions, static locks, and lingering NPCs (they're frozen in place)
         -- Snap-locked NPCs re-face via direct rotation (no release/re-lock cycle)
@@ -5120,37 +4240,18 @@ local function _NPCLockCheckWrapper()
         for lockId, data in pairs(_G.LockedNPCs) do
             if data.locked and data.npc and data.targetActor
                and not data.isCompanionLock and not data.isStaticLock
-               and not data.lingering then
+               and not data.lingering and not data.isPreviewLock then
                 pcall(function()
-                    -- Check target is still valid
-                    if not data.targetActor:IsValid() then return end
+                    if not SafeIsValid(data.npc) or not SafeIsValid(data.targetActor) then return end
 
                     local npcPos = data.npc:K2_GetActorLocation()
                     local npcRot = data.npc:K2_GetActorRotation()
                     local targetPos = data.targetActor:K2_GetActorLocation()
 
-                    -- Direction to target
-                    local toTargetX = targetPos.X - npcPos.X
-                    local toTargetY = targetPos.Y - npcPos.Y
-                    local dist = math.sqrt(toTargetX * toTargetX + toTargetY * toTargetY)
-                    if dist < 1 then return end
+                    local angleDiff = GetAngleToTarget(npcPos, npcRot, targetPos)
 
-                    -- Angle to target (degrees)
-                    local angleToTarget = math.atan(toTargetY / toTargetX) * 180 / math.pi
-                    if toTargetX < 0 then
-                        angleToTarget = angleToTarget + 180
-                    end
-
-                    -- NPC's current yaw
-                    local npcYaw = npcRot.Yaw or 0
-
-                    -- Angle difference (normalize to -180 to 180)
-                    local diff = angleToTarget - npcYaw
-                    while diff > 180 do diff = diff - 360 end
-                    while diff < -180 do diff = diff + 360 end
-
-                    -- If angle > 45 degrees, mark for re-facing
-                    if math.abs(diff) > 45 then
+                    -- If angle > 50 degrees, mark for re-facing
+                    if angleDiff > 50 then
                         if data.isSnapLock then
                             -- Snap lock: direct rotation, no release/re-lock
                             table.insert(snapReface, { lockId = lockId, data = data })
@@ -5159,7 +4260,7 @@ local function _NPCLockCheckWrapper()
                                 lockId = lockId,
                                 npc = data.npc,
                                 target = data.targetActor,
-                                angle = math.floor(diff)
+                                angle = math.floor(angleDiff)
                             })
                         end
                     end
@@ -5213,7 +4314,7 @@ local function _NPCLockCheckWrapper()
 end
 
 _G.UnifiedLoop = _G.UnifiedLoop or { version = 0, lastContextWrite = 0 }
-_G.UnifiedLoop.interval = _G.UnifiedLoop.interval or 100  -- Default 100ms, configurable via config page
+_G.UnifiedLoop.interval = _G.UnifiedLoop.interval or 97  -- Default ~100ms (jittered to avoid UE4SS timer collisions)
 
 -- ============================================
 -- Event Handlers (re-registered on each reload)
@@ -5222,7 +4323,9 @@ _G.UnifiedLoop.interval = _G.UnifiedLoop.interval or 100  -- Default 100ms, conf
 
 -- Cinematic: Stop active conversation when entering cinematic
 Events.on("cinematic:start", function(data)
+    if not _G.SonorusState.playerLoaded then return end
     print("[Sonorus] Cinematic started - stopping conversation")
+    if StopAmbientGaze then pcall(function() StopAmbientGaze("cinematic start") end) end
     -- Tell Python to stop conversation immediately (with history trimming)
     -- Python's stop_conversation will send reset back to Lua, which calls ResetState
     pcall(function()
@@ -5230,15 +4333,46 @@ Events.on("cinematic:start", function(data)
     end)
     -- Send state update so Python knows we're in cinematic
     pcall(function() WriteSelectiveContext({"state"}) end)
+    -- Unmute blocklist NPCs so native cutscene dialogue plays
+    pcall(function() AudioMute.UnmuteBlocklistNPCs() end)
+end)
+
+-- Cinematic: Suspend FPV when entering cinematic
+Events.on("cinematic:start", function(data)
+    print("[Sonorus] Cinematic started - suspending FPV")
+    -- Suspend FPV during cutscene
+    if _G.FirstPerson then
+        pcall(function() _G.FirstPerson.suspend("cinematic", true) end)
+    end
 end)
 
 Events.on("cinematic:end", function(data)
     print("[Sonorus] Cinematic ended")
     pcall(function() WriteSelectiveContext({"state"}) end)
+    pcall(function()
+        if SocketClient and SocketClient.send then
+            SocketClient.send({
+                type = "game_event",
+                event = "cinematic:end",
+                data = {}
+            })
+        end
+    end)
+    -- Re-mute blocklist NPCs after cutscene
+    pcall(function() AudioMute.MuteBlocklistNPCs() end)
     -- Refresh house points after 2s (quests may award points on completion)
     ExecuteInGameThreadWithDelay(2000, function()
         RefreshHousePoints()
     end)
+end)
+
+-- Cinematic: Resume FPV when exiting cinematic
+Events.on("cinematic:end", function(data)
+    print("[Sonorus] Cinematic ended - resuming FPV")
+    -- Resume FPV after cutscene
+    if _G.FirstPerson then
+        pcall(function() _G.FirstPerson.resume("cinematic", true) end)
+    end
 end)
 
 -- Helper: Get companion if within combat range (no visibility requirement)
@@ -5254,11 +4388,15 @@ local function GetCompanionInRange(maxDistance)
         local companionMgr = staticData and staticData.companionManager
         if not player or not companionMgr then return end
 
-        local companionPawn = companionMgr:GetPrimaryCompanionPawn()
+        local companionPawn = nil
+        pcall(function() companionPawn = companionMgr:GetPrimaryCompanionPawn() end)
         if not companionPawn or not Utils.SafeIsValid(companionPawn) then return end
 
-        local playerLoc = player:K2_GetActorLocation()
-        local companionLoc = companionPawn:K2_GetActorLocation()
+        local playerLoc, companionLoc = nil, nil
+        pcall(function()
+            playerLoc = player:K2_GetActorLocation()
+            companionLoc = companionPawn:K2_GetActorLocation()
+        end)
         if not playerLoc or not companionLoc then return end
 
         local dx = playerLoc.X - companionLoc.X
@@ -5300,6 +4438,9 @@ end
 -- Combat: Track combat stats and create summary entry on end
 Events.on("combat:start", function(data)
     print("[Sonorus] Combat started")
+    if StopAmbientGaze then pcall(function() StopAmbientGaze("combat start") end) end
+    -- Unmute companion so combat grunts play
+    pcall(function() AudioMute.UnmuteBlocklistCompanion() end)
 
     -- Check if this should merge with previous combat (within 60s)
     local isMerge = Combat.ShouldMergeWithPrevious()
@@ -5334,6 +4475,8 @@ end)
 
 Events.on("combat:end", function(data)
     print("[Sonorus] Combat ended")
+    -- Re-mute companion after combat
+    pcall(function() AudioMute.MuteBlocklistCompanion() end)
 
     -- Mark combat as ended
     Combat.EndCombat()
@@ -5363,6 +4506,20 @@ Events.on("combat:end", function(data)
                 entry = entry
             })
         end)
+        pcall(function()
+            if SocketClient and SocketClient.send then
+                SocketClient.send({
+                    type = "game_event",
+                    event = "combat:end",
+                    data = {
+                        summary = entry.text or "",
+                        enemyCounts = stats.enemies or {},
+                        playerDamagePct = totalDamage > 0 and math.floor((stats.playerDamage / totalDamage) * 100 + 0.5) or 0,
+                        companionDamagePct = totalDamage > 0 and (100 - (math.floor((stats.playerDamage / totalDamage) * 100 + 0.5) or 0)) or 0
+                    }
+                })
+            end
+        end)
         print(string.format("[Combat] Summary: %s (witnesses: %d from start+end)", entry.text, #endWitnesses))
     else
         print("[Combat] No combat activity to record")
@@ -5374,17 +4531,26 @@ Events.on("combat:end", function(data)
     pcall(function() WriteSelectiveContext({"state"}) end)
 end)
 
--- Broom: Release NPCs when mounting, log events
--- Note: setState("broom", true) emits broom:start, setState("broom", false) emits broom:end
-Events.on("broom:start", function(data)
-    print("[Sonorus] Player mounted broom")
+-- Mount: Release NPCs when mounting, log events, suspend/resume FPV
+-- Note: setState("mount", true) emits mount:start, setState("mount", false) emits mount:end
+Events.on("mount:start", function(data)
+    if StopAmbientGaze then pcall(function() StopAmbientGaze("mount start") end) end
     if ReleaseAllNPCs then pcall(ReleaseAllNPCs) end
-    if RecordBroomEvent then pcall(function() RecordBroomEvent("mounted") end) end
+    if _G.FirstPerson then pcall(function() _G.FirstPerson.suspend("mount", true) end) end
+
+    -- Delay recording so mount type recheck (1s) has time to identify creature mounts
+    ExecuteInGameThreadWithDelay(1500, function()
+        local mountType = (_G.MountState and _G.MountState.mountType) or "mount"
+        print("[Sonorus] Player mounted " .. mountType)
+        if RecordMountEvent then pcall(function() RecordMountEvent("mounted", mountType) end) end
+    end)
 end)
 
-Events.on("broom:end", function(data)
-    print("[Sonorus] Player dismounted broom")
-    if RecordBroomEvent then pcall(function() RecordBroomEvent("dismounted") end) end
+Events.on("mount:end", function(data)
+    local mountType = (_G.MountState and _G.MountState.mountType) or "mount"
+    print("[Sonorus] Player dismounted " .. mountType)
+    if RecordMountEvent then pcall(function() RecordMountEvent("dismounted", mountType) end) end
+    if _G.FirstPerson then pcall(function() _G.FirstPerson.resume("mount", true) end) end
 
     -- Delay context update to let floo mod restore companion
     ExecuteWithDelay(500, function()
@@ -5395,12 +4561,25 @@ end)
 -- Stealth: Log state changes, send context updates
 Events.on("stealth:start", function(data)
     print("[Sonorus] Player entered stealth/disillusionment")
+    if StopAmbientGaze then pcall(function() StopAmbientGaze("stealth start") end) end
     pcall(function() WriteSelectiveContext({"state"}) end)
 end)
 
 Events.on("stealth:end", function(data)
     print("[Sonorus] Player left stealth/disillusionment")
     pcall(function() WriteSelectiveContext({"state"}) end)
+end)
+
+-- Swimming: Suspend/resume FPV
+Events.on("swimming:start", function(data)
+    print("[Sonorus] Player started swimming")
+    if StopAmbientGaze then pcall(function() StopAmbientGaze("swimming start") end) end
+    if _G.FirstPerson then pcall(function() _G.FirstPerson.suspend("swimming") end) end
+end)
+
+Events.on("swimming:end", function(data)
+    print("[Sonorus] Player stopped swimming")
+    if _G.FirstPerson then pcall(function() _G.FirstPerson.resume("swimming") end) end
 end)
 
 -- Function to start/restart the unified loop with current interval
@@ -5411,33 +4590,25 @@ function _G.StartUnifiedLoop(newInterval)
         _G.UnifiedLoop.interval = newInterval
     end
 
-    -- Cancel existing loop if running
-    if _G.UnifiedLoop.handle and IsValidDelayedActionHandle(_G.UnifiedLoop.handle) then
-        CancelDelayedAction(_G.UnifiedLoop.handle)
-    end
+    -- Replace the shared scheduler task if this is a reload or interval update.
+    TickScheduler.Unregister("sonorus_unified")
+    _G.UnifiedLoop.handle = nil
 
     -- Increment version for logging
     _G.UnifiedLoop.version = (_G.UnifiedLoop.version or 0) + 1
     local myLoopVersion = _G.UnifiedLoop.version
     print("[Sonorus] Starting unified loop v" .. myLoopVersion .. " (" .. _G.UnifiedLoop.interval .. "ms)")
 
-    -- LoopInGameThreadWithDelay runs ON game thread - UObject access is safe
-    _G.UnifiedLoop.handle = LoopInGameThreadWithDelay(_G.UnifiedLoop.interval, function()
-        local devMode = _G.SonorusDevMode
-        local t0, t1, t2, t3, t4, t5
-
-        if devMode then t0 = os.clock() end
-
-        local now = os.clock()
-        if devMode then t1 = os.clock() end
-
+    -- TickScheduler runs ON the game thread - UObject access is safe.
+    TickScheduler.Register("sonorus_unified", _G.UnifiedLoop.interval, function()
         -- Socket update EVERY tick - handles reconnection and message processing
         -- This is CRITICAL - socket must update frequently even when mod is disabled
+        -- Must run BEFORE playerLoaded guard so player_ready can be received
         -- NOTE: Pure LuaSocket, no UObjects
         -- Skip if fast poll loop is active AND we're connected (it handles socket updates at 25ms)
         -- Always run here when disconnected so reconnection logic isn't blocked
         local fp = _G._FastPoll
-        local fastPollActive = fp and fp.handle and os.clock() < fp.expiry
+        local fastPollActive = fp and os.clock() < (fp.expiry or 0)
         if not fastPollActive or not (_G.SocketClient and _G.SocketClient.isConnected()) then
             if _G.SocketClient then
                 pcall(_G.SocketClient.update)
@@ -5445,6 +4616,15 @@ function _G.StartUnifiedLoop(newInterval)
                 print("No socket client!")
             end
         end
+
+        if not _G.SonorusState.playerLoaded then return end
+        local devMode = _G.SonorusDevMode
+        local t0, t1, t2, t3, t4, t5
+
+        if devMode then t0 = os.clock() end
+
+        local now = os.clock()
+        if devMode then t1 = os.clock() end
         if devMode then t2 = os.clock() end
 
         -- Skip all mod functionality when disabled (except socket communication above)
@@ -5460,60 +4640,166 @@ function _G.StartUnifiedLoop(newInterval)
 
         -- Send lightweight time + zone updates every 5 seconds (for config page display + location tracking)
         _G.UnifiedLoop.lastTimeUpdate = _G.UnifiedLoop.lastTimeUpdate or 0
-        if (now - _G.UnifiedLoop.lastTimeUpdate) >= 5.0 then
+        if (now - _G.UnifiedLoop.lastTimeUpdate >= 5.0) then
             _G.UnifiedLoop.lastTimeUpdate = now
             pcall(RefreshTimeCache)
-            pcall(function() WriteSelectiveContext({"time", "zone"}) end)
+            pcall(function() WriteSelectiveContext({"time", "zone", "companion", "player", "world_facts"}) end)
             pcall(function() Events.emit("timeUpdated") end)
         end
         if devMode then t4 = os.clock() end
 
-        -- Broom state polling every 2 seconds (replaces ReceiveTick hooks)
+        -- Mount state polling every 2 seconds (replaces ReceiveTick hooks)
         -- Already on game thread, UObject access is safe
-        _G.UnifiedLoop.lastBroomCheck = _G.UnifiedLoop.lastBroomCheck or 0
-        if (now - _G.UnifiedLoop.lastBroomCheck) >= 2.0 then
-            _G.UnifiedLoop.lastBroomCheck = now
-            local onBroom = false
+        -- Guard: skip during loading screens to avoid phantom mount/dismount from transitional states
+        _G.UnifiedLoop.lastMountCheck = _G.UnifiedLoop.lastMountCheck or 0
+        if (_G.SonorusState.playerLoaded and now - _G.UnifiedLoop.lastMountCheck >= 2.0) then
+            _G.UnifiedLoop.lastMountCheck = now
+            local onMount = false
             pcall(function()
                 local staticData = GetStaticCache()
                 local gearScreen = staticData.gearScreen
                 if gearScreen then
-                    onBroom = gearScreen:IsPlayerOnBroom() or false
+                    -- IsPlayerOnBroom is the only confirmed working GearScreen mount check.
+                    -- Also check GetIsOnAMountOrInTransition on player for other mount types.
+                    onMount = gearScreen:IsPlayerOnBroom() or false
+                    if not onMount then
+                        local player = staticData.player
+                        if player and player:IsValid() and player.GetIsOnAMountOrInTransition then
+                            onMount = player:GetIsOnAMountOrInTransition() or false
+                        end
+                    end
                 end
             end)
-            -- Update state - events fire automatically on change
-            -- Uses "broom" state with mount/dismount mapping to :start/:end
-            if Events.setState("broom", onBroom) then
-                -- Also update legacy _G.BroomState for compatibility
-                _G.BroomState = _G.BroomState or {}
-                _G.BroomState.mounted = onBroom
+            -- Seed Events store so first real transition fires :start/:end (not treated as init)
+            if not _G._mountStateSeeded then
+                _G._mountStateSeeded = true
+                Events.setState("mount", false)
+            end
+
+            -- Update MountState BEFORE firing events so handlers read correct values
+            if onMount ~= (_G.MountState.mounted or false) then
+                _G.MountState = _G.MountState or {}
+
+                -- Only detect specific mount type on mount (not every poll)
+                if onMount then
+                    local mountTypeName = nil
+
+                    -- Check if on broom specifically
+                    pcall(function()
+                        local staticData = GetStaticCache()
+                        local gearScreen = staticData.gearScreen
+                        if gearScreen and gearScreen:IsPlayerOnBroom() then
+                            mountTypeName = "broom"
+                        end
+                    end)
+
+                    -- Not broom — find creature mount via RiderCharacter match
+                    if not mountTypeName then
+                        pcall(function()
+                            local player = FindFirstOf("Biped_Player")
+                            if not player or not player:IsValid() then return end
+
+                            local creatures = FindAllOf("Creature_Character")
+                            if not creatures then return end
+                            for _, creature in pairs(creatures) do
+                                pcall(function()
+                                    if not SafeIsValid(creature) then return end
+                                    local mountComp = creature:GetMountComponent()
+                                    if not mountComp then return end
+                                    local rider = mountComp.RiderCharacter
+                                    if not rider or rider:GetAddress() ~= player:GetAddress() then return end
+
+                                    local cl = creature:GetClass():GetFName():ToString():lower()
+                                    if cl:find("graphorn") then mountTypeName = "graphorn"
+                                    elseif cl:find("hippogriff") then mountTypeName = "hippogriff"
+                                    elseif cl:find("niffler") then mountTypeName = "niffler"
+                                    elseif cl:find("thestral") then mountTypeName = "thestral"
+                                    else mountTypeName = "creature"
+                                    end
+                                end)
+                                if mountTypeName then break end
+                            end
+                        end)
+                    end
+
+                    -- Commit mount immediately so FPV suspends right away
+                    _G.MountState.mounted = true
+                    _G.MountState.mountType = mountTypeName or "mount"
+                    print("[Sonorus] Mount type: " .. _G.MountState.mountType)
+                    Events.setState("mount", true)
+
+                    -- If type unknown, do a delayed recheck to identify the creature
+                    if not mountTypeName then
+                        ExecuteInGameThreadWithDelay(1000, function()
+                            if not (_G.MountState and _G.MountState.mounted) then return end
+                            pcall(function()
+                                local player = FindFirstOf("Biped_Player")
+                                if not player or not player:IsValid() then return end
+                                local creatures = FindAllOf("Creature_Character")
+                                if not creatures then return end
+                                for _, creature in pairs(creatures) do
+                                    pcall(function()
+                                        if not SafeIsValid(creature) then return end
+                                        local mountComp = creature:GetMountComponent()
+                                        if not mountComp then return end
+                                        local rider = mountComp.RiderCharacter
+                                        if not rider or rider:GetAddress() ~= player:GetAddress() then return end
+                                        local className = creature:GetClass():GetFName():ToString()
+                                        local cl = className:lower()
+                                        local name = "creature"
+                                        if cl:find("graphorn") then name = "graphorn"
+                                        elseif cl:find("hippogriff") then name = "hippogriff"
+                                        elseif cl:find("niffler") then name = "niffler"
+                                        elseif cl:find("thestral") then name = "thestral"
+                                        end
+                                        _G.MountState.mountType = name
+                                        print("[Sonorus] Mount type: " .. name)
+                                    end)
+                                end
+                            end)
+                        end)
+                    end
+                else
+                    -- Dismounting — commit and fire
+                    _G.MountState.mounted = false
+                    -- Note: keep mountType set so mount:end handler can read it
+                    Events.setState("mount", false)
+                end
             end
         end
 
-        -- Cinematic, combat, and stealth state polling every 1 second
+        -- Teleport commitment proximity check every 2 seconds
+        -- Pure Lua distance math + one K2_GetActorLocation; skips if no unplaced teleports
+        _G.UnifiedLoop.lastCommitProximity = _G.UnifiedLoop.lastCommitProximity or 0
+        if (now - _G.UnifiedLoop.lastCommitProximity >= 2.0) then
+            _G.UnifiedLoop.lastCommitProximity = now
+            if _G.CommitmentManager and _G.CommitmentManager.ProximityCheck then
+                pcall(_G.CommitmentManager.ProximityCheck)
+            end
+        end
+
+        -- Combat, stealth, swimming state polling every 1 second
+        -- Note: Cinematic + pause detection lives in the 500ms pause monitor
+        -- (socket_client.lua) so ViewTarget cinematic check always has fresh
+        -- pause state — no race with pause menu ViewTarget swaps.
         _G.UnifiedLoop.lastStateCheck = _G.UnifiedLoop.lastStateCheck or 0
-        if (now - _G.UnifiedLoop.lastStateCheck) >= 1.0 then
+        if (_G.SonorusState.playerLoaded and now - _G.UnifiedLoop.lastStateCheck >= 1.0) then
             _G.UnifiedLoop.lastStateCheck = now
 
-            local inCinematic = false
             local inCombat = false
             local inStealth = false
+            local isSwimming = false
             pcall(function()
                 local staticData = GetStaticCache()
                 local player = staticData.player
-                if player then
-                    inCinematic = player.InCinematic or false
+                if player and player:IsValid() then
                     inCombat = player.bInCombatMode or false
                     inStealth = player.InStealthMode or false
+                    if player.IsSwimming then
+                        isSwimming = player:IsSwimming() or false
+                    end
                 end
             end)
-
-            -- Update states - events fire automatically on change
-            -- Also update legacy _G.*State for compatibility with existing code
-            if Events.setState("cinematic", inCinematic) then
-                _G.CinematicState = _G.CinematicState or {}
-                _G.CinematicState.active = inCinematic
-            end
 
             if Events.setState("combat", inCombat) then
                 _G.CombatState = _G.CombatState or {}
@@ -5524,70 +4810,72 @@ function _G.StartUnifiedLoop(newInterval)
                 _G.StealthState = _G.StealthState or {}
                 _G.StealthState.active = inStealth
             end
+
+            Events.setState("swimming", isSwimming)
         end
 
-        -- Idle detection every 30 seconds (for ambient dialog gating)
-        -- Tracks player position and sets _G.PlayerIdleState if no movement for idle_timeout_minutes
+        -- Idle detection every 30 seconds (for ambient dialog + attention meter gating)
+        -- Tracks camera angle and sets _G.PlayerIdleState if no camera movement for 10 minutes
         _G.UnifiedLoop.lastIdleCheck = _G.UnifiedLoop.lastIdleCheck or 0
-        if (now - _G.UnifiedLoop.lastIdleCheck) >= 30.0 then
+        if (now - _G.UnifiedLoop.lastIdleCheck >= 30.0) then
             _G.UnifiedLoop.lastIdleCheck = now
 
             -- Initialize idle tracking state
             _G.IdleState = _G.IdleState or {
-                lastPos = nil,
+                lastCamYaw = nil,
+                lastCamPitch = nil,
                 lastMovementTime = os.time(),
-                idleTimeoutMinutes = 20,  -- Default, could be made configurable
+                idleTimeoutMinutes = 10,
             }
 
-            -- Get current player position
-            local currentPos = nil
+            -- Get current camera rotation
+            local camYaw, camPitch = nil, nil
             pcall(function()
                 local staticData = GetStaticCache()
-                local player = staticData.player
-                if player and player:IsValid() then
-                    local loc = player:K2_GetActorLocation()
-                    if loc then
-                        currentPos = { x = loc.X, y = loc.Y, z = loc.Z }
+                local cam = staticData.cameraManager
+                if cam then
+                    local rot = cam:GetCameraRotation()
+                    if rot then
+                        camYaw = rot.Yaw
+                        camPitch = rot.Pitch
                     end
                 end
             end)
 
-            if currentPos then
-                -- Check for movement
+            if camYaw and camPitch then
                 local moved = false
-                if _G.IdleState.lastPos then
-                    local dx = currentPos.x - _G.IdleState.lastPos.x
-                    local dy = currentPos.y - _G.IdleState.lastPos.y
-                    local dz = currentPos.z - _G.IdleState.lastPos.z
-                    local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
-                    if dist > 50 then  -- Moved more than 50 units (~0.5m)
+                if _G.IdleState.lastCamYaw then
+                    local dYaw = math.abs(camYaw - _G.IdleState.lastCamYaw)
+                    if dYaw > 180 then dYaw = 360 - dYaw end
+                    local dPitch = math.abs(camPitch - _G.IdleState.lastCamPitch)
+                    if dYaw > 1 or dPitch > 1 then
                         moved = true
                     end
                 else
-                    moved = true  -- First check, consider as movement
+                    moved = true  -- First check
                 end
 
-                _G.IdleState.lastPos = currentPos
+                _G.IdleState.lastCamYaw = camYaw
+                _G.IdleState.lastCamPitch = camPitch
 
                 if moved then
                     _G.IdleState.lastMovementTime = os.time()
                     if _G.PlayerIdleState then
-                        print("[Sonorus] Movement detected - resuming ambient dialog recording")
+                        print("[Sonorus] Camera movement detected - player no longer idle")
                         _G.PlayerIdleState = false
                     end
                 else
-                    -- Check if idle timeout exceeded
                     local idleSeconds = os.time() - _G.IdleState.lastMovementTime
                     local timeoutSeconds = _G.IdleState.idleTimeoutMinutes * 60
                     if timeoutSeconds > 0 and idleSeconds > timeoutSeconds and not _G.PlayerIdleState then
-                        print(string.format("[Sonorus] Player idle for %d minutes - pausing ambient dialog recording", _G.IdleState.idleTimeoutMinutes))
+                        print(string.format("[Sonorus] Player idle for %d minutes (no camera movement) - pausing", _G.IdleState.idleTimeoutMinutes))
                         _G.PlayerIdleState = true
                     end
                 end
             end
         end
 
-        -- Check locked NPCs every 1 second: combat/broom release, angle refresh
+        -- Check locked NPCs every 1 second: combat/mount release, angle refresh
         _G.UnifiedLoop.lastLockCheck = _G.UnifiedLoop.lastLockCheck or 0
         if next(_G.LockedNPCs) and (now - _G.UnifiedLoop.lastLockCheck) >= 1.0 then
             _G.UnifiedLoop.lastLockCheck = now
@@ -5631,6 +4919,13 @@ function _G.StartUnifiedLoop(newInterval)
             end
         end
 
+        -- Attention meter: single camera trace every 1s
+        _G.UnifiedLoop.lastAttentionCheck = _G.UnifiedLoop.lastAttentionCheck or 0
+        if (now - _G.UnifiedLoop.lastAttentionCheck) >= 1.0 then
+            _G.UnifiedLoop.lastAttentionCheck = now
+            pcall(AttentionMeter.Update)
+        end
+
         -- Time dilation: Check for day/night transitions every 5 seconds
         _G.UnifiedLoop.lastTimeDilationCheck = _G.UnifiedLoop.lastTimeDilationCheck or 0
         if TimeDilation and TimeDilation.IsActive() and (now - _G.UnifiedLoop.lastTimeDilationCheck) >= 5.0 then
@@ -5658,24 +4953,6 @@ end
 
 -- Start the unified loop on init
 _G.StartUnifiedLoop()
-
--- ============================================
--- Combat/Spell Event Hooks (TEST)
--- ============================================
--- These hooks capture spell casting, impacts, and combat events
--- Toggle with _G.EnableCombatHooks = true/false
-
-_G.EnableCombatHooks = false  -- Testing combat hooks
-
--- Unregister previous hooks on reload (per CLAUDE.md hot reload pattern)
-local combatHookPaths = {
-    "/Script/Phoenix.SpellTool:OnMunitionImpact",
-    "/Script/Phoenix.SpellTool:OnMunitionImpactDamage",
-    "/Script/Phoenix.SpellTool:OnMunitionDestroyed",
-}
-for _, path in ipairs(combatHookPaths) do
-    pcall(function() UnregisterHook(path) end)
-end
 
 -- Helper to safely get spell name from SpellTool (uses nested pcall per CLAUDE.md)
 local function GetSpellName(spellTool)
@@ -5708,110 +4985,6 @@ local function GetActorName(actor)
     end)
     return name
 end
-
--- ============================================
--- Station Exit Hook (for GracefulStationExit detection)
--- ============================================
-_G.StationExitWatchers = _G.StationExitWatchers or {}
-if not _G.StationExitHookRegistered then
-    local hookOk, hookErr = pcall(function()
-        RegisterHook("/Script/Phoenix.NPC_Character:OnStationOnFinishedExit", function(Context)
-            local actor = Context:get()
-            if not actor then return end
-            local fullName = nil
-            pcall(function() fullName = actor:GetFullName() end)
-            if not fullName then return end
-
-            local watcher = _G.StationExitWatchers[fullName]
-            if watcher then
-                _G.StationExitWatchers[fullName] = nil
-                local elapsed = os.clock() - watcher.startTime
-                print(string.format("[StationExit] HOOK fired: %s (%.1fs)",
-                    fullName:match("([^%.]+)$") or fullName, elapsed))
-                if ShowHint then ShowHint(string.format("EXIT HOOK %.1fs", elapsed), 3) end
-                if watcher.timeoutHandle then
-                    pcall(function() CancelDelayedAction(watcher.timeoutHandle) end)
-                end
-                if watcher.callback then pcall(watcher.callback) end
-            else
-                -- Log ANY exit event for research (even if we're not watching this NPC)
-                print(string.format("[StationExit] HOOK fired (unwatched): %s",
-                    fullName:match("([^%.]+)$") or fullName))
-            end
-        end)
-    end)
-    if hookOk then
-        _G.StationExitHookRegistered = true
-        print("[StationExit] RegisterHook OK")
-    else
-        print("[StationExit] RegisterHook FAILED: " .. tostring(hookErr))
-        _G.StationExitHookRegistered = "failed"
-    end
-end
-
--- ============================================
--- Combat Hooks (TEST)
--- ============================================
-
-RegisterHook("/Script/Phoenix.SpellTool:OnMunitionImpact", function(self, MunitionInstance, MunitionImpactData)
-    if not _G.EnableCombatHooks then return end
-    pcall(function()
-        local spellTool = self:get()
-        local spellName = GetSpellName(spellTool)
-        local munition = MunitionInstance:get()
-
-        -- Dump munition actor properties once for discovery
-        if munition and not _G.MunitionActorDumped then
-            _G.MunitionActorDumped = true
-            print("[Combat] Dumping Munition actor ObjectProperties:")
-            pcall(function()
-                local objClass = munition:GetClass()
-                while objClass and objClass:IsValid() do
-                    local className = nil
-                    pcall(function() className = objClass:GetFName():ToString() end)
-                    if className then print("  === " .. className .. " ===") end
-
-                    objClass:ForEachProperty(function(prop)
-                        local propName = nil
-                        local propType = nil
-                        pcall(function() propName = prop:GetFName():ToString() end)
-                        pcall(function() propType = prop:GetClass():GetFName():ToString() end)
-                        -- Only show ObjectProperty (actors/components)
-                        if propName and propType == "ObjectProperty" then
-                            print(string.format("    %s", propName))
-                        end
-                    end)
-
-                    pcall(function() objClass = objClass:GetSuperStruct() end)
-                end
-            end)
-        end
-
-        -- Try to get target from munition or spell tool
-        local targetName = "unknown"
-
-        -- Try SubsonicProximityActor on munition
-        if munition then
-            pcall(function()
-                if munition.SubsonicProximityActor then
-                    targetName = GetActorName(munition.SubsonicProximityActor)
-                end
-            end)
-        end
-
-        -- Try GetActiveTarget() on SpellTool
-        if targetName == "unknown" and spellTool then
-            pcall(function()
-                local activeTarget = spellTool:GetActiveTarget()
-                if activeTarget then
-                    targetName = GetActorName(activeTarget)
-                end
-            end)
-        end
-
-        print(string.format("[Combat] IMPACT: %s -> %s", spellName, targetName))
-    end)
-end)
 
 -- ============================================
 -- Voice Spell Casting System
@@ -6121,9 +5294,10 @@ function CastSpellByName(internalSpellName)
     end
 
     local capturedName = internalSpellName
-    _G.PendingSpellCastHandle = ExecuteInGameThreadWithDelay(200, function()
+    _G.PendingSpellCastHandle = ExecuteInGameThreadWithDelay(250, function()
         _G.PendingSpellCastHandle = nil
         local castOk, castErr = pcall(function()
+            wandTool:ActivateSpellTool(spellToolRecord, false)
             wandTool:CastActiveSpell()
         end)
         if castOk then

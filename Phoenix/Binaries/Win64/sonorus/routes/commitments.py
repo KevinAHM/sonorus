@@ -14,6 +14,8 @@ from utils.commitments import (
     _add_game_minutes,
     _subtract_game_minutes,
     _inject_commitment_event,
+    _display_with_label,
+    _LOCATION_BY_ID,
 )
 
 commitments_bp = Blueprint('commitments', __name__)
@@ -44,27 +46,90 @@ def _get_game_context():
 # ============================================
 
 # Pre-compute grouped locations for the dropdown
-_COMMON_ROOM_IDS = {"HOG_GryffindorTower", "HOG_HufflepuffBasement", "HOG_Ravenclaw_CommonRoom", "HOG_Slytherin_CommonRoom"}
+_COMMON_ROOM_IDS = {"GryffindorTower", "HufflepuffBasement", "RavenclawCommonRoom", "SlytherinCommonRoom"}
+
+# Hamlet/region mod keys that should group under "Other" rather than "Hogwarts".
+# These have no prefix in the new naming convention.
+_OTHER_LOCATION_IDS = {
+    "Aranshire", "Bainburgh", "Brocburrow", "Cragcroft", "Feldcroft",
+    "Helmsdale", "Irondale", "KeenBridge", "LowerHogsfield", "Marunweem",
+    "UpperHogsfield", "PittUponFord",
+    "CoastArm", "CoastLake", "HogwartsArea", "HogwartsValley",
+    "MouthOfForbiddenForest", "NorthCoast", "NorthSwamp", "SanBakarsTower",
+    "SouthCoast", "SouthSwamp", "WestHogwarts",
+    "Hogsmeade", "HogsmeadeValley", "ForbiddenForest",
+}
+
+
+def _group_location(loc_id):
+    """Assign a location mod key to a UI group."""
+    if loc_id.startswith("HM_"):
+        return "Hogsmeade"
+    if loc_id in _COMMON_ROOM_IDS:
+        return "Common Rooms"
+    if loc_id in _OTHER_LOCATION_IDS:
+        return "Other"
+    return "Hogwarts"
+
 
 def _get_grouped_locations():
-    """Return LOCATION_ACTIVITIES grouped for UI dropdowns."""
+    """Return LOCATION_ACTIVITIES + teleport spots grouped for UI dropdowns.
+    Locations with labeled spots are expanded into separate entries
+    (e.g. "Hogwarts Grounds (Beasts Class)") with id "location_id::label"."""
+    from utils.settings import load_commitment_spots
+    from utils.commitments import _get_registry_display_map
+
     groups = {
         "Hogsmeade": [],
         "Hogwarts": [],
         "Common Rooms": [],
+        "Other": [],
     }
-    for loc_id, entry in LOCATION_ACTIVITIES.items():
-        item = {"id": loc_id, "display": entry["display"]}
-        if loc_id.startswith("HM_"):
-            groups["Hogsmeade"].append(item)
-        elif loc_id in _COMMON_ROOM_IDS:
-            groups["Common Rooms"].append(item)
-        elif loc_id.startswith("HOG_"):
-            groups["Hogwarts"].append(item)
 
-    # Sort within each group
+    display_map = _get_registry_display_map()
+    try:
+        spots = load_commitment_spots()
+    except Exception:
+        spots = {}
+
+    def _add_location(loc_id, display):
+        """Add a location, expanding labeled spots into separate entries."""
+        group = _group_location(loc_id)
+        loc_spots = spots.get(loc_id, [])
+        labels = sorted({s.get("label", "") for s in loc_spots if s.get("label")})
+
+        if labels:
+            # Add each labeled sub-location as its own entry
+            for label in labels:
+                groups[group].append({
+                    "id": f"{loc_id}::{label}",
+                    "display": f"{display} ({label})",
+                })
+            # Also add the generic entry (random spot) if there are unlabeled spots too
+            has_unlabeled = any(not s.get("label") for s in loc_spots)
+            if has_unlabeled:
+                groups[group].append({"id": loc_id, "display": display})
+        else:
+            groups[group].append({"id": loc_id, "display": display})
+
+    # Schedule-based locations
+    seen = set()
+    for loc_id, entry in LOCATION_ACTIVITIES.items():
+        _add_location(loc_id, entry["display"])
+        seen.add(loc_id)
+
+    # Teleport-only locations (from commitment_spots.json)
+    for loc_id in spots:
+        if loc_id in seen:
+            continue
+        display = display_map.get(loc_id, loc_id)
+        _add_location(loc_id, display)
+        seen.add(loc_id)
+
+    # Sort within each group, remove empty groups
     for group in groups.values():
         group.sort(key=lambda x: x["display"])
+    groups = {k: v for k, v in groups.items() if v}
 
     return groups
 
@@ -90,7 +155,7 @@ def get_commitments():
     return jsonify(commitments)
 
 
-@commitments_bp.route('/api/commitments/<commitment_id>', methods=['GET'])
+@commitments_bp.route('/api/commitments/<int:commitment_id>', methods=['GET'])
 def get_commitment(commitment_id):
     """Get a single commitment by ID."""
     commitment = commitments_db.get_commitment(commitment_id)
@@ -107,6 +172,7 @@ def create_commitment():
         npc_id = data.get('npc_id')
         location_id = data.get('location_id')
         game_time_start = data.get('game_time_start')
+        spot_label = data.get('spot_label')
 
         if not all([npc_id, location_id, game_time_start]):
             return jsonify({"error": "Missing required fields: npc_id, location_id, game_time_start"}), 400
@@ -121,6 +187,7 @@ def create_commitment():
             game_context=game_context,
             lua_socket=_lua_socket,
             player_name=player_name,
+            spot_label=spot_label,
         )
 
         if not success:
@@ -134,7 +201,7 @@ def create_commitment():
         return jsonify({"error": str(e)}), 400
 
 
-@commitments_bp.route('/api/commitments/<commitment_id>', methods=['PUT'])
+@commitments_bp.route('/api/commitments/<int:commitment_id>', methods=['PUT'])
 def update_commitment(commitment_id):
     """Modify an existing non-terminal commitment."""
     try:
@@ -149,15 +216,23 @@ def update_commitment(commitment_id):
         # Build update fields
         updates = {}
         location_id = data.get('location_id')
+        spot_label = data.get('spot_label')
         game_time_start = data.get('game_time_start')
 
-        if location_id and location_id != commitment['location_id']:
-            if location_id not in LOCATION_ACTIVITIES:
+        # Parse "LocationKey::label" format from UI dropdown
+        if location_id and '::' in location_id:
+            location_id, spot_label = location_id.split('::', 1)
+
+        if location_id and (location_id != commitment['location_id'] or spot_label):
+            loc_entry = _LOCATION_BY_ID.get(location_id)
+            if not loc_entry:
                 return jsonify({"error": f"Unknown location: {location_id}"}), 400
-            loc_entry = LOCATION_ACTIVITIES[location_id]
-            updates['location_id'] = location_id
-            updates['location_display'] = loc_entry['display']
-            updates['activity_id'] = loc_entry['activity']
+            new_display = _display_with_label(loc_entry['display'], spot_label)
+            if location_id != commitment['location_id']:
+                updates['location_id'] = location_id
+                updates['activity_id'] = loc_entry.get('activity', '')
+            if new_display != commitment['location_display']:
+                updates['location_display'] = new_display
 
         if game_time_start and game_time_start != commitment['game_time_start']:
             updates['game_time_start'] = game_time_start
@@ -185,13 +260,18 @@ def update_commitment(commitment_id):
         if not success:
             return jsonify({"error": "Failed to update commitment"}), 500
 
+        # Store spot label for deferred activation
+        if spot_label:
+            from utils.commitments import _commitment_spot_labels
+            _commitment_spot_labels[commitment_id] = spot_label
+
         # If commitment was active, deactivate old and activate new
         was_active = commitment["status"] in ("active", "arrived")
         if was_active and _lua_socket:
             _lua_socket.send_deactivate_commitment(commitment["npc_id"], commitment["activity_id"])
             new_activity = updates.get('activity_id', commitment['activity_id'])
             new_location = updates.get('location_id', commitment['location_id'])
-            _lua_socket.send_activate_commitment(commitment["npc_id"], new_activity, new_location)
+            _lua_socket.send_activate_commitment(commitment["npc_id"], new_activity, new_location, spot_label)
 
         updated = commitments_db.get_commitment(commitment_id)
         print(f"[Commitments] Updated: {commitment_id}")
@@ -202,7 +282,7 @@ def update_commitment(commitment_id):
         return jsonify({"error": str(e)}), 400
 
 
-@commitments_bp.route('/api/commitments/<commitment_id>', methods=['DELETE'])
+@commitments_bp.route('/api/commitments/<int:commitment_id>', methods=['DELETE'])
 def delete_commitment(commitment_id):
     """Cancel a commitment."""
     try:

@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from datetime import datetime
 
 from .settings import DATA_DIR
+from .llm_utils import LLM_ERROR_FALLBACK
 
 
 # ============================================
@@ -41,6 +42,32 @@ def _parse_game_time(time_str):
             hour += 12
 
     return (hour, minute)
+
+
+def _normalize_history_text(value):
+    """Normalize whitespace so fallback checks survive tabs/newlines."""
+    return " ".join(str(value or "").split())
+
+
+def _should_skip_entry(entry):
+    """Return True for dialogue entries that should never be persisted."""
+    if not isinstance(entry, dict):
+        return False
+
+    fallback_text = _normalize_history_text(LLM_ERROR_FALLBACK)
+    entry_text = _normalize_history_text(entry.get("text"))
+    if not entry_text:
+        return False
+
+    if entry_text == fallback_text:
+        return True
+
+    for key in ("speaker", "voiceName"):
+        prefix = _normalize_history_text(entry.get(key))
+        if prefix and entry_text == f"{prefix} {fallback_text}":
+            return True
+
+    return False
 
 
 _MONTH_NAMES_DB = {
@@ -376,18 +403,21 @@ def _backup_db(reason="backup"):
 # Thread-local storage for connections
 _local = threading.local()
 
+# Track all connections for shutdown cleanup
+_all_connections = []
+_all_connections_lock = threading.Lock()
+
 # Lock for initialization to prevent race conditions during migration
 _init_lock = threading.Lock()
 _initialized = False
 
 # Current schema version - increment when making schema changes
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _ensure_data_dir():
     """Ensure the data directory exists."""
-    if not os.path.exists(DATA_DIR):
-        os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 
 def _create_connection():
@@ -398,6 +428,8 @@ def _create_connection():
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=30000")  # 30 second timeout for locks
     conn.row_factory = sqlite3.Row
+    with _all_connections_lock:
+        _all_connections.append(conn)
     return conn
 
 
@@ -448,8 +480,42 @@ def get_connection():
 def close_connection():
     """Close thread-local connection (call on thread shutdown if needed)."""
     if hasattr(_local, 'conn') and _local.conn:
-        _local.conn.close()
+        with _all_connections_lock:
+            try:
+                _all_connections.remove(_local.conn)
+            except ValueError:
+                pass
+        try:
+            _local.conn.close()
+        except Exception:
+            pass
         _local.conn = None
+
+
+def close_all():
+    """Close all connections across all threads, checkpoint WAL, reset state."""
+    global _initialized
+    with _all_connections_lock:
+        for conn in _all_connections:
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception:
+                pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+        _all_connections.clear()
+    if hasattr(_local, 'conn'):
+        _local.conn = None
+    _initialized = False
+
+
+def reinit(data_dir):
+    """Re-initialize with a new data directory."""
+    global DB_PATH
+    DB_PATH = os.path.join(data_dir, "dialogue_history.db")
+    init_db()
 
 
 def _get_schema_version(conn):
@@ -507,6 +573,7 @@ def _run_migrations(conn, from_version):
                     speaker TEXT,
                     voice_name TEXT,
                     target TEXT,
+                    target_id TEXT,
                     text TEXT,
                     is_player INTEGER DEFAULT 0,
                     is_ai_response INTEGER DEFAULT 0,
@@ -527,6 +594,7 @@ def _run_migrations(conn, from_version):
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_voice_name ON dialogue_entries(voice_name)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_target_id ON dialogue_entries(target_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON dialogue_entries(timestamp)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_type ON dialogue_entries(entry_type)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_is_player ON dialogue_entries(is_player)")
@@ -540,6 +608,17 @@ def _run_migrations(conn, from_version):
                 if "duplicate column name" not in str(e).lower():
                     raise
             current = 2
+
+        elif current == 2:
+            try:
+                conn.execute("ALTER TABLE dialogue_entries ADD COLUMN target_id TEXT")
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    raise
+
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_target_id ON dialogue_entries(target_id)")
+            _backfill_target_ids(conn)
+            current = 3
 
         else:
             # Unknown version - can't migrate
@@ -570,13 +649,17 @@ def init_db():
         try:
             with get_connection() as conn:
                 current_version = _get_schema_version(conn)
+                schema_changed = False
 
                 if current_version < SCHEMA_VERSION:
                     _backup_db("schema_migration")
                     print(f"[DialogueDB] Migrating schema from v{current_version} to v{SCHEMA_VERSION}")
-                    _run_migrations(conn, current_version)
-                    conn.commit()
+                    schema_changed = _run_migrations(conn, current_version)
                     print(f"[DialogueDB] Schema migration complete")
+
+                target_repairs = _backfill_target_ids(conn)
+                if schema_changed or target_repairs:
+                    conn.commit()
 
             # Auto-migrate from JSON if it exists and DB is empty
             _maybe_migrate_from_json()
@@ -640,6 +723,7 @@ def _maybe_migrate_from_json():
     # Step 4 & 5: Insert entries, filtering out insignificant NPCs
     migrated = 0
     skipped = 0
+    fallback_skipped = 0
     with get_connection() as conn:
         for entry in history:
             if not isinstance(entry, dict):
@@ -660,71 +744,187 @@ def _maybe_migrate_from_json():
             if earshot and isinstance(earshot, list):
                 entry['earshot'] = [npc for npc in earshot if is_significant_npc(npc)]
 
-            _insert_entry(conn, entry)
-            migrated += 1
+            if _insert_entry(conn, entry):
+                migrated += 1
+            else:
+                fallback_skipped += 1
         conn.commit()
 
     # Rename JSON as backup
     backup_path = JSON_PATH + ".migrated"
     try:
         os.rename(JSON_PATH, backup_path)
-        print(f"[DialogueDB] Migrated {migrated} entries from JSON ({skipped} insignificant skipped). Backup: {backup_path}")
+        print(
+            f"[DialogueDB] Migrated {migrated} entries from JSON "
+            f"({skipped} insignificant skipped, {fallback_skipped} fallback skipped). "
+            f"Backup: {backup_path}"
+        )
     except Exception as e:
         print(f"[DialogueDB] Migration complete but failed to rename JSON: {e}")
 
 
 def _insert_entry(conn, entry):
     """Insert a single entry dict into the database."""
-    # Handle earshot array - store as JSON string
-    earshot = entry.get('earshot')
-    if isinstance(earshot, list):
-        earshot = json.dumps(earshot)
-    elif earshot is None:
-        earshot = None  # Keep as NULL
-    # else: already a string (from previous serialization)
+    prepared = _prepare_entry_db_fields(entry)
+    if prepared is None:
+        return False
 
-    # Handle companions array - store as JSON string
-    companions = entry.get('companions')
-    if isinstance(companions, list):
-        companions = json.dumps(companions)
-    elif companions is None:
-        companions = None
-    # else: already a string
-
-    conn.execute("""
+    cursor = conn.execute("""
         INSERT INTO dialogue_entries (
-            timestamp, game_time, game_date, speaker, voice_name, target, text,
+            timestamp, game_time, game_date, speaker, voice_name, target, target_id, text,
             is_player, is_ai_response, entry_type, earshot, line_id, location,
             duration, spell_category, count,
             first_game_time, first_game_date, first_timestamp,
             last_game_time, last_game_date, last_timestamp,
             companions
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
-        entry.get('timestamp', 0),
-        entry.get('gameTime'),
-        entry.get('gameDate'),
-        entry.get('speaker'),
-        entry.get('voiceName'),
-        entry.get('target'),
-        entry.get('text'),
-        1 if entry.get('isPlayer') else 0,
-        1 if entry.get('isAIResponse') else 0,
-        entry.get('type', 'dialogue'),
-        earshot,
-        entry.get('lineID'),
-        entry.get('location'),
-        entry.get('duration'),
-        entry.get('spellCategory'),
-        entry.get('count', 1),
-        entry.get('firstGameTime'),
-        entry.get('firstGameDate'),
-        entry.get('firstTimestamp'),
-        entry.get('lastGameTime'),
-        entry.get('lastGameDate'),
-        entry.get('lastTimestamp'),
-        companions,
+        prepared['timestamp'],
+        prepared['game_time'],
+        prepared['game_date'],
+        prepared['speaker'],
+        prepared['voice_name'],
+        prepared['target'],
+        prepared['target_id'],
+        prepared['text'],
+        prepared['is_player'],
+        prepared['is_ai_response'],
+        prepared['entry_type'],
+        prepared['earshot'],
+        prepared['line_id'],
+        prepared['location'],
+        prepared['duration'],
+        prepared['spell_category'],
+        prepared['count'],
+        prepared['first_game_time'],
+        prepared['first_game_date'],
+        prepared['first_timestamp'],
+        prepared['last_game_time'],
+        prepared['last_game_date'],
+        prepared['last_timestamp'],
+        prepared['companions'],
     ))
+    row_id = cursor.lastrowid
+    if isinstance(entry, dict):
+        entry['targetId'] = prepared['target_id']
+        if row_id:
+            entry['sourceEntryIds'] = [row_id]
+    return row_id or True
+
+
+def _canonicalize_target_id(target_id):
+    """Normalize stored target IDs to the canonical casing used by dialogue history."""
+    if target_id is None:
+        return None
+
+    from .localization import canonicalize_npc_id
+    return canonicalize_npc_id(target_id)
+
+
+def _derive_target_id(entry):
+    """Derive a canonical target_id for storage when an entry does not provide one."""
+    if not isinstance(entry, dict):
+        return None
+
+    if 'targetId' in entry:
+        return _canonicalize_target_id(entry.get('targetId'))
+
+    target = entry.get('target')
+    if target is None:
+        return None
+
+    target = str(target).strip()
+    if not target:
+        return None
+    if target.lower() == "unknown":
+        return "Unknown"
+
+    from .localization import strict_id_from_name
+
+    resolved = strict_id_from_name(target)
+    if resolved:
+        return _canonicalize_target_id(resolved)
+
+    voice_name = str(entry.get('voiceName') or '').strip()
+    if voice_name.lower() == "player":
+        return None
+
+    return "Player"
+
+
+def _backfill_target_ids(conn):
+    """Populate target_id for existing rows using strict reverse localization rules."""
+    rows = conn.execute("""
+        SELECT id, target, voice_name, target_id
+        FROM dialogue_entries
+        ORDER BY id ASC
+    """).fetchall()
+
+    updates = []
+    for row in rows:
+        current_target_id = row['target_id'] if 'target_id' in row.keys() else None
+        entry = {
+            'target': row['target'],
+            'voiceName': row['voice_name'],
+        }
+        derived_target_id = _derive_target_id(entry)
+
+        if _canonicalize_target_id(current_target_id) != derived_target_id:
+            updates.append((derived_target_id, row['id']))
+
+    if updates:
+        conn.executemany(
+            "UPDATE dialogue_entries SET target_id = ? WHERE id = ?",
+            updates,
+        )
+        print(f"[DialogueDB] Backfilled target_id for {len(updates)} dialogue rows")
+    return len(updates)
+
+
+def _prepare_entry_db_fields(entry):
+    """Normalize an entry dict for INSERT/UPDATE statements."""
+    if _should_skip_entry(entry):
+        print("[DialogueDB] Skipping LLM fallback entry in dialogue history")
+        return None
+
+    earshot = entry.get('earshot')
+    if isinstance(earshot, list):
+        earshot = json.dumps(earshot)
+    elif earshot is None:
+        earshot = None
+
+    companions = entry.get('companions')
+    if isinstance(companions, list):
+        companions = json.dumps(companions)
+    elif companions is None:
+        companions = None
+
+    return {
+        'timestamp': entry.get('timestamp', 0),
+        'game_time': entry.get('gameTime'),
+        'game_date': entry.get('gameDate'),
+        'speaker': entry.get('speaker'),
+        'voice_name': entry.get('voiceName'),
+        'target': entry.get('target'),
+        'target_id': _derive_target_id(entry),
+        'text': entry.get('text'),
+        'is_player': 1 if entry.get('isPlayer') else 0,
+        'is_ai_response': 1 if entry.get('isAIResponse') else 0,
+        'entry_type': entry.get('type', 'dialogue'),
+        'earshot': earshot,
+        'line_id': entry.get('lineID'),
+        'location': entry.get('location'),
+        'duration': entry.get('duration'),
+        'spell_category': entry.get('spellCategory'),
+        'count': entry.get('count', 1),
+        'first_game_time': entry.get('firstGameTime'),
+        'first_game_date': entry.get('firstGameDate'),
+        'first_timestamp': entry.get('firstTimestamp'),
+        'last_game_time': entry.get('lastGameTime'),
+        'last_game_date': entry.get('lastGameDate'),
+        'last_timestamp': entry.get('lastTimestamp'),
+        'companions': companions,
+    }
 
 
 def _row_to_dict(row):
@@ -740,12 +940,14 @@ def _row_to_dict(row):
         earshot = []
 
     entry = {
+        'sourceEntryIds': [row['id']],
         'timestamp': row['timestamp'] or 0,  # Ensure never None
         'gameTime': row['game_time'],
         'gameDate': row['game_date'],
         'speaker': row['speaker'],
         'voiceName': row['voice_name'],
         'target': row['target'],
+        'targetId': _canonicalize_target_id(row['target_id']) if 'target_id' in row.keys() else None,
         'text': row['text'],
         'isPlayer': bool(row['is_player']),
         'isAIResponse': bool(row['is_ai_response']),
@@ -793,14 +995,20 @@ def _row_to_dict(row):
 def _ensure_initialized():
     """Ensure database is initialized before operations."""
     if not _initialized:
+        from . import player_context
+        if not player_context.is_ready():
+            return
         init_db()
 
 
-def load_all_entries():
+def _load_all_entries_impl(repair_on_read=True):
     """
     Load all dialogue entries from database as list of dicts.
     Returns entries in chronological order (oldest first).
-    Backfills missing gameDate/gameTime from nearby entries and persists fixes.
+
+    When repair_on_read is enabled, legacy game date/time repairs are applied and
+    persisted. Fast UI listing paths should disable this to avoid doing write
+    work during normal reads.
     """
     _ensure_initialized()
     try:
@@ -814,6 +1022,9 @@ def load_all_entries():
         for row in rows:
             entries.append(_row_to_dict(row))
             ids.append(row['id'])
+
+        if not repair_on_read:
+            return entries
 
         # Check if any entries need backfilling
         missing = sum(1 for e in entries if not e.get('gameDate'))
@@ -879,6 +1090,23 @@ def load_all_entries():
         return []
 
 
+def load_all_entries():
+    """
+    Load all dialogue entries from database as list of dicts.
+    Returns entries in chronological order (oldest first).
+    Backfills missing gameDate/gameTime from nearby entries and persists fixes.
+    """
+    return _load_all_entries_impl(repair_on_read=True)
+
+
+def load_all_entries_fast():
+    """
+    Load all dialogue entries from database without mutation-on-read repairs.
+    Intended for hot UI listing paths that should remain read-only.
+    """
+    return _load_all_entries_impl(repair_on_read=False)
+
+
 def append_entry(entry):
     """
     Append a single entry to the database.
@@ -887,10 +1115,12 @@ def append_entry(entry):
     _ensure_initialized()
     try:
         with get_connection() as conn:
-            _insert_entry(conn, entry)
+            inserted = _insert_entry(conn, entry)
             conn.commit()
+            return inserted
     except Exception as e:
         print(f"[DialogueDB] Error appending entry: {e}")
+        return False
 
 
 def replace_all_entries(history):
@@ -938,6 +1168,85 @@ def get_last_entry():
         return None
 
 
+def get_latest_recorded_game_time_candidates(limit=5, min_minutes=0):
+    """Return top dialogue rows contributing the latest recorded game times."""
+    _ensure_initialized()
+    candidates = []
+
+    try:
+        with get_connection() as conn:
+            rows = conn.execute("""
+                SELECT
+                    id, timestamp, speaker, voice_name, text, entry_type, line_id, location, count,
+                    game_date, game_time,
+                    first_game_date, first_game_time,
+                    last_game_date, last_game_time
+                FROM dialogue_entries
+                WHERE (game_date IS NOT NULL AND game_date != '' AND game_time IS NOT NULL AND game_time != '')
+                   OR (first_game_date IS NOT NULL AND first_game_date != '' AND first_game_time IS NOT NULL AND first_game_time != '')
+                   OR (last_game_date IS NOT NULL AND last_game_date != '' AND last_game_time IS NOT NULL AND last_game_time != '')
+            """).fetchall()
+
+        for row in rows:
+            # Legacy commitment-creation rows were incorrectly stamped with the
+            # scheduled meeting time instead of the time the commitment was made.
+            # Skip them for out-of-sync detection so old bad rows do not keep
+            # generating false future-history warnings.
+            text_lower = (row["text"] or "").strip().lower()
+            if row["entry_type"] == "commitment" and " arranged to meet " in f" {text_lower} ":
+                continue
+
+            for source_label, date_key, time_key in (
+                ("game", "game_date", "game_time"),
+                ("first", "first_game_date", "first_game_time"),
+                ("last", "last_game_date", "last_game_time"),
+            ):
+                game_date_raw = row[date_key] or ""
+                game_time_raw = row[time_key] or ""
+                game_date = _parse_game_date(game_date_raw)
+                game_time = _parse_game_time(game_time_raw)
+                if game_date is None or game_time is None:
+                    continue
+
+                total_minutes = _game_datetime_to_minutes(game_date, game_time)
+                if total_minutes < min_minutes:
+                    continue
+
+                text = (row["text"] or "").strip()
+                if len(text) > 120:
+                    text = text[:117] + "..."
+
+                candidates.append({
+                    "minutes": total_minutes,
+                    "id": row["id"],
+                    "timestamp": row["timestamp"],
+                    "source": source_label,
+                    "gameDate": _format_game_date(*game_date),
+                    "gameTime": _format_game_time(*game_time),
+                    "type": row["entry_type"] or "dialogue",
+                    "speaker": row["speaker"] or "",
+                    "voiceName": row["voice_name"] or "",
+                    "lineID": row["line_id"] or "",
+                    "location": row["location"] or "",
+                    "count": row["count"] or 1,
+                    "text": text,
+                })
+
+        candidates.sort(key=lambda c: (c["minutes"], c["id"]), reverse=True)
+        return candidates[:limit]
+    except Exception as e:
+        print(f"[DialogueDB] Error getting latest recorded game time candidates: {e}")
+        return []
+
+
+def get_latest_recorded_game_minutes():
+    """Return the latest stored game minute across dialogue history, or 0."""
+    candidates = get_latest_recorded_game_time_candidates(limit=1)
+    if not candidates:
+        return 0
+    return int(candidates[0]["minutes"] or 0)
+
+
 def delete_entries_by_voice(voice_name):
     """Delete all entries for a specific NPC voice."""
     _ensure_initialized()
@@ -974,6 +1283,77 @@ def delete_entries_by_ids(entry_ids):
     except Exception as e:
         print(f"[DialogueDB] Error deleting entries by IDs: {e}")
         return 0
+
+
+def get_entries_by_ids(entry_ids):
+    """Load specific dialogue entries by their database IDs."""
+    if not entry_ids:
+        return []
+    _ensure_initialized()
+    try:
+        with get_connection() as conn:
+            placeholders = ','.join('?' * len(entry_ids))
+            rows = conn.execute(
+                f"SELECT * FROM dialogue_entries WHERE id IN ({placeholders}) ORDER BY timestamp ASC, id ASC",
+                tuple(entry_ids)
+            ).fetchall()
+        return [_row_to_dict(row) for row in rows]
+    except Exception as e:
+        print(f"[DialogueDB] Error loading entries by IDs: {e}")
+        return []
+
+
+def update_entry_by_id(entry_id, entry):
+    """Update a specific dialogue entry in place by its database ID."""
+    if not entry_id:
+        return False
+    _ensure_initialized()
+    try:
+        prepared = _prepare_entry_db_fields(entry)
+        if prepared is None:
+            return False
+
+        with get_connection() as conn:
+            cursor = conn.execute("""
+                UPDATE dialogue_entries
+                SET timestamp = ?, game_time = ?, game_date = ?, speaker = ?, voice_name = ?,
+                    target = ?, target_id = ?, text = ?, is_player = ?, is_ai_response = ?, entry_type = ?,
+                    earshot = ?, line_id = ?, location = ?, duration = ?, spell_category = ?,
+                    count = ?, first_game_time = ?, first_game_date = ?, first_timestamp = ?,
+                    last_game_time = ?, last_game_date = ?, last_timestamp = ?, companions = ?
+                WHERE id = ?
+            """, (
+                prepared['timestamp'],
+                prepared['game_time'],
+                prepared['game_date'],
+                prepared['speaker'],
+                prepared['voice_name'],
+                prepared['target'],
+                prepared['target_id'],
+                prepared['text'],
+                prepared['is_player'],
+                prepared['is_ai_response'],
+                prepared['entry_type'],
+                prepared['earshot'],
+                prepared['line_id'],
+                prepared['location'],
+                prepared['duration'],
+                prepared['spell_category'],
+                prepared['count'],
+                prepared['first_game_time'],
+                prepared['first_game_date'],
+                prepared['first_timestamp'],
+                prepared['last_game_time'],
+                prepared['last_game_date'],
+                prepared['last_timestamp'],
+                prepared['companions'],
+                entry_id,
+            ))
+            conn.commit()
+            return cursor.rowcount > 0
+    except Exception as e:
+        print(f"[DialogueDB] Error updating entry {entry_id}: {e}")
+        return False
 
 
 def get_entries_for_npc(voice_name, limit=None):
@@ -1016,6 +1396,35 @@ def get_recent_entries(limit=100):
         return []
 
 
+def get_recent_meaningful_npcs():
+    """Get distinct NPC voice names from meaningful dialogue entries, ordered by most recent.
+
+    Meaningful: AI dialogue, cutscene, combat, commitment.
+    Excludes: ambient chatter, spells, location, broom, mount, prompt.
+    Returns list of voice_name strings.
+    """
+    _ensure_initialized()
+    try:
+        with get_connection() as conn:
+            rows = conn.execute("""
+                SELECT voice_name, MAX(id) as last_id
+                FROM dialogue_entries
+                WHERE voice_name IS NOT NULL
+                  AND voice_name != ''
+                  AND is_player = 0
+                  AND (
+                    (entry_type = 'dialogue' AND is_ai_response = 1)
+                    OR entry_type IN ('cutscene', 'combat', 'commitment')
+                  )
+                GROUP BY voice_name
+                ORDER BY last_id DESC
+            """).fetchall()
+        return [row['voice_name'] for row in rows]
+    except Exception as e:
+        print(f"[DialogueDB] Error getting recent meaningful NPCs: {e}")
+        return []
+
+
 def get_entry_count():
     """Get total number of entries in database."""
     _ensure_initialized()
@@ -1033,8 +1442,25 @@ def export_to_json():
 
 
 def import_from_json(history):
-    """Import entries from JSON format (for import API)."""
-    replace_all_entries(history)
+    """Import entries from JSON format, merging without rewriting row IDs."""
+    if not isinstance(history, list):
+        return
+
+    existing = load_all_entries()
+    existing_sigs = {
+        (entry.get('timestamp', 0), entry.get('voiceName', ''), entry.get('text', ''))
+        for entry in existing
+    }
+
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        sig = (entry.get('timestamp', 0), entry.get('voiceName', ''), entry.get('text', ''))
+        if sig in existing_sigs:
+            continue
+        if not append_entry(entry):
+            continue
+        existing_sigs.add(sig)
 
 
 def get_db_info():
@@ -1055,3 +1481,10 @@ def get_db_info():
         }
     except Exception as e:
         return {"error": str(e)}
+
+
+try:
+    from . import player_context
+    player_context.register("dialogue_db", close_all, reinit)
+except ImportError:
+    pass

@@ -1,0 +1,95 @@
+{
+  "_comment": "Teacher class schedules derived from ModEdits.sql + PhoenixShipData.sqlite. Times in HH:mm 24h format.",
+
+  "shared_periods": {
+    "breakfast":    { "start": "08:00", "end": "09:59", "days": "weekdays", "label": "Breakfast" },
+    "free_morning": { "start": "06:00", "end": "07:59", "days": "weekdays", "label": "Free time" },
+    "free_mid":     { "start": "10:00", "end": "11:59", "days": "weekdays", "label": "Free time" },
+    "free_afternoon": { "start": "14:00", "end": "15:59", "days": "weekdays", "label": "Free time" },
+    "free_evening": { "start": "18:00", "end": "18:59", "days": "weekdays", "label": "Free time" },
+    "dinner":       { "start": "19:00", "end": "20:29", "days": "weekdays", "label": "Dinner" },
+    "free_night":   { "start": "20:30", "end": "21:59", "days": "weekdays", "label": "Free time" },
+    "after_hours":  { "start": "22:00", "end": "05:59", "days": "weekdays", "label": "After hours" },
+    "weekend":      { "start": "06:00", "end": "21:59", "days": "weekend",  "label": "Weekend free time" },
+    "weekend_night": { "start": "22:00", "end": "05:59", "days": "weekend", "label": "After hours" }
+  },
+
+  "class_blocks": {
+    "block_1": { "start": "12:00", "end": "13:59", "label": "Class block 1" },
+    "block_2": { "start": "16:00", "end": "17:59", "label": "Class block 2" },
+    "astronomy": { "start": "21:00", "end": "22:00", "label": "Astronomy (evening)" }
+  },
+
+  "teachers": {
+    "AbrahamRonen": {
+      "subject": "Charms",
+      "classes": [
+        { "day": "Monday",   "start": "12:00", "end": "13:59", "houses": ["Gryffindor", "Slytherin"] },
+        { "day": "Thursday", "start": "16:00", "end": "17:59", "houses": ["Hufflepuff", "Ravenclaw"] }
+      ]
+    },
+    "AesopSharp": {
+      "subject": "Potions",
+      "classes": [
+        { "day": "Tuesday",  "start": "12:00", "end": "13:59", "houses": ["Ravenclaw", "Slytherin"] },
+        { "day": "Thursday", "start": "12:00", "end": "13:59", "houses": ["Gryffindor", "Hufflepuff"] }
+      ]
+    },
+    "BaiHowin": {
+      "subject": "Beasts",
+      "classes": [
+        { "day": "Monday", "start": "16:00", "end": "17:59", "houses": ["Gryffindor", "Ravenclaw"] },
+        { "day": "Friday", "start": "12:00", "end": "13:59", "houses": ["Hufflepuff", "Slytherin"] }
+      ]
+    },
+    "ChiyoKogawa": {
+      "subject": "Flying",
+      "classes": [
+        { "day": "Wednesday", "start": "16:00", "end": "17:59", "houses": ["Ravenclaw", "Slytherin"] },
+        { "day": "Friday",    "start": "16:00", "end": "17:59", "houses": ["Gryffindor", "Hufflepuff"] }
+      ]
+    },
+    "CuthbertBinns": {
+      "subject": "History of Magic",
+      "classes": [
+        { "day": "Tuesday", "start": "16:00", "end": "17:59", "houses": ["Hufflepuff", "Slytherin"] },
+        { "day": "Friday",  "start": "12:00", "end": "13:59", "houses": ["Gryffindor", "Ravenclaw"] }
+      ]
+    },
+    "DinahHecat": {
+      "subject": "Defence Against the Dark Arts",
+      "classes": [
+        { "day": "Monday",    "start": "12:00", "end": "13:59", "houses": ["Hufflepuff", "Ravenclaw"] },
+        { "day": "Wednesday", "start": "12:00", "end": "13:59", "houses": ["Gryffindor", "Slytherin"] }
+      ]
+    },
+    "MatildaWeasley": {
+      "subject": "Transfiguration",
+      "classes": [
+        { "day": "Tuesday",  "start": "12:00", "end": "13:59", "houses": ["Gryffindor", "Hufflepuff"] },
+        { "day": "Thursday", "start": "12:00", "end": "13:59", "houses": ["Ravenclaw", "Slytherin"] }
+      ]
+    },
+    "MirabelGarlick": {
+      "subject": "Herbology",
+      "classes": [
+        { "day": "Monday",  "start": "16:00", "end": "17:59", "houses": ["Hufflepuff", "Slytherin"] },
+        { "day": "Tuesday", "start": "16:00", "end": "17:59", "houses": ["Gryffindor", "Ravenclaw"] }
+      ]
+    },
+    "MudiwaOnai": {
+      "subject": "Divination",
+      "classes": [
+        { "day": "Wednesday", "start": "12:00", "end": "13:59", "houses": ["Hufflepuff", "Ravenclaw"] },
+        { "day": "Thursday",  "start": "16:00", "end": "17:59", "houses": ["Gryffindor", "Slytherin"] }
+      ]
+    },
+    "SatyavatiShah": {
+      "subject": "Astronomy",
+      "classes": [
+        { "day": "Wednesday", "start": "21:00", "end": "22:00", "houses": ["Gryffindor", "Hufflepuff"] },
+        { "day": "Friday",    "start": "21:00", "end": "22:00", "houses": ["Ravenclaw", "Slytherin"] }
+      ]
+    }
+  }
+}

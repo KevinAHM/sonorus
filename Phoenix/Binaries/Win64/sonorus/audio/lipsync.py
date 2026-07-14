@@ -234,7 +234,7 @@ def amplitude_visemes_for_audio(pcm_data: bytes, sample_rate: int = 44100,
                 jaw = 0.0
             else:
                 linear = min(1.0, (rms - 0.02) * 2.0)
-                jaw = np.log1p(linear * 4.0) / np.log1p(4.0) * 0.5  # log compression + 50% cap
+                jaw = np.log1p(linear * 4.0) / np.log1p(4.0) * 0.45  # log compression + 45% cap
 
             visemes.append({
                 't': round(float(i / sample_rate), 3),  # Ensure native float

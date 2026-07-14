@@ -12,6 +12,7 @@ const LANGUAGE_OPTIONS = [
     { value: "KO_KR", label: "Korean" },
     { value: "ZH_CN", label: "Chinese (Simplified)" }
 ];
+const UNDUBBED_LANGUAGE_VALUES = new Set(["AR_AE", "PL_PL", "RU_RU", "KO_KR", "ZH_CN", "ZH_TW"]);
 
 function validateInworldApiKey(value) {
     if (!value || value === '********') return null;
@@ -28,32 +29,31 @@ const TTS_PROVIDERS = {
         fields: []
     },
     inworld: {
-        label: "Inworld AI (Recommended)",
-        description: `New to Inworld? <a href="https://inworld.ai/signup?ref=7HQNN63N" target="_blank">Sign up with our link</a> to get $2 free credit (~3 hours of audio)! Then <a href="https://platform.inworld.ai" target="_blank">get your API key</a> from the Inworld Platform.<br>
-                    <b>\u26a0\ufe0f You must select "Write" access when creating your key (not "Read")</b>.`,
+        label: "\ud83c\udfc6 Inworld AI (Recommended)",
+        description: `New to Inworld? <a href="https://inworld.ai/signup?ref=7HQNN63N" target="_blank">Sign up with our link</a> to get $2 free credit (~40 minutes of audio) and $10 credit if you subscribe to a plan! Then <a href="https://platform.inworld.ai" target="_blank">get your API key</a> from the Inworld Platform.<br>
+                    <b>\u26a0\ufe0f You must select "Write" access when creating your key (not "Read")</b>.<br>
+                    \ud83d\udca1 Pay-as-you-go (free) supports up to 100 total voice clones. When the limit is reached, the oldest unused clone is automatically deleted to make room.`,
         fields: [
-            { id: "api_url", type: "text", label: "API URL", placeholder: "https://api.inworld.ai", default: "https://api.inworld.ai", hint: "Base URL for the Inworld API (leave default unless using a proxy)" },
-            { id: "workspace_id", type: "text", label: "Workspace ID", placeholder: "default-xxxxx", hint: "Find this in the API Keys section (bottom left of sidebar) in the Inworld console" },
+            { id: "api_url", type: "text", label: "API URL", placeholder: "https://api.inworld.ai", default: "https://api.inworld.ai", hint: "Base URL for the Inworld API (leave default unless using a proxy)", simple_hide: true },
             { id: "api_key", type: "password", label: "API Key", placeholder: "Base64 encoded key", hint: "Use Basic (Base64) key, not JWT — <strong>\u26a0\ufe0f select \"Write\" access when creating (not \"Read\")</strong>", validate: validateInworldApiKey },
             { id: "model", type: "text", label: "TTS Model", placeholder: "inworld-tts-1.5-max", default: "inworld-tts-1.5-max", hint: "<strong>inworld-tts-1.5-max</strong> (highest quality, recommended), <strong>inworld-tts-1.5-mini</strong> (cheaper and slightly faster)", onChange: "onInworldModelChange" },
-            { id: "temperature", type: "range", label: "TTS Temperature", hint: "Higher = more expressive but can cause instability/artifacts. Default is tuned for balance. For per-NPC adjustments, use <a href=\"#chapterCharacters\" onclick=\"scrollToSection('chapterCharacters')\">Characters</a>.", min: 0.1, max: 2.0, step: 0.1, default: 1.1 },
+            { id: "temperature", type: "range", label: "TTS Temperature", hint: "Higher = more expressive but can cause instability/artifacts. Default is tuned for balance. For per-NPC adjustments, use <a href=\"#chapterCharacters\" onclick=\"scrollToSection('chapterCharacters')\">Characters</a>.", min: 0.1, max: 2.0, step: 0.1, default: 1.1, simple_hide: true },
             {
                 id: "sample_rate", type: "select", label: "Sample Rate", options: [
                     { value: 22050, label: "22050 Hz" },
                     { value: 24000, label: "24000 Hz" },
                     { value: 44100, label: "44100 Hz" },
                     { value: 48000, label: "48000 Hz" }
-                ], default: 48000
+                ], default: 48000, simple_hide: true
             },
-            { id: "localize_audio_tags", type: "toggle", label: "Localize Audio Tags", hint: "Translate [sigh], [laugh] etc. to language-specific equivalents for non-English languages. Disable if tags aren't being spoken correctly.", default: true },
-            { id: "emotion_delivery", type: "toggle", label: "Emotion & Delivery Control", hint: "Experimental. TTS 1.5+ models only. Enables emotion/delivery style tags like [happy], [whispering] in the AI prompt.", default: false }
+            { id: "localize_audio_tags", type: "toggle", label: "Localize Audio Tags", hint: "Translate [sigh], [laugh] etc. to language-specific equivalents for non-English languages. Disable if tags aren't being spoken correctly.", default: true, simple_hide: true }
         ]
     },
     elevenlabs: {
-        label: "ElevenLabs",
+        label: "\ud83e\udd48 ElevenLabs",
         description: "Pro plan recommended for optimal experience. Lower plans have reduced audio quality and fewer cloned voices (Free: 3, Starter: 10, Creator: 30, Pro: 100+). When voice limit is reached, least recently used clones are auto-deleted. Monthly voice clone operations: Free 55, Starter 65, Creator 95, Pro 290.",
         fields: [
-            { id: "api_url", type: "text", label: "API URL", placeholder: "https://api.elevenlabs.io", default: "https://api.elevenlabs.io", hint: "Base URL for the ElevenLabs API (leave default unless using a proxy)" },
+            { id: "api_url", type: "text", label: "API URL", placeholder: "https://api.elevenlabs.io", default: "https://api.elevenlabs.io", hint: "Base URL for the ElevenLabs API (leave default unless using a proxy)", simple_hide: true },
             { id: "api_key", type: "password", label: "API Key", placeholder: "xi-xxxxxxxx", hint: "Make sure your API key has Read + Write access" },
             {
                 id: "plan", type: "select", label: "Plan", hint: "Determines max audio quality and voice slots", options: [
@@ -66,46 +66,115 @@ const TTS_PROVIDERS = {
                 ], default: "creator", onChange: "updateElevenLabsQuality"
             },
             { id: "model", type: "text", label: "Model", placeholder: "eleven_v3", default: "eleven_v3" },
-            { id: "stability", type: "range", label: "Stability", hint: "Higher = more consistent, Lower = more expressive", min: 0, max: 1, step: 0.05, default: 0.5 },
-            { id: "similarity_boost", type: "range", label: "Clarity + Similarity", min: 0, max: 1, step: 0.05, default: 0.75 },
+            { id: "stability", type: "range", label: "Stability", hint: "Higher = more consistent, Lower = more expressive", min: 0, max: 1, step: 0.05, default: 0.5, simple_hide: true },
+            { id: "similarity_boost", type: "range", label: "Clarity + Similarity", min: 0, max: 1, step: 0.05, default: 0.75, simple_hide: true },
             {
                 id: "sample_rate", type: "select", label: "Sample Rate", hint: "Max rate depends on plan", options: [
                     { value: 16000, label: "16000 Hz" },
                     { value: 22050, label: "22050 Hz" },
                     { value: 24000, label: "24000 Hz" },
                     { value: 44100, label: "44100 Hz" }
-                ], default: 24000
+                ], default: 24000, simple_hide: true
             }
         ]
     },
     pocket: {
-        label: "Pocket TTS (Local, English Only)",
+        label: "\u26a1 Pocket TTS (Free, Local, English Only)",
         description: "Local text-to-speech using the Pocket TTS model. Lightweight CPU-based synthesis with voice cloning support. No API key required. English only at the moment.",
         fields: [
             { id: "streaming", type: "toggle", label: "Streaming Mode", hint: "Disable if you experience audio hitching or game lag during speech", default: true }
         ]
+    },
+    omnivoice: {
+        label: "\ud83d\udcaa OmniVoice (Free, Local)",
+        description: "\ud83d\udca1 If voice generation feels slow, try lowering your in-game graphics settings to free up GPU headroom for the TTS model.",
+        fields: [
+            { id: "first_sentence_steps", type: "range", label: "First Sentence Steps", hint: "Fewer steps on the first sentence for faster time-to-first-audio.", min: 8, max: 64, step: 4, default: 24 },
+            { id: "num_steps", type: "range", label: "Default Steps", hint: "More steps = higher quality but slower. 32 is recommended.", min: 8, max: 64, step: 4, default: 32 },
+            { id: "guidance_scale", type: "range", label: "Style Guidance (CFG)", hint: "Controls how closely the model follows its style conditioning. Higher = more expressive but less stable.", min: 0.0, max: 10.0, step: 0.1, default: 2.0 },
+            { id: "apply_smoothing_eq", type: "toggle", label: "Apply Smoothing EQ", default: true }
+        ]
+    },
+    omnivoice_api: {
+        label: "OmniVoice API (Remote)",
+        description: "Run OmniVoice on another computer using the standalone omnivoice-api server. Sonorus uses local reference files and stores cloned voices on the remote server.",
+        fields: [
+            { id: "api_url", type: "text", label: "API URL", placeholder: "http://127.0.0.1:8000", default: "http://127.0.0.1:8000", hint: "Base URL for the remote omnivoice-api server." },
+            { id: "api_key", type: "password", label: "API Key", placeholder: "Optional Basic key", hint: "Optional. Leave blank unless your omnivoice-api server enforces Basic auth.", simple_hide: true },
+            { id: "first_sentence_steps", type: "range", label: "First Sentence Steps", hint: "Fewer steps on the first sentence for faster time-to-first-audio.", min: 8, max: 64, step: 4, default: 24 },
+            { id: "num_steps", type: "range", label: "Default Steps", hint: "More steps = higher quality but slower. 32 is recommended.", min: 8, max: 64, step: 4, default: 32 },
+            { id: "guidance_scale", type: "range", label: "Style Guidance (CFG)", hint: "Controls how closely the model follows its style conditioning. Higher = more expressive but less stable.", min: 0.0, max: 10.0, step: 0.1, default: 2.0 },
+            {
+                id: "sample_rate", type: "select", label: "Sample Rate", hint: "Match the remote server output. omnivoice-api defaults to 48000 Hz when upscaling is enabled.", options: [
+                    { value: 24000, label: "24000 Hz" },
+                    { value: 48000, label: "48000 Hz" }
+                ], default: 48000, simple_hide: true
+            },
+            { id: "apply_smoothing_eq", type: "toggle", label: "Apply Smoothing EQ", default: true }
+        ]
     }
 };
 
+const LLM_PROVIDER_FEATURE_GATES = [
+    { id: "disable_input_correction", feature: "input_correction", label: "Disable Input Correction", hint: "Blocks the input correction agent for this provider without changing the saved Input Correction setting." },
+    { id: "disable_vision", feature: "vision", label: "Disable Vision", hint: "Blocks vision capture/scene description calls for this provider without changing the saved Vision Agent setting." },
+    { id: "disable_owl_post", feature: "owl_post", label: "Disable Owl Post", hint: "Blocks Owl Post generation for this provider without changing the saved Owl Post setting." },
+    { id: "disable_memory", feature: "memory", label: "Disable Long-Term Memory", hint: "Blocks long-term memory for this provider without changing the saved Long-Term Memory setting." }
+];
+
+function llmFeatureGateGroup(defaultDisabled, defaultOverrides = {}, featureFilter = null) {
+    const gates = featureFilter
+        ? LLM_PROVIDER_FEATURE_GATES.filter(gate => featureFilter.includes(gate.feature))
+        : LLM_PROVIDER_FEATURE_GATES;
+    return {
+        id: "feature_gates",
+        type: "toggle_group",
+        label: "Provider Feature Disables",
+        hint: "Use these when a provider should handle core chat, but not auxiliary LLM-heavy features. Saved feature settings stay unchanged.",
+        fields: gates.map(gate => ({ ...gate, default: defaultOverrides[gate.id] ?? defaultDisabled }))
+    };
+}
+
 const LLM_PROVIDERS = {
     gemini: {
-        label: "Google Gemini",
+        label: "Google Gemini (Limited Free)",
         fields: [
-            { id: "reasoning_enabled", type: "toggle", label: "Enable Reasoning", hint: "Master switch for extended thinking. Enable per-model toggles below.", default: true }
+            { id: "reasoning_enabled", type: "toggle", label: "Enable Reasoning", hint: "Master switch for extended thinking. Enable per-model toggles below.", default: true },
+            llmFeatureGateGroup(false, { disable_memory: true }, ['memory'])
         ]
     },
     openrouter: {
         label: "OpenRouter",
         fields: [
-            { id: "reasoning_enabled", type: "toggle", label: "Enable Reasoning", hint: "Master switch for extended thinking. Enable per-model toggles below.", default: true }
+            { id: "reasoning_enabled", type: "toggle", label: "Enable Reasoning", hint: "Master switch for extended thinking. Enable per-model toggles below.", default: true },
+            { id: "allow_provider_fallbacks", type: "toggle", label: "Allow Provider Fallbacks", hint: "When model provider routing is configured, allow OpenRouter to use providers outside your list if none match. Disable for more deterministic routing and fewer pricing surprises, but calls may error when no listed provider is available.", default: true, simple_hide: true },
+            llmFeatureGateGroup(false, {}, ['memory'])
         ]
     },
     openai: {
         label: "OpenAI",
         fields: [
             { id: "api_url", type: "text", label: "API URL (Optional)", placeholder: "https://api.openai.com/v1", hint: "Leave empty to use default OpenAI endpoint", onChange: "onOpenAIUrlChange" },
-            { id: "responses_api", type: "toggle", label: "Use Responses API", hint: "Enable for endpoints that support the Responses API. Required for reasoning.", default: false },
-            { id: "reasoning_enabled", type: "toggle", label: "Enable Reasoning", hint: "Master switch for extended thinking. Enable per-model toggles below.", default: true }
+            { id: "responses_api", type: "toggle", label: "Use Responses API", hint: "Enable for endpoints that support the Responses API. Required for reasoning.", default: true },
+            { id: "reasoning_enabled", type: "toggle", label: "Enable Reasoning", hint: "Master switch for extended thinking. Enable per-model toggles below.", default: true },
+            llmFeatureGateGroup(false)
+        ]
+    },
+    ollama: {
+        label: "Ollama Cloud (Free, Small Models)",
+        fields: [
+            { id: "api_url", type: "text", label: "API URL", placeholder: "https://ollama.com/api/chat", hint: "Ollama chat endpoint." },
+            llmFeatureGateGroup(true)
+        ]
+    },
+    llamacpp: {
+        label: "llama.cpp",
+        fields: [
+            { id: "api_url", type: "text", label: "API URL", placeholder: "http://127.0.0.1:8080/v1", hint: "Local or remote llama.cpp OpenAI-compatible server URL. /v1 is added automatically if omitted." },
+            { id: "kv_cache_enabled", type: "toggle", label: "Enable Slot KV Cache", hint: "Save and restore llama.cpp slot 0 for cacheable prompts. Slot wiring is applied by the llama.cpp provider.", default: true },
+            { id: "kv_cache_max_entries", type: "range", label: "Max KV Cache Entries", hint: "Number of saved slot snapshots to retain once slot caching is wired.", min: 1, max: 25, step: 1, default: 10 },
+            { id: "kv_cache_slot_save_path", type: "text", label: "Slot Save Path (Optional)", placeholder: "C:\\llama-cache", hint: "For local cleanup only. Must match llama-server --slot-save-path if you want Sonorus to delete evicted .bin files." },
+            llmFeatureGateGroup(true)
         ]
     }
 };
@@ -125,59 +194,46 @@ function applyOpenAIResponsesApiVisibility() {
 
     if (!responsesApiGroup) return;
 
-    const isCustomUrl = isCustomNonOpenAIUrl();
+    responsesApiGroup.style.display = '';
+    if (responsesApiField) {
+        responsesApiField.disabled = false;
+    }
 
-    if (isCustomUrl) {
-        // Show responses_api toggle for custom non-OpenAI endpoints
-        responsesApiGroup.style.display = '';
+    const responsesNotice = responsesApiGroup.querySelector('.responses-api-notice');
+    if (responsesNotice) {
+        responsesNotice.remove();
+    }
 
-        // Strict true check: undefined/missing = false for custom URLs
-        const responsesApiEnabled = config.llm?.openai?.responses_api === true;
+    const responsesApiEnabled = config.llm?.openai?.responses_api === true;
 
-        if (!responsesApiEnabled && reasoningField && reasoningGroup) {
-            // Force reasoning OFF and disable (set config directly to avoid marking dirty on page load)
-            reasoningField.checked = false;
-            reasoningField.disabled = true;
-            reasoningGroup.style.opacity = '0.5';
-            if (config.llm?.openai) config.llm.openai.reasoning_enabled = false;
+    if (!responsesApiEnabled && reasoningField && reasoningGroup) {
+        // Force reasoning OFF and disable when Responses API is disabled
+        reasoningField.checked = false;
+        reasoningField.disabled = true;
+        reasoningGroup.style.opacity = '0.5';
+        if (config.llm?.openai) config.llm.openai.reasoning_enabled = false;
 
-            // Add notice
-            let notice = reasoningGroup.querySelector('.responses-api-notice');
-            if (!notice) {
-                notice = document.createElement('p');
-                notice.className = 'field-hint responses-api-notice';
-                notice.style.color = 'var(--warning, #f0ad4e)';
-                notice.textContent = 'Responses API required for reasoning';
-                reasoningGroup.appendChild(notice);
-            }
+        let notice = reasoningGroup.querySelector('.responses-api-notice');
+        if (!notice) {
+            notice = document.createElement('p');
+            notice.className = 'field-hint responses-api-notice';
+            notice.style.color = 'var(--warning, #f0ad4e)';
+            notice.textContent = 'Responses API required for reasoning';
+            reasoningGroup.appendChild(notice);
+        }
 
-            if (window.ReasoningToggle) {
-                ReasoningToggle.setMasterEnabled(false);
-            }
-        } else {
-            // Responses API ON - reasoning works normally
-            if (reasoningField) reasoningField.disabled = false;
-            if (reasoningGroup) reasoningGroup.style.opacity = '';
-            const notice = reasoningGroup?.querySelector('.responses-api-notice');
-            if (notice) notice.remove();
-
-            // Restore master reasoning toggle to current checkbox state
-            if (window.ReasoningToggle && reasoningField) {
-                ReasoningToggle.setMasterEnabled(reasoningField.checked);
-            }
+        if (window.ReasoningToggle) {
+            ReasoningToggle.setMasterEnabled(false);
         }
     } else {
-        // Default OpenAI URL - hide responses_api toggle, force it ON
-        responsesApiGroup.style.display = 'none';
-        if (config.llm?.openai) {
-            config.llm.openai.responses_api = true;
-        }
-
-        // Restore reasoning toggle to normal
         if (reasoningField) reasoningField.disabled = false;
         if (reasoningGroup) reasoningGroup.style.opacity = '';
         const notice = reasoningGroup?.querySelector('.responses-api-notice');
         if (notice) notice.remove();
+
+        if (window.ReasoningToggle && reasoningField) {
+            ReasoningToggle.setMasterEnabled(reasoningField.checked);
+        }
     }
 }
 
@@ -359,17 +415,17 @@ const STT_PROVIDERS = {
         fields: []
     },
     canary: {
-        label: "Canary (Local, Recommended)",
+        label: "Canary (Free, Local, Recommended)",
         description: `Local speech recognition using NVIDIA Canary 180M Flash. No API key needed &mdash; runs entirely on your machine. Supports English, German, Spanish, and French. Requires ~250 MB of available RAM. Model is downloaded on first use.`,
         fields: []
     },
     parakeet: {
-        label: "Parakeet (Local)",
+        label: "Parakeet (Free, Local)",
         description: `Local speech recognition using NVIDIA Parakeet TDT 0.6B V3. No API key needed &mdash; runs entirely on your machine. Multilingual with automatic language detection. Requires ~1.5 GB of available RAM. Model is downloaded on first use.`,
         fields: []
     },
     moonshine: {
-        label: "Moonshine (Local, English Only)",
+        label: "Moonshine (Free, Local, English Only)",
         description: `A lighter-weight alternative to Parakeet. Local speech recognition using Moonshine Base. No API key needed &mdash; runs entirely on your machine. English only. Requires ~250 MB of available RAM. Model is downloaded on first use.`,
         fields: []
     },
@@ -406,14 +462,15 @@ const AGENT_CONFIGS = {
         description: "Captures screenshots and describes the scene to enrich conversation context",
         fields: [
             { id: "enabled", type: "toggle", label: "Enable Vision Agent", default: true },
-            { id: "cooldown_seconds", type: "range", label: "Cooldown (seconds)", hint: "Minimum time between captures when starting voice/chat input", min: 1, max: 30, step: 1, default: 5 },
-            { id: "wait_for_capture", type: "toggle", label: "Wait for Capture", hint: "Wait for vision capture to complete before AI responds. Disable if using a fast model.", default: true }
+            { id: "cooldown_seconds", type: "range", label: "Cooldown (seconds)", hint: "Minimum time between captures when starting voice/chat input", min: 1, max: 30, step: 1, default: 5, display_suffix: 's', simple_hide: true },
+            { id: "wait_for_capture", type: "toggle", label: "Wait for Capture", hint: "Wait for vision capture to complete before AI responds. Disable if using a fast model.", default: true },
+            { id: "wait_timeout_seconds", type: "range", label: "Wait Timeout (seconds)", hint: "Maximum time to wait for a vision capture when Wait for Capture is enabled. Used by both normal conversations and event-driven commentary.", min: 1, max: 10, step: 0.5, default: 5, display_suffix: 's' }
         ],
         llm: {
             fields: [
                 { id: "model", type: "text", label: "Vision Model", hint: "Use a fast model for quick scene descriptions.", placeholder: "gemini-2.5-flash-lite", default: "gemini-2.5-flash-lite" },
-                { id: "temperature", type: "range", label: "Temperature", min: 0, max: 2, step: 0.1, default: 0.7 },
-                { id: "max_tokens", type: "range", label: "Max Tokens", hint: "High default accounts for reasoning budgets. Reduce if errors occur.", min: 128, max: 16384, step: 128, default: 8192 }
+                { id: "temperature", type: "range", label: "Temperature", min: 0, max: 2, step: 0.1, default: 0.7, simple_hide: true },
+                { id: "max_tokens", type: "range", label: "Max Tokens", hint: "High default accounts for reasoning budgets. Reduce if errors occur.", min: 128, max: 16384, step: 128, default: 8192, simple_hide: true }
             ]
         }
     }
@@ -427,11 +484,14 @@ function renderField(field, category, providerId) {
     const fieldId = `${category}_${providerId}_${field.id}`;
     const currentValue = config[category]?.[providerId]?.[field.id] ?? field.default ?? '';
 
-    let html = `<div class="field-group">`;
-    html += `<label class="field-label">${escapeHtml(field.label)}</label>`;
+    const simpleHideAttr = field.simple_hide ? ' data-simple-hide="true"' : '';
+    let html = `<div class="field-group" data-config-path="${settingPath}" data-field-id="${field.id}"${simpleHideAttr}>`;
+    if (field.type !== 'toggle_group') {
+        html += `<label class="field-label">${escapeHtml(field.label)}</label>`;
 
-    if (field.hint) {
-        html += `<p class="field-hint">${field.hint}</p>`;
+        if (field.hint) {
+            html += `<p class="field-hint">${field.hint}</p>`;
+        }
     }
 
     switch (field.type) {
@@ -510,6 +570,39 @@ function renderField(field, category, providerId) {
             }
             break;
 
+        case 'toggle_group':
+            html += `<div class="sub-panel">
+                        <div class="sub-panel-header" onclick="toggleSubPanel(this)">
+                            <span class="sub-panel-title">
+                                <span class="sub-panel-icon"><i data-lucide="sliders-horizontal"></i></span>
+                                ${escapeHtml(field.label)}
+                            </span>
+                            <span class="sub-panel-toggle"><i data-lucide="chevron-down"></i></span>
+                        </div>
+                        <div class="sub-panel-content">`;
+            if (field.hint) {
+                html += `<p class="field-hint" style="margin-bottom: var(--space-md);">${field.hint}</p>`;
+            }
+            for (const child of field.fields || []) {
+                const childId = `${category}_${providerId}_${child.id}`;
+                const childValue = config[category]?.[providerId]?.[child.id] ?? child.default ?? false;
+                html += `<div class="toggle-wrapper" style="padding-top: 0;">
+                            <span class="toggle-label">${escapeHtml(child.label)}</span>
+                            <label class="toggle">
+                                <input type="checkbox" id="${childId}" ${childValue ? 'checked' : ''}
+                                       onchange="updateProviderSetting('${category}', '${providerId}', '${child.id}', this.checked); updateLLMFeatureAvailability('${providerId}'); if ('${child.feature}' === 'memory') updateMemoryAvailability('${providerId}')">
+                                <span class="toggle-track">
+                                    <span class="toggle-thumb"></span>
+                                </span>
+                            </label>
+                        </div>`;
+                if (child.hint) {
+                    html += `<p class="field-hint" style="margin-bottom: var(--space-md);">${escapeHtml(child.hint)}</p>`;
+                }
+            }
+            html += `</div></div>`;
+            break;
+
         case 'deepgram_language':
             // Dynamic language dropdown that updates based on model
             const langValue = currentValue !== '' ? currentValue : field.default;
@@ -539,6 +632,7 @@ function renderProviderSettings(category, providerId) {
     }
     html += providerConfig.fields.map(f => renderField(f, category, providerId)).join('');
     container.innerHTML = html;
+    applySimpleMode();
 }
 
 function switchProvider(category, providerId) {
@@ -550,7 +644,53 @@ function switchProvider(category, providerId) {
         updatePlayerVoiceSectionState(providerId);
         updateVramMonitoring();
         updateRamMonitoring();
+        updateOmniVoicePanel();
     }
+
+    refreshSetupStateFromConfig();
+
+    if (category === 'tts') {
+        restoreProviderSectionScroll('chapterTTS');
+    }
+}
+
+function isSimpleModeEnabled() {
+    return config.ui?.simple_mode !== false;
+}
+
+function setSimpleHidden(target, hidden) {
+    if (!target) return;
+    target.hidden = hidden;
+    target.classList.toggle('simple-mode-hidden', hidden);
+}
+
+function setSimpleHiddenById(id, hidden) {
+    setSimpleHidden(document.getElementById(id), hidden);
+}
+
+function applySimpleMode() {
+    const simpleEnabled = isSimpleModeEnabled();
+
+    document.querySelectorAll('.field-group[data-simple-hide="true"]').forEach(group => {
+        setSimpleHidden(group, simpleEnabled);
+    });
+
+    [
+        'playerVoiceSubSettings',
+        'open_mic_settings',
+        'open_mic_endpointing_settings',
+        'open_mic_timeout_settings',
+        'convSpeakerMaxTokensGroup',
+        'backgroundCommentaryMaxTokensGroup',
+        'convMaxTokensGroup',
+        'audioCameraOffsetGroup',
+        'audioReverbGroup'
+    ].forEach(id => setSimpleHiddenById(id, simpleEnabled));
+}
+
+function updateSimpleMode(enabled) {
+    updateSetting('ui.simple_mode', enabled);
+    applySimpleMode();
 }
 
 // Disable/enable player voice and pronunciation sections based on TTS provider
@@ -559,6 +699,18 @@ function updatePlayerVoiceSubSettings(enabled) {
     if (container) {
         container.style.opacity = enabled ? '1' : '0.5';
         container.style.pointerEvents = enabled ? 'auto' : 'none';
+    }
+    applySimpleMode();
+}
+
+function updateConversationFpvSubSettings(enabled) {
+    const container = document.getElementById('conversationFpvSubSettings');
+    if (container) {
+        container.style.opacity = enabled ? '1' : '0.5';
+        container.style.pointerEvents = enabled ? 'auto' : 'none';
+        container.querySelectorAll('input, select, textarea, button').forEach(el => {
+            el.disabled = !enabled;
+        });
     }
 }
 
@@ -591,6 +743,8 @@ function updatePlayerVoiceSectionState(providerId) {
     // Update sub-settings (spatial, voice override) based on player voice toggle
     if (!isDisabled && toggle) {
         updatePlayerVoiceSubSettings(toggle.checked);
+    } else {
+        applySimpleMode();
     }
 }
 
@@ -601,6 +755,13 @@ let vramMonitorInterval = null;
 
 function updateVramMonitoring() {
     const provider = config.tts?.provider;
+
+    // OmniVoice has its own VRAM monitoring in updateOmniVoicePanel
+    if (provider === 'omnivoice') {
+        stopVramMonitoring();
+        return;
+    }
+
     const uiDevice = config.tts?.neutts?.device;
 
     // Only monitor when NeuTTS + GPU selected in UI
@@ -820,14 +981,356 @@ function updateRamIndicator(info, data) {
     }
 }
 
+// ============================================
+// OmniVoice Setup & Monitoring
+// ============================================
+let omnivoiceStatusInterval = null;
+let _nvidiaDetected = null;
+let _omnivoiceSelectedDeviceForMeters = null;
+
+function updateOmniVoicePanel() {
+    const provider = config.tts?.provider;
+    const panel = document.getElementById('omnivoiceSetup');
+    if (provider !== 'omnivoice') {
+        if (panel) panel.style.display = 'none';
+        if (omnivoiceStatusInterval) {
+            clearInterval(omnivoiceStatusInterval);
+            omnivoiceStatusInterval = null;
+        }
+        return;
+    }
+    if (panel) panel.style.display = 'block';
+    fetchOmniVoiceStatus();
+    if (!omnivoiceStatusInterval) {
+        omnivoiceStatusInterval = setInterval(fetchOmniVoiceStatus, 3000);
+    }
+}
+
+async function fetchOmniVoiceStatus() {
+    try {
+        const resp = await fetch('/api/tts/omnivoice/status');
+        const data = await resp.json();
+        _nvidiaDetected = data.gpu.nvidia_detected;
+        renderOmniVoicePanel(data);
+    } catch (e) {
+        console.error('[OmniVoice] Status check failed:', e);
+    }
+}
+
+function renderOmniVoicePanel(data) {
+    const gpu = data.gpu;
+    const gpus = Array.isArray(gpu.gpus) ? gpu.gpus : [];
+    const selectedDevice = getOmniVoiceSelectedDevice(data);
+    const modelLoadedOnSelectedDevice = data.model_loaded && selectedDevice === data.selected_device;
+    _omnivoiceSelectedDeviceForMeters = selectedDevice;
+
+    // GPU name
+    const gpuName = document.getElementById('omnivoiceGpuName');
+    if (gpuName) {
+        if (gpu.nvidia_detected) {
+            const selectedGpu = gpus.find(g => g.device === selectedDevice) || gpus[0];
+            if (selectedGpu) {
+                gpuName.textContent = 'Using ' + selectedGpu.name + ' (' + selectedGpu.vram_total_gb + ' GB)';
+            } else {
+                gpuName.textContent = gpu.gpu_name + ' (' + gpu.vram_total_gb + ' GB)';
+            }
+            gpuName.style.color = '';
+        } else {
+            gpuName.textContent = 'No NVIDIA GPU detected. OmniVoice requires a CUDA GPU.';
+            gpuName.style.color = 'var(--error)';
+        }
+    }
+
+    renderOmniVoiceGpuPicker(data, selectedDevice);
+
+    const needsInstall = !data.deps_installed && gpu.nvidia_detected;
+    const needsVoiceSetup = data.deps_installed && data.voices_needing_setup > 0;
+    const setupComplete = data.deps_installed && data.voices_needing_setup === 0;
+
+    // Install section (step 1)
+    const installSection = document.getElementById('omnivoiceInstallSection');
+    if (installSection) {
+        installSection.style.display = needsInstall ? 'block' : 'none';
+    }
+
+    // Voice setup section (step 2 — same prominent spot as install)
+    const voiceSetup = document.getElementById('omnivoiceVoiceSetup');
+    const progress = data.setup_progress || {};
+    const isProcessing = progress.status === 'processing' || progress.status === 'loading';
+
+    if (voiceSetup) {
+        voiceSetup.style.display = (needsVoiceSetup || isProcessing) ? 'block' : 'none';
+
+        const voiceCount = document.getElementById('omnivoiceVoiceCount');
+        const sttWarning = document.getElementById('omnivoiceSttWarning');
+        const pretokenizeBtn = document.getElementById('omnivoicePretokenizeBtn');
+        const progressBar = document.getElementById('omnivoiceSetupProgress');
+        const progressFill = document.getElementById('omnivoiceProgressFill');
+        const progressCount = document.getElementById('omnivoiceProgressCount');
+        const progressStatus = document.getElementById('omnivoiceProgressStatus');
+
+        if (isProcessing) {
+            // Show progress bar, hide button
+            if (pretokenizeBtn) pretokenizeBtn.style.display = 'none';
+            if (sttWarning) sttWarning.style.display = 'none';
+            if (progressBar) progressBar.style.display = 'block';
+
+            const pct = progress.total > 0 ? Math.round(progress.completed / progress.total * 100) : 0;
+            if (progressFill) progressFill.style.width = pct + '%';
+            if (progressCount) progressCount.textContent = progress.completed + '/' + progress.total;
+
+            const current = progress.current || '';
+            if (voiceCount) {
+                voiceCount.textContent = progress.status === 'loading'
+                    ? 'Loading OmniVoice model (first time may download ~3GB)...'
+                    : 'Processing voice references...';
+                voiceCount.style.color = '';
+            }
+            if (progressStatus) {
+                if (progress.status === 'loading') {
+                    progressStatus.textContent = current || 'Starting worker...';
+                } else {
+                    progressStatus.textContent = current ? 'Processing: ' + current : '';
+                }
+            }
+        } else if (needsVoiceSetup) {
+            // Show button, hide progress bar
+            if (progressBar) progressBar.style.display = 'none';
+            if (voiceCount) {
+                voiceCount.textContent = data.voices_needing_setup + ' voice reference(s) need processing before OmniVoice can be used.';
+                voiceCount.style.color = '';
+            }
+            if (sttWarning) sttWarning.style.display = data.stt_configured ? 'none' : 'block';
+            if (pretokenizeBtn) pretokenizeBtn.style.display = data.stt_configured ? '' : 'none';
+        }
+    }
+
+    // Settings fields: only show when fully set up
+    const settingsContainer = document.getElementById('ttsProviderSettings');
+    if (settingsContainer) {
+        const fieldGroups = settingsContainer.querySelectorAll('.field-group');
+        fieldGroups.forEach(fg => {
+            fg.style.display = setupComplete ? '' : 'none';
+        });
+    }
+
+    // VRAM/RAM meters: show when deps installed (even during voice setup)
+    const vramEl = document.getElementById('omnivoiceVramIndicator');
+    const ramEl = document.getElementById('omnivoiceRamIndicator');
+    if (data.deps_installed) {
+        if (vramEl) vramEl.style.display = 'block';
+        if (ramEl) ramEl.style.display = 'block';
+        fetchOmniVoiceResources(modelLoadedOnSelectedDevice);
+    } else {
+        if (vramEl) vramEl.style.display = 'none';
+        if (ramEl) ramEl.style.display = 'none';
+    }
+}
+
+function getOmniVoiceSelectedDevice(data) {
+    const configured = config.tts?.omnivoice?.device;
+    if (configured && configured !== 'auto') {
+        const gpus = Array.isArray(data.gpu?.gpus) ? data.gpu.gpus : [];
+        if (gpus.some(g => g.device === configured) || configured === 'cuda') {
+            return configured;
+        }
+    }
+    return data.selected_device || data.gpu?.recommended_device || 'cuda';
+}
+
+function renderOmniVoiceGpuPicker(data, selectedDevice) {
+    const picker = document.getElementById('omnivoiceGpuPicker');
+    const select = document.getElementById('omnivoiceGpuSelect');
+    const gpus = Array.isArray(data.gpu?.gpus) ? data.gpu.gpus : [];
+    if (!picker || !select) return;
+
+    if (gpus.length <= 1) {
+        picker.style.display = 'none';
+        return;
+    }
+
+    picker.style.display = 'block';
+    const previous = select.value;
+    select.innerHTML = '';
+
+    for (const gpu of gpus) {
+        const opt = document.createElement('option');
+        opt.value = gpu.device;
+        const free = Number(gpu.vram_free_gb || 0).toFixed(1);
+        const total = Number(gpu.vram_total_gb || 0).toFixed(1);
+        opt.textContent = `GPU ${gpu.index}: ${gpu.name} (${free} / ${total} GB free)`;
+        select.appendChild(opt);
+    }
+
+    const validDevice = gpus.some(g => g.device === selectedDevice)
+        ? selectedDevice
+        : (data.gpu?.recommended_device || gpus[0].device);
+    select.value = validDevice;
+    _omnivoiceSelectedDeviceForMeters = validDevice;
+
+    if (previous && previous !== validDevice) {
+        fetchOmniVoiceResources(data.model_loaded && validDevice === data.selected_device);
+    }
+}
+
+function updateOmniVoiceGpu(device) {
+    if (!device) return;
+    updateProviderSetting('tts', 'omnivoice', 'device', device);
+    _omnivoiceSelectedDeviceForMeters = device;
+    fetchOmniVoiceResources(false);
+}
+
+async function fetchOmniVoiceResources(modelLoaded) {
+    try {
+        const device = _omnivoiceSelectedDeviceForMeters || config.tts?.omnivoice?.device || 'auto';
+        const [vramResp, ramResp] = await Promise.all([
+            fetch('/api/tts/vram-status?device=' + encodeURIComponent(device)),
+            fetch('/api/system/ram-status')
+        ]);
+        const vramData = await vramResp.json();
+        const ramData = await ramResp.json();
+
+        const vramEl = document.getElementById('omnivoiceVramIndicator');
+        if (vramEl) {
+            const gpuLabel = vramData.gpu_name ? ' - ' + vramData.gpu_name : '';
+            const label = modelLoaded ? 'GPU VRAM (OmniVoice loaded)' : 'GPU VRAM (needs ~2.5 GB' + gpuLabel + ')';
+            _updateMeter(vramEl, vramData.vram_used_gb, vramData.vram_total_gb, vramData.vram_free_gb, 2.5, label, modelLoaded);
+        }
+
+        const ramEl = document.getElementById('omnivoiceRamIndicator');
+        if (ramEl) {
+            // When loaded, subtract our process RAM from used to show what
+            // free RAM would look like without us — avoids false "insufficient" warnings
+            const processRam = ramData.process_ram_gb || 0;
+            const adjustedFree = modelLoaded ? ramData.ram_free_gb + processRam : ramData.ram_free_gb;
+            const adjustedUsed = modelLoaded ? ramData.ram_used_gb - processRam : ramData.ram_used_gb;
+            const ramLabel = modelLoaded ? 'System RAM (OmniVoice loaded)' : 'System RAM (needs ~2.5 GB)';
+            _updateMeter(ramEl, adjustedUsed, ramData.ram_total_gb, adjustedFree, 2.5, ramLabel, modelLoaded);
+        }
+    } catch (e) {
+        console.error('[OmniVoice] Resource fetch failed:', e);
+    }
+}
+
+function _updateMeter(el, used, total, free, needed, label, isLoaded) {
+    const fill = el.querySelector('.vram-fill');
+    const value = el.querySelector('.vram-value');
+    const status = el.querySelector('.field-hint');
+    const labelEl = el.querySelector('.field-label');
+    if (!fill || !value || !status || !labelEl) return;
+
+    labelEl.textContent = label;
+    const usedPercent = total > 0 ? (used / total) * 100 : 0;
+    fill.style.width = usedPercent + '%';
+    value.textContent = isLoaded
+        ? used.toFixed(1) + ' / ' + total.toFixed(1) + ' GB used'
+        : free.toFixed(1) + ' / ' + total.toFixed(1) + ' GB free';
+
+    fill.className = 'vram-fill';
+    if (isLoaded) {
+        // Model is already on GPU — its VRAM is already in "used".
+        // Don't compare free against needed; just show it's loaded fine.
+        fill.classList.add('green');
+        status.textContent = 'Model loaded.';
+        status.style.color = 'var(--success)';
+    } else if (free >= needed * 2) {
+        fill.classList.add('green');
+        status.textContent = 'Sufficient space available.';
+        status.style.color = 'var(--success)';
+    } else if (free >= needed) {
+        fill.classList.add('yellow');
+        status.textContent = 'Tight fit — should work.';
+        status.style.color = 'var(--warning)';
+    } else {
+        fill.classList.add('red');
+        status.textContent = 'Insufficient space (' + needed + ' GB needed).';
+        status.style.color = 'var(--error)';
+    }
+}
+
+async function installOmniVoiceDeps() {
+    const btn = document.getElementById('omnivoiceInstallBtn');
+    const hint = document.getElementById('omnivoiceInstallHint');
+    if (btn) { btn.disabled = true; btn.textContent = 'Installing...'; }
+    if (hint) hint.textContent = 'Downloading PyTorch and dependencies. This may take several minutes...';
+
+    // Save current settings so they survive the server restart
+    await saveSettings();
+
+    try {
+        const resp = await fetch('/api/tts/omnivoice/install-deps', { method: 'POST' });
+        const data = await resp.json();
+
+        if (data.status === 'already_installed') {
+            showToast('Dependencies already installed', 'info');
+            fetchOmniVoiceStatus();
+            return;
+        }
+        if (data.status === 'error') {
+            showToast(data.error || 'Install failed', 'error');
+            if (btn) { btn.disabled = false; btn.textContent = 'Install OmniVoice Dependencies'; }
+            if (hint) hint.textContent = data.error || 'Install failed.';
+            return;
+        }
+        if (data.status === 'installing') {
+            if (hint) hint.textContent = 'Installing... this may take several minutes.';
+            const pollInterval = setInterval(async () => {
+                try {
+                    const sr = await fetch('/api/tts/omnivoice/install-status');
+                    const sd = await sr.json();
+                    if (sd.install_complete) {
+                        clearInterval(pollInterval);
+                        showToast('Dependencies installed! Restarting server...', 'success');
+                        if (hint) hint.textContent = 'Server restarting... page will reload shortly.';
+                        await fetch('/api/server/restart', { method: 'POST' });
+                        setTimeout(() => _pollServerHealth(), 3000);
+                    }
+                } catch (e) { /* server may be restarting */ }
+            }, 5000);
+        }
+    } catch (e) {
+        showToast('Install request failed', 'error');
+        if (btn) { btn.disabled = false; btn.textContent = 'Install OmniVoice Dependencies'; }
+    }
+}
+
+function _pollServerHealth() {
+    const poll = setInterval(async () => {
+        try {
+            const resp = await fetch('/health');
+            if (resp.ok) { clearInterval(poll); window.location.reload(); }
+        } catch (e) { /* still restarting */ }
+    }, 2000);
+}
+
+async function pretokenizeOmniVoice() {
+    const btn = document.getElementById('omnivoicePretokenizeBtn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Processing...'; }
+    try {
+        const resp = await fetch('/api/tts/omnivoice/pretokenize', { method: 'POST' });
+        const data = await resp.json();
+        if (data.status === 'processing') {
+            showToast('Processing voice references...', 'success');
+        } else if (data.status === 'error') {
+            showToast(data.error || 'Processing failed', 'error');
+        }
+    } catch (e) {
+        showToast('Request failed', 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Process Voice References'; }
+    }
+}
+
 const LLM_PROVIDER_HINTS = {
-    gemini: 'Google\'s Gemini API with free tier. <a href="https://aistudio.google.com/app/apikey" target="_blank">Get your free API key</a>. If you experience errors, you may be at the daily limit, in which case we recommend you switch to OpenRouter.',
-    openrouter: '<strong>(Recommended)</strong> Access 100+ AI models through one API. <a href="https://openrouter.ai/" target="_blank">Sign up at openrouter.ai</a> and add credits ($5 minimum purchase - generally lasts a long time).',
-    openai: 'Direct access to OpenAI models (GPT-5, etc). <a href="https://auth.openai.com/create-account" target="_blank">Create account</a>, then get API key from <a href="https://platform.openai.com/api-keys" target="_blank">platform.openai.com</a>. Requires prepaid credits ($5 minimum top-up).'
+    gemini: 'Google\'s Gemini API with powerful models on a limited free tier. <a href="https://aistudio.google.com/app/apikey" target="_blank">Get your free API key</a>. If you experience errors, you may be at a minute-by-minute or daily limit, in which case we recommend you switch to Ollama Cloud (free) or OpenRouter (best quality).',
+        openrouter: '<strong>(Recommended)</strong> Access 100+ AI models through one API. <a href="https://openrouter.ai/" target="_blank">Sign up at openrouter.ai</a> and add credits ($5 minimum purchase - generally lasts a long time). Review <a href="https://openrouter.ai/settings/privacy" target="_blank">OpenRouter privacy settings</a> to control data/privacy preferences.',
+    openai: 'OpenAI-compatible third-party endpoints and direct access to OpenAI models (GPT-5, etc). For OpenAI directly: <a href="https://auth.openai.com/create-account" target="_blank">create an account</a>, then get an API key from <a href="https://platform.openai.com/api-keys" target="_blank">platform.openai.com</a>. OpenAI direct access requires prepaid credits ($5 minimum top-up). New OpenAI accounts often have very low rate limits, which can lead to a poor experience; these OpenAI-specific restrictions may not apply to third-party endpoints. If you use OpenAI directly, we recommend disabling Owl Post and Long-Term Memory until your account reaches Tier 2 or higher.',
+    ollama: '<strong>Free tier:</strong> <a href="https://signin.ollama.com/sign-up" target="_blank">Sign up for Ollama Cloud</a>. Ollama Cloud has a generous free tier, but only for small models that do not compare with Gemini or OpenRouter. They are still sufficient for roleplaying. <strong>Monitor your free usage here: <a href="https://ollama.com/settings" target="_blank">ollama.com/settings</a>.</strong> Keep provider features disabled on the free plan because its maximum concurrent request limit is 1, which conflicts with Owl Post, Vision, Input Correction, and memory workflows.',
+    llamacpp: 'Use a local or remote llama.cpp server through its OpenAI-compatible API. API key is optional unless your server requires one. <strong>Hardware warning:</strong> llama.cpp is not recommended unless you have an extra GPU with 12-24GB VRAM, ideally 24GB, while using a 24B+ model such as <code>unsloth/gemma-4-26B-A4B-it-qat-GGUF UD-Q4_K_XL</code> (great, slower, smaller) or <code>Qwen/Qwen3.5-35B-A3B Q4</code> (good, faster, bigger). <strong>Never run llama.cpp on the same GPU Hogwarts Legacy is using.</strong> <a href="https://discord.com/channels/1460397759675895820/1476935126901461154" target="_blank">Read our guide on Discord</a>.'
 };
 
 const LLM_API_KEY_VALIDATORS = {
-    gemini: { prefix: 'AIza', label: 'Gemini' },
+    gemini: { prefixes: ['AIza', 'AQ'], label: 'Gemini' },
     openrouter: { prefix: 'sk-or-v1-', label: 'OpenRouter' }
 };
 
@@ -835,23 +1338,26 @@ function validateLLMApiKey(value, providerId) {
     if (!value || value === '********') return null;
     const rule = LLM_API_KEY_VALIDATORS[providerId];
     if (!rule) return null;
-    // Still typing the prefix — don't flag yet
-    if (value.length < rule.prefix.length && rule.prefix.startsWith(value)) return null;
-    if (!value.startsWith(rule.prefix)) {
-        return `\u26a0\ufe0f ${rule.label} keys start with "${rule.prefix}" — this doesn't look right. Make sure you're not pasting your Voice/TTS key here.`;
+    const prefixes = rule.prefixes || [rule.prefix];
+    // Still typing a valid prefix - don't flag yet
+    if (prefixes.some(prefix => value.length < prefix.length && prefix.startsWith(value))) return null;
+    if (!prefixes.some(prefix => value.startsWith(prefix))) {
+        const expected = prefixes.map(prefix => `"${prefix}"`).join(' or ');
+        return `\u26a0\ufe0f ${rule.label} keys start with ${expected} — this doesn't look right. Make sure you're not pasting your Voice/TTS key here.`;
     }
     return null;
 }
 
-// Gemini 3 Flash - switches to GA version after June 2026
-const GEMINI_3_GA_DATE = new Date('2026-06-01');
-const GEMINI_3_IS_GA = new Date() >= GEMINI_3_GA_DATE;
-const GEMINI_3_FLASH = GEMINI_3_IS_GA ? 'gemini-3-flash' : 'gemini-3-flash-preview';
-const GEMINI_3_FLASH_OR = GEMINI_3_IS_GA ? 'google/gemini-3-flash' : 'google/gemini-3-flash-preview';
+// Gemini chat default - switches to Gemini 3.5 Flash after June 1, 2027
+const GEMINI_3_5_SWITCH_DATE = new Date('2027-06-01');
+const GEMINI_3_5_ENABLED = new Date() >= GEMINI_3_5_SWITCH_DATE;
+const GEMINI_CHAT_DEFAULT = GEMINI_3_5_ENABLED ? 'gemini-3.5-flash' : 'gemini-3-flash-preview';
+const GEMINI_CHAT_DEFAULT_OR = GEMINI_3_5_ENABLED ? 'google/gemini-3.5-flash' : 'google/gemini-3-flash-preview';
 
 // Model presets per provider - loaded from shared JSON file (with fallback)
 let MODEL_PRESETS = null;
 let MODEL_FIELDS_PATHS = null;
+let MODEL_PROVIDER_ROUTE_PRESETS = {};
 
 async function loadModelPresets() {
     if (MODEL_PRESETS !== null) return MODEL_PRESETS;
@@ -870,13 +1376,14 @@ async function loadModelPresets() {
 
         // Extract field paths
         MODEL_FIELDS_PATHS = data._model_fields || {};
+        MODEL_PROVIDER_ROUTE_PRESETS = data._provider_routes || {};
 
-        // Apply Gemini 3 GA date logic (always, to ensure consistency)
+        // Apply Gemini chat default date logic (always, to ensure consistency)
         if (MODEL_PRESETS.gemini) {
-            MODEL_PRESETS.gemini.chat = GEMINI_3_FLASH;
+            MODEL_PRESETS.gemini.chat = GEMINI_CHAT_DEFAULT;
         }
         if (MODEL_PRESETS.openrouter) {
-            MODEL_PRESETS.openrouter.chat = GEMINI_3_FLASH_OR;
+            MODEL_PRESETS.openrouter.chat = GEMINI_CHAT_DEFAULT_OR;
         }
 
         console.log('[ModelPresets] Loaded presets for providers:', Object.keys(MODEL_PRESETS));
@@ -885,48 +1392,105 @@ async function loadModelPresets() {
         console.error('[ModelPresets] Failed to load presets, using fallback:', e);
         // Fallback to hardcoded defaults if JSON load fails
         MODEL_PRESETS = getHardcodedPresets();
+        MODEL_PROVIDER_ROUTE_PRESETS = getHardcodedProviderRoutePresets();
         return MODEL_PRESETS;
     }
+}
+
+function getHardcodedProviderRoutePresets() {
+    return {
+        openrouter: {
+            chat: ['google-ai-studio', 'google-vertex'],
+            vision: ['google-ai-studio', 'google-vertex'],
+            target: ['mistral', 'deepinfra'],
+            interjection: ['google-ai-studio', 'google-vertex'],
+            commentary: ['mistral', 'deepinfra'],
+            inputCorrection: ['wandb', 'groq', 'deepinfra', 'novita'],
+            chapter: ['google-ai-studio', 'google-vertex'],
+            prose: ['google-ai-studio', 'google-vertex'],
+            reranker: ['wandb', 'groq', 'deepinfra', 'novita'],
+            owlSummarize: ['google-ai-studio', 'google-vertex'],
+            locationResolver: ['mistral', 'deepinfra']
+        }
+    };
 }
 
 function getHardcodedPresets() {
     // Fallback presets if JSON fails to load (must match model_presets.json)
     return {
         gemini: {
-            chat: GEMINI_3_FLASH,
+            chat: GEMINI_CHAT_DEFAULT,
             vision: 'gemini-2.5-flash-lite',
             target: 'gemini-2.5-flash-lite',
             interjection: 'gemini-2.5-flash-lite',
+            commentary: 'gemini-2.5-flash-lite',
             inputCorrection: 'gemini-2.5-flash-lite',
+            embedding: 'gemini-embedding-2',
             chapter: 'gemini-2.5-flash-lite',
             prose: 'gemini-2.5-flash-lite',
             graphiti: 'gemini-2.5-flash-lite',
             graphitiSmall: 'gemini-2.5-flash-lite',
-            reranker: 'gemini-2.5-flash-lite'
+            reranker: 'gemini-2.5-flash-lite',
+            locationResolver: 'gemini-2.5-flash-lite'
         },
         openrouter: {
-            chat: GEMINI_3_FLASH_OR,
+            chat: GEMINI_CHAT_DEFAULT_OR,
             vision: 'google/gemini-2.5-flash-lite:nitro',
-            target: 'google/gemini-2.5-flash-lite:nitro',
-            interjection: 'google/gemini-2.5-flash-lite:nitro',
+            target: 'mistralai/mistral-small-3.2-24b-instruct:nitro',
+            interjection: 'google/gemini-3.1-flash-lite',
+            commentary: 'mistralai/mistral-small-3.2-24b-instruct:nitro',
             inputCorrection: 'meta-llama/llama-3.1-8b-instruct:nitro',
-            chapter: 'x-ai/grok-4.1-fast',
-            prose: 'x-ai/grok-4.1-fast',
-            graphiti: 'x-ai/grok-4.1-fast',
-            graphitiSmall: 'google/gemini-2.5-flash-lite:nitro',
-            reranker: 'meta-llama/llama-3.1-8b-instruct:nitro'
+            embedding: 'openai/text-embedding-3-small',
+            chapter: 'google/gemini-3.1-flash-lite',
+            prose: 'google/gemini-3.1-flash-lite',
+            graphiti: 'openai/gpt-4.1-nano',
+            graphitiSmall: 'openai/gpt-4.1-nano',
+            reranker: 'meta-llama/llama-3.1-8b-instruct:nitro',
+            locationResolver: 'mistralai/mistral-small-3.2-24b-instruct:nitro'
         },
         openai: {
             chat: 'gpt-5-mini',
-            vision: 'gpt-5-nano',
-            target: 'gpt-5-nano',
-            interjection: 'gpt-5-nano',
+            vision: 'gpt-4.1-nano',
+            target: 'gpt-4.1-nano',
+            interjection: 'gpt-4.1-nano',
+            commentary: 'gpt-4.1-nano',
             inputCorrection: 'gpt-4.1-nano',
-            chapter: 'gpt-5-nano',
-            prose: 'gpt-5-nano',
-            graphiti: 'gpt-5-nano',
-            graphitiSmall: 'gpt-5-nano',
-            reranker: 'gpt-4.1-nano'
+            embedding: 'text-embedding-3-small',
+            chapter: 'gpt-4.1-nano',
+            prose: 'gpt-4.1-nano',
+            graphiti: 'gpt-4.1-nano',
+            graphitiSmall: 'gpt-4.1-nano',
+            reranker: 'gpt-4.1-nano',
+            locationResolver: 'gpt-5-nano'
+        },
+        ollama: {
+            chat: 'gemma4:31b-cloud',
+            vision: 'gemma4:31b-cloud',
+            target: 'gemma4:31b-cloud',
+            interjection: 'gemma4:31b-cloud',
+            commentary: 'gemma4:31b-cloud',
+            inputCorrection: 'gemma4:31b-cloud',
+            chapter: 'gemma4:31b-cloud',
+            prose: 'gemma4:31b-cloud',
+            graphiti: 'gemma4:31b-cloud',
+            graphitiSmall: 'gemma4:31b-cloud',
+            reranker: 'gemma4:31b-cloud',
+            owlSummarize: 'gemma4:31b-cloud',
+            locationResolver: 'gemma4:31b-cloud'
+        },
+        llamacpp: {
+            chat: 'local-model',
+            vision: 'local-model',
+            target: 'local-model',
+            interjection: 'local-model',
+            commentary: 'local-model',
+            inputCorrection: 'local-model',
+            chapter: 'local-model',
+            prose: 'local-model',
+            graphiti: 'local-model',
+            graphitiSmall: 'local-model',
+            reranker: 'local-model',
+            locationResolver: 'local-model'
         }
     };
 }
@@ -938,13 +1502,45 @@ const MODEL_FIELDS = {
     vision: { path: 'agents.vision.llm.model', elementId: 'agent_vision_llm_model', isAgent: true, agentId: 'vision', prefix: 'llm', fieldId: 'model' },
     target: { path: 'conversation.target_selection_model', elementId: 'conv_target_model' },
     interjection: { path: 'conversation.interjection_model', elementId: 'conv_interjection_model' },
+    commentary: { path: 'conversation.commentary_model', elementId: 'background_commentary_model' },
     inputCorrection: { path: 'conversation.input_correction_model', elementId: 'conv_input_correction_model' },
+    embedding: { path: 'memory.embedding_model', elementId: 'embeddingModel' },
     chapter: { path: 'memory.chapter_model', elementId: 'chapterModel' },
     prose: { path: 'memory.prose_model', elementId: 'proseModel' },
     graphiti: { path: 'memory.graphiti_model', elementId: 'graphitiModel' },
     graphitiSmall: { path: 'memory.graphiti_small_model', elementId: 'graphitiSmallModel' },
-    reranker: { path: 'memory.reranker_model', elementId: 'rerankerModel' }
+    reranker: { path: 'memory.reranker_model', elementId: 'rerankerModel' },
+    owlSummarize: { path: 'owl_post.summarize_model', elementId: 'owlPostSummarizeModel' },
+    locationResolver: { path: 'commitment.location_resolver_model', elementId: 'commitment_location_resolver_model' }
 };
+
+const OPENROUTER_MODEL_AUTOCOMPLETE_EXTRA_INPUTS = [
+    'owlPostOrchestratorModel',
+    'owlPostMailModel',
+    'owlPostBoardModel'
+];
+
+const OPENROUTER_MODEL_AUTOCOMPLETE_MAX_ITEMS = 500;
+
+function getModelProviderPath(field) {
+    if (field.providerPath) return field.providerPath;
+    if (field.path.endsWith('.model')) return field.path.replace(/\.model$/, '.providers');
+    if (field.path.endsWith('_model')) return `${field.path}_providers`;
+    return null;
+}
+
+function applyProviderRoutePresets(providerId) {
+    const routePresets = MODEL_PROVIDER_ROUTE_PRESETS?.[providerId];
+    if (!routePresets) return;
+
+    for (const [key, providers] of Object.entries(routePresets)) {
+        const field = MODEL_FIELDS[key];
+        const providerPath = field ? getModelProviderPath(field) : null;
+        if (!providerPath || !Array.isArray(providers)) continue;
+        updateSetting(providerPath, providers.slice());
+        console.log(`[ModelPresets] ${key} providers: ${providers.join(', ') || 'none'}`);
+    }
+}
 
 // Default reasoning toggle states per provider and model field
 // Only specified fields will have reasoning enabled by default
@@ -954,12 +1550,16 @@ const REASONING_DEFAULTS = {
         graphitiSmall: true      // gemini-2.5-flash-lite
     },
     openrouter: {
-        graphiti: false,         // x-ai/grok-4.1-fast
+        graphiti: false,         // google/gemini-3.1-flash-lite
         graphitiSmall: true      // google/gemini-2.5-flash-lite:nitro
     },
     openai: {
-        graphiti: true,          // gpt-5-nano
-        graphitiSmall: true      // gpt-5-nano
+        graphiti: true,          // gpt-4.1-nano
+        graphitiSmall: true      // gpt-4.1-nano
+    },
+    ollama: {
+    },
+    llamacpp: {
     }
 };
 
@@ -974,6 +1574,11 @@ const FEATURE_DEFAULTS = {
     },
     openai: {
         'conversation.input_correction_enabled': { default: true, elementId: 'conv_input_correction_enabled' }
+    },
+    ollama: {
+        'conversation.input_correction_enabled': { default: false, elementId: 'conv_input_correction_enabled' }
+    },
+    llamacpp: {
     }
 };
 
@@ -1025,6 +1630,8 @@ async function applyModelPresets(newProviderId) {
         }
     }
 
+    applyProviderRoutePresets(newProviderId);
+
     // Apply reasoning defaults for this provider
     const reasoningDefaults = REASONING_DEFAULTS[newProviderId];
     if (reasoningDefaults) {
@@ -1058,15 +1665,20 @@ async function applyModelPresets(newProviderId) {
     if (window.ReasoningToggle) {
         ReasoningToggle.refresh();
     }
+    if (window.ProviderRouting) {
+        ProviderRouting.refresh();
+    }
 
     updateGemini3TempHint();
 }
 
 // API key placeholders per LLM provider
 const LLM_API_KEY_PLACEHOLDERS = {
-    gemini: 'AIza...',
+    gemini: 'AIza... or AQ...',
     openrouter: 'sk-or-v1-...',
-    openai: 'API key'
+    openai: 'API key',
+    ollama: 'OLLAMA_API_KEY',
+    llamacpp: 'Optional API key'
 };
 
 function updateLLMApiKey(value) {
@@ -1094,7 +1706,7 @@ function refreshLLMApiKeyField(providerId) {
     const providerKey = config.llm?.[providerId]?.api_key;
     const legacyKey = config.llm?.api_key;
     const hasProviderSpecificKeys = Boolean(
-        config.llm?.gemini?.api_key || config.llm?.openrouter?.api_key || config.llm?.openai?.api_key
+        config.llm?.gemini?.api_key || config.llm?.openrouter?.api_key || config.llm?.openai?.api_key || config.llm?.ollama?.api_key || config.llm?.llamacpp?.api_key
     );
     const hasKey = providerKey || (legacyKey && !hasProviderSpecificKeys);
 
@@ -1115,15 +1727,21 @@ async function switchLLMProvider(providerId) {
     // Update master reasoning toggle based on new provider's setting
     if (window.ReasoningToggle) {
         let masterEnabled = config.llm?.[providerId]?.reasoning_enabled === true;
-        // For OpenAI with custom URL and responses_api OFF, force reasoning off
-        if (providerId === 'openai' && isCustomNonOpenAIUrl() && config.llm?.openai?.responses_api !== true) {
+        // OpenAI reasoning requires Responses API
+        if (providerId === 'openai' && config.llm?.openai?.responses_api !== true) {
             masterEnabled = false;
         }
         ReasoningToggle.setMasterEnabled(masterEnabled);
     }
+    if (window.ProviderRouting) {
+        ProviderRouting.refresh();
+    }
 
     // Disable long-term memory for Gemini due to embedding incompatibility
     updateMemoryAvailability(providerId);
+    await refreshOpenRouterModelAutocompletes();
+    refreshSetupStateFromConfig();
+    restoreProviderSectionScroll('chapterLLMProvider');
 }
 
 function updateLLMProviderHint(providerId) {
@@ -1163,6 +1781,8 @@ function renderLLMProviderSettings(providerId) {
     }
 
     container.innerHTML = providerConfig.fields.map(f => renderField(f, 'llm', providerId)).join('');
+    lucide?.createIcons?.({ nameAttr: 'data-lucide', attrs: {} });
+    updateLLMFeatureAvailability(providerId);
 
     // OpenAI-specific: conditional visibility of responses_api toggle
     if (providerId === 'openai') {
@@ -1174,6 +1794,7 @@ function switchSTTProvider(providerId) {
     updateSetting('stt.provider', providerId);
     renderSTTProviderSettings(providerId);
     updateRamMonitoring();
+    restoreProviderSectionScroll('chapterSTT');
 }
 
 function renderSTTProviderSettings(providerId) {
@@ -1345,9 +1966,13 @@ function updateSTTHotkey(value) {
 
 function toggleOpenMicSettings(enabled) {
     // Show/hide open mic advanced settings based on enable toggle
+    const openMicToggleGroup = document.getElementById('open_mic_toggle_group');
     const openMicSettings = document.getElementById('open_mic_settings');
     const openMicEndpointingSettings = document.getElementById('open_mic_endpointing_settings');
     const openMicTimeoutSettings = document.getElementById('open_mic_timeout_settings');
+    if (openMicToggleGroup) {
+        openMicToggleGroup.style.marginBottom = enabled ? '' : '0';
+    }
     if (openMicSettings) {
         openMicSettings.style.display = enabled ? 'block' : 'none';
     }
@@ -1369,6 +1994,7 @@ function toggleOpenMicSettings(enabled) {
             ? 'Press to toggle open mic on/off. <a href="#chapterInput" onclick="scrollToSection(\'chapterInput\')">More input settings</a>'
             : 'Hold this key while speaking to record your voice. Release to send. <a href="#chapterInput" onclick="scrollToSection(\'chapterInput\')">More input settings</a>';
     }
+    applySimpleMode();
 }
 
 function restartSTTCapture() {
@@ -1430,6 +2056,12 @@ function updateDeepgramLanguages(model) {
 // Provider Field Validation
 // ============================================
 const PROVIDER_REGISTRIES = { tts: () => TTS_PROVIDERS, stt: () => STT_PROVIDERS };
+
+function stripLegacyConfigFields(cfg) {
+    if (cfg?.tts?.inworld) {
+        delete cfg.tts.inworld.workspace_id;
+    }
+}
 
 function getProviderField(category, providerId, fieldId) {
     const providers = PROVIDER_REGISTRIES[category]?.() || {};
@@ -1509,22 +2141,11 @@ function updateElevenLabsQuality(plan) {
         sampleRateSelect.value = sampleRate;
         updateProviderSetting('tts', 'elevenlabs', 'sample_rate', sampleRate);
     }
+    applySimpleMode();
 }
 
 function onInworldModelChange(modelValue) {
-    const toggle = document.getElementById('tts_inworld_emotion_delivery');
-    const group = toggle?.closest('.field-group');
-    if (!toggle || !group) return;
-
-    const is1_5Plus = modelValue && modelValue.includes('1.5');
-    toggle.disabled = !is1_5Plus;
-    group.style.opacity = is1_5Plus ? '1' : '0.5';
-
-    // Auto-disable if model doesn't support it
-    if (!is1_5Plus && toggle.checked) {
-        toggle.checked = false;
-        updateProviderSetting('tts', 'inworld', 'emotion_delivery', false);
-    }
+    applySimpleMode();
 }
 
 function generateProviderDropdown(category, currentProvider) {
@@ -1540,6 +2161,9 @@ function generateProviderDropdown(category, currentProvider) {
                 disabled = 'disabled';
             }
         }
+        if (category === 'tts' && id === 'omnivoice' && _nvidiaDetected === false) {
+            disabled = 'disabled';
+        }
         html += `<option value="${id}" ${selected} ${disabled}>${escapeHtml(cfg.label)}</option>`;
     }
     return html;
@@ -1554,7 +2178,8 @@ function renderAgentField(field, agentId, prefix = '') {
     const configPath = prefix ? config.agents?.[agentId]?.[prefix] : config.agents?.[agentId];
     const currentValue = configPath?.[field.id] ?? field.default ?? '';
 
-    let html = `<div class="field-group">`;
+    const simpleHideAttr = field.simple_hide ? ' data-simple-hide="true"' : '';
+    let html = `<div class="field-group" data-config-path="${settingPath}" data-field-id="${field.id}"${simpleHideAttr}>`;
     html += `<label class="field-label">${escapeHtml(field.label)}</label>`;
 
     if (field.hint) {
@@ -1589,11 +2214,15 @@ function renderAgentField(field, agentId, prefix = '') {
 
         case 'range':
             const rangeValue = currentValue !== '' ? currentValue : field.default;
+            const rangeDisplay = field.display_suffix ? `${rangeValue}${field.display_suffix}` : rangeValue;
+            const rangeDisplayExpr = field.display_suffix
+                ? `this.value + '${field.display_suffix}'`
+                : 'this.value';
             html += `<div class="range-wrapper">
                         <input type="range" id="${fieldId}"
                                min="${field.min}" max="${field.max}" step="${field.step}" value="${rangeValue}"
-                               oninput="updateRangeValue('${fieldId}', this.value); updateAgentSetting('${agentId}', '${prefix}', '${field.id}', parseFloat(this.value))">
-                        <span class="range-value" id="${fieldId}Value">${rangeValue}</span>
+                               oninput="updateRangeValue('${fieldId}', ${rangeDisplayExpr}); updateAgentSetting('${agentId}', '${prefix}', '${field.id}', parseFloat(this.value))">
+                        <span class="range-value" id="${fieldId}Value">${rangeDisplay}</span>
                     </div>`;
             break;
 
@@ -1632,6 +2261,7 @@ function renderAgentSettings(agentId) {
     }
 
     container.innerHTML = html;
+    applySimpleMode();
 }
 
 function updateAgentSetting(agentId, prefix, fieldId, value) {
@@ -1658,13 +2288,28 @@ function updateAgentSetting(agentId, prefix, fieldId, value) {
 let config = {};
 let dirty = false;
 let isInitializing = true;
+let voiceManifestIds = [];
+let voiceManifestIdsPromise = null;
+let characterDisplayNames = {};
+let openRouterModelIds = [];
+let openRouterModelIdsPromise = null;
+let openRouterEmbeddingModelIds = ['openai/text-embedding-3-small'];
+let openRouterEmbeddingModelIdsPromise = null;
+let openRouterVisionModelIds = [];
+let openRouterVisionModelIdsPromise = null;
 
 // In-flight request guards (prevent stacking when server is offline)
 let statusCheckInFlight = false;
 let historyLoadInFlight = false;
 let eventsLoadInFlight = false;
+let eventCostsLoadInFlight = false;
 let restartInProgress = false;  // Prevents status polling from resetting restart button
 let restartWentOffline = false; // Tracks if server went offline during restart
+let wasGameAvailable = false;   // Tracks game connection for display name refresh
+let currentPlayerContext = { ready: false, player_name: '', normalized_name: '' };
+let loadedPlayerContext = { ready: false, player_name: '', normalized_name: '' };
+let playerContextCheckInFlight = false;
+let lastPlayerDirtyWarningKey = '';
 
 // Setup wizard state
 let setupStatus = null;
@@ -1723,31 +2368,163 @@ function updateSetupConfigLinks() {
     // Hide "Configure TTS settings first" if TTS is configured
     const ttsLink = document.getElementById('setupTtsConfigLink');
     if (ttsLink) {
-        const ttsProvider = config.tts?.provider || 'inworld';
-        // Hide if: disabled, pocket/neutts (no API key needed), or has API key set
-        const ttsConfigured = (
-            ttsProvider === 'none' ||
-            ttsProvider === 'pocket' ||
-            ttsProvider === 'neutts' ||
-            config.tts?.[ttsProvider]?.api_key
-        );
+        const ttsConfigured = isCurrentTtsConfigured();
         ttsLink.style.display = ttsConfigured ? 'none' : 'flex';
     }
 
     // Hide "Configure LLM settings first" if LLM is configured
     const llmLink = document.getElementById('setupLlmConfigLink');
     if (llmLink) {
-        const llmProvider = config.llm?.provider || 'gemini';
-        // Hide if: provider key is set, OR legacy-only key exists, OR (openai provider AND api_url is set)
-        const legacyKey = config.llm?.api_key;
-        const hasProviderSpecificKeys = Boolean(
-            config.llm?.gemini?.api_key || config.llm?.openrouter?.api_key || config.llm?.openai?.api_key
-        );
-        const hasApiKey = config.llm?.[llmProvider]?.api_key || (legacyKey && !hasProviderSpecificKeys);
-        const isLocalOpenAI = llmProvider === 'openai' && config.llm?.openai?.api_url;
-        const llmConfigured = hasApiKey || isLocalOpenAI;
+        const llmConfigured = isCurrentLlmConfigured();
         llmLink.style.display = llmConfigured ? 'none' : 'flex';
     }
+}
+
+function isCurrentTtsConfigured() {
+    const ttsProvider = config.tts?.provider || 'inworld';
+    return (
+        ttsProvider === 'none' ||
+        ttsProvider === 'pocket' ||
+        ttsProvider === 'neutts' ||
+        ttsProvider === 'omnivoice' ||
+        (ttsProvider === 'omnivoice_api' && Boolean(config.tts?.omnivoice_api?.api_url)) ||
+        Boolean(config.tts?.[ttsProvider]?.api_key)
+    );
+}
+
+function isCurrentLlmConfigured() {
+    const llmProvider = config.llm?.provider || 'gemini';
+    const legacyKey = config.llm?.api_key;
+    const hasProviderSpecificKeys = Boolean(
+        config.llm?.gemini?.api_key || config.llm?.openrouter?.api_key || config.llm?.openai?.api_key || config.llm?.ollama?.api_key || config.llm?.llamacpp?.api_key
+    );
+    const hasApiKey = Boolean(config.llm?.[llmProvider]?.api_key || (legacyKey && !hasProviderSpecificKeys));
+    const isLocalOpenAI = llmProvider === 'openai' && config.llm?.openai?.api_url;
+    const isLlamaCpp = llmProvider === 'llamacpp' && config.llm?.llamacpp?.api_url;
+    return hasApiKey || isLocalOpenAI || isLlamaCpp;
+}
+
+function getCurrentSetupLlmModelsFromConfig() {
+    const convSettings = config.conversation || {};
+    const visionConfig = config.agents?.vision || {};
+    const visionSettings = visionConfig.llm || {};
+    const memorySettings = config.memory || {};
+    const models = {
+        chat: convSettings.chat_model || GEMINI_CHAT_DEFAULT_OR,
+        target: convSettings.target_selection_model || 'meta-llama/llama-4-scout:nitro',
+        interject: convSettings.interjection_model || 'google/gemini-3.1-flash-lite'
+    };
+
+    if (visionConfig.enabled !== false && !isLLMFeatureDisabledByProvider('vision')) {
+        models.vision = visionSettings.model || 'google/gemini-2.5-flash-lite:nitro';
+    }
+    if (convSettings.input_correction_enabled && convSettings.input_correction_model && !isLLMFeatureDisabledByProvider('input_correction')) {
+        models.input_correction = convSettings.input_correction_model;
+    }
+    if (memorySettings.enabled) {
+        for (const [key, settingKey] of [
+            ['chapter', 'chapter_model'],
+            ['prose', 'prose_model'],
+            ['graphiti', 'graphiti_model'],
+            ['graphiti_small', 'graphiti_small_model'],
+            ['reranker', 'reranker_model']
+        ]) {
+            if (memorySettings[settingKey]) {
+                models[key] = memorySettings[settingKey];
+            }
+        }
+    }
+
+    return models;
+}
+
+function getEffectiveSetupStatus(status) {
+    if (!status) return status;
+
+    const effective = JSON.parse(JSON.stringify(status));
+    const currentTtsProvider = config.tts?.provider || effective.steps?.tts?.current_provider || 'inworld';
+    const currentLlmProvider = config.llm?.provider || effective.steps?.llm?.current_provider || 'gemini';
+
+    const ttsRunning = effective.running_command === 'test_tts';
+    const llmRunning = effective.running_command === 'test_llm';
+    const ttsValidForProvider = effective.steps?.tts?.tested && effective.steps?.tts?.tested_provider === currentTtsProvider;
+    const llmValidForProvider = effective.steps?.llm?.tested && effective.steps?.llm?.tested_provider === currentLlmProvider;
+
+    if (effective.steps?.tts) {
+        effective.steps.tts.current_provider = currentTtsProvider;
+        effective.steps.tts.tested = ttsValidForProvider;
+        if (!ttsRunning && (!ttsValidForProvider || !isCurrentTtsConfigured())) {
+            effective.steps.tts.status = 'not_started';
+        }
+    }
+
+    if (effective.steps?.llm) {
+        effective.steps.llm.current_provider = currentLlmProvider;
+        effective.steps.llm.tested = llmValidForProvider;
+        effective.steps.llm.models = getCurrentSetupLlmModelsFromConfig();
+        if (!llmRunning && (!llmValidForProvider || !isCurrentLlmConfigured())) {
+            effective.steps.llm.status = 'not_started';
+        }
+    }
+
+    effective.complete = Boolean(
+        effective.steps?.localization?.status === 'complete' &&
+        effective.steps?.voices?.status === 'complete' &&
+        effective.steps?.tts?.status === 'complete' &&
+        effective.steps?.llm?.status === 'complete'
+    );
+
+    return effective;
+}
+
+function refreshSetupStateFromConfig() {
+    updateSetupConfigLinks();
+    if (setupStatus) {
+        updateSetupUI(setupStatus, setupStatus);
+    }
+}
+
+function formatHotkeyLabel(hotkey) {
+    const labels = {
+        enter: 'Enter',
+        middle_mouse: 'Middle Mouse',
+        delete: 'Delete',
+        home: 'Home',
+        end: 'End',
+        insert: 'Insert',
+        escape: 'Escape',
+        backquote: 'Tilde (~)'
+    };
+
+    if (!hotkey) return 'Unbound';
+    return labels[hotkey] || hotkey.toUpperCase();
+}
+
+function getSetupReadyTips() {
+    const boldHotkey = (hotkey) => `<strong>${hotkey}</strong>`;
+    const chatHotkey = formatHotkeyLabel(config.input?.chat_hotkey || 'enter');
+    const stopHotkey = formatHotkeyLabel(config.input?.stop_hotkey || 'delete');
+    const modeHotkey = formatHotkeyLabel(config.input?.mode_hotkey || 'home');
+    const fpvHotkey = formatHotkeyLabel(config.input?.fpv_hotkey || 'insert');
+    const owlPostHotkey = formatHotkeyLabel(config.input?.owlpost_hotkey || 'backquote');
+    const sttProvider = config.stt?.provider || 'none';
+    const openMicEnabled = config.open_mic?.enabled === true;
+    const micEnabled = sttProvider !== 'none';
+    const sttHotkey = formatHotkeyLabel(config.stt?.hotkey || 'middle_mouse');
+    const micModeText = openMicEnabled
+        ? `Press ${boldHotkey(sttHotkey)} to toggle open mic on or off.`
+        : `Hold ${boldHotkey(sttHotkey)} for push-to-talk while speaking.`;
+
+    return [
+        `To get started, press ${boldHotkey(chatHotkey)} to open chat with a nearby NPC.`,
+        micEnabled
+            ? micModeText
+            : 'Voice input is disabled.',
+        `Press ${boldHotkey(stopHotkey)} to stop the current conversation at any time.`,
+        `Press ${boldHotkey(modeHotkey)} to cycle conversation modes like Default, 1-to-1, and Continuous.`,
+        `Press ${boldHotkey(fpvHotkey)} to toggle first-person view.`,
+        `Press ${boldHotkey(owlPostHotkey)} to open Owl Post.`
+    ];
 }
 
 function showSetupCompleteModal() {
@@ -1775,6 +2552,10 @@ function showSetupCompleteModal() {
         text-align: center;
     `;
 
+    const readyTips = getSetupReadyTips()
+        .map(tip => `<li style="margin: 0 0 0.5rem;">${tip}</li>`)
+        .join('');
+
     modal.innerHTML = `
         <div style="display:flex;justify-content:center;margin-bottom:0.8rem;color:var(--gold-bright, #d4a84b);">
             <i data-lucide="sparkles"></i>
@@ -1788,6 +2569,24 @@ function showSetupCompleteModal() {
         <p style="line-height: 1.6; margin: 0 0 1.5rem; opacity: 0.9;">
             The default settings are already tuned for most players, so you can jump in now and tweak things later only if you want to.
         </p>
+        <div style="
+            text-align: left;
+            margin: 0 0 1.5rem;
+            padding: 1rem 1.1rem;
+            border-radius: 8px;
+            background: rgba(244, 228, 193, 0.06);
+            border: 1px solid rgba(212, 168, 75, 0.18);
+        ">
+            <div style="
+                font-family: var(--font-display, 'Cinzel', serif);
+                color: var(--gold-bright, #d4a84b);
+                margin-bottom: 0.7rem;
+                font-size: 0.95rem;
+            ">Current Bindings</div>
+            <ul style="margin: 0; padding-left: 1.2rem; line-height: 1.6; opacity: 0.95;">
+                ${readyTips}
+            </ul>
+        </div>
         <button id="setupReadyClose" style="
             font-family: var(--font-display, 'Cinzel', serif);
             background: linear-gradient(135deg, var(--gold-dark, #8b6914), var(--gold-bright, #d4a84b));
@@ -1819,7 +2618,68 @@ function showSetupCompleteModal() {
     }
 }
 
+function showConfigConfirmModal({
+    title = 'Are you sure?',
+    message = '',
+    details = [],
+    confirmText = 'Continue',
+    cancelText = 'Cancel',
+    icon = 'alert-triangle'
+} = {}) {
+    return new Promise(resolve => {
+        const existing = document.getElementById('configConfirmOverlay');
+        if (existing) existing.remove();
+
+        const overlay = document.createElement('div');
+        overlay.id = 'configConfirmOverlay';
+        overlay.className = 'config-modal-overlay';
+
+        const detailItems = details
+            .filter(Boolean)
+            .map(detail => `<li>${escapeHtml(detail)}</li>`)
+            .join('');
+
+        overlay.innerHTML = `
+            <div class="config-modal-card" role="dialog" aria-modal="true" aria-labelledby="configConfirmTitle">
+                <div class="config-modal-icon"><i data-lucide="${icon}"></i></div>
+                <h2 id="configConfirmTitle">${escapeHtml(title)}</h2>
+                ${message ? `<p>${escapeHtml(message)}</p>` : ''}
+                ${detailItems ? `<ul class="config-modal-details">${detailItems}</ul>` : ''}
+                <div class="config-modal-actions">
+                    <button type="button" class="btn btn-secondary" id="configConfirmCancel">${escapeHtml(cancelText)}</button>
+                    <button type="button" class="btn btn-warning" id="configConfirmOk">${escapeHtml(confirmText)}</button>
+                </div>
+            </div>
+        `;
+
+        const close = confirmed => {
+            overlay.remove();
+            document.removeEventListener('keydown', onKeyDown);
+            resolve(confirmed);
+        };
+
+        const onKeyDown = event => {
+            if (event.key === 'Escape') close(false);
+        };
+
+        overlay.addEventListener('click', event => {
+            if (event.target === overlay) close(false);
+        });
+
+        document.addEventListener('keydown', onKeyDown);
+        document.body.appendChild(overlay);
+        document.getElementById('configConfirmCancel')?.addEventListener('click', () => close(false));
+        document.getElementById('configConfirmOk')?.addEventListener('click', () => close(true));
+        document.getElementById('configConfirmCancel')?.focus();
+
+        if (window.lucide) {
+            lucide.createIcons({ nodes: [overlay] });
+        }
+    });
+}
+
 function updateSetupUI(status, previousStatus = null) {
+    const effectiveStatus = getEffectiveSetupStatus(status);
     const setupSection = document.getElementById('chapterSetup');
     const navSetup = document.getElementById('navSetup');
     const setupTitle = document.getElementById('setupTitle');
@@ -1831,7 +2691,7 @@ function updateSetupUI(status, previousStatus = null) {
 
     // Update language dropdown - use local config value if available (user may have just changed it)
     // Otherwise fall back to server status or default
-    const currentLanguage = config.setup?.language || status.language || 'EN_US';
+    const currentLanguage = config.setup?.language || effectiveStatus.language || 'EN_US';
     document.getElementById('setupLanguage').value = currentLanguage;
 
     // Update TTS test text to match current language (only if not already set)
@@ -1843,15 +2703,15 @@ function updateSetupUI(status, previousStatus = null) {
     // Show/hide warnings banner
     const warningsDiv = document.getElementById('setupWarnings');
     if (warningsDiv) {
-        if (status.warnings && status.warnings.length > 0) {
-            warningsDiv.textContent = status.warnings.join('\n');
+        if (effectiveStatus.warnings && effectiveStatus.warnings.length > 0) {
+            warningsDiv.textContent = effectiveStatus.warnings.join('\n');
             warningsDiv.style.display = 'block';
         } else {
             warningsDiv.style.display = 'none';
         }
     }
 
-    if (status.complete) {
+    if (effectiveStatus.complete) {
         // Setup complete: rename, collapse, hide intro
         setupTitle.textContent = 'Setup';
         setupIntro.style.display = 'none';
@@ -1863,7 +2723,8 @@ function updateSetupUI(status, previousStatus = null) {
         hideSetupError();
 
         // Detect real transition from incomplete -> complete
-        const justCompleted = Boolean(previousStatus && !previousStatus.complete && status.complete);
+        const previousEffectiveStatus = getEffectiveSetupStatus(previousStatus);
+        const justCompleted = Boolean(previousEffectiveStatus && !previousEffectiveStatus.complete && effectiveStatus.complete);
 
         // Celebrate with confetti when setup completes (only once per session)
         if (justCompleted && !setupConfettiShown && typeof confetti === 'function') {
@@ -1877,12 +2738,12 @@ function updateSetupUI(status, previousStatus = null) {
         }
 
         // Still update test steps so they show "Retest"
-        updateSetupStep(3, status.steps.tts);
-        updateSetupStep(4, status.steps.llm);
+        updateSetupStep(3, effectiveStatus.steps.tts);
+        updateSetupStep(4, effectiveStatus.steps.llm);
 
         // Populate LLM models list for retesting
-        if (status.steps.llm && status.steps.llm.models) {
-            populateLlmModels(status.steps.llm.models);
+        if (effectiveStatus.steps.llm && effectiveStatus.steps.llm.models) {
+            populateLlmModels(effectiveStatus.steps.llm.models);
         }
 
         // Update "configure settings first" link visibility
@@ -1897,13 +2758,13 @@ function updateSetupUI(status, previousStatus = null) {
         setupSection.classList.remove('collapsed');
 
         // Update all steps
-        updateSetupStep(1, status.steps.localization);
-        updateSetupStep(2, status.steps.voices);
-        updateSetupStep(3, status.steps.tts);
-        updateSetupStep(4, status.steps.llm);
+        updateSetupStep(1, effectiveStatus.steps.localization);
+        updateSetupStep(2, effectiveStatus.steps.voices);
+        updateSetupStep(3, effectiveStatus.steps.tts);
+        updateSetupStep(4, effectiveStatus.steps.llm);
 
         // Step 2 requires step 1 to be complete
-        if (status.steps.localization?.status !== 'complete') {
+        if (effectiveStatus.steps.localization?.status !== 'complete') {
             const step2Btn = document.getElementById('setupStep2Btn');
             const step2SkipBtn = document.getElementById('setupStep2SkipBtn');
             if (step2Btn) step2Btn.disabled = true;
@@ -1911,28 +2772,28 @@ function updateSetupUI(status, previousStatus = null) {
         }
 
         // Populate LLM models list if not tested yet
-        if (status.steps.llm && status.steps.llm.models && status.steps.llm.status !== 'complete') {
-            populateLlmModels(status.steps.llm.models);
+        if (effectiveStatus.steps.llm && effectiveStatus.steps.llm.models && effectiveStatus.steps.llm.status !== 'complete') {
+            populateLlmModels(effectiveStatus.steps.llm.models);
         }
 
         // Update "configure settings first" link visibility
         updateSetupConfigLinks();
 
         // Show/hide error
-        if (status.last_error) {
-            showSetupError(status.last_error);
+        if (effectiveStatus.last_error) {
+            showSetupError(effectiveStatus.last_error, inferSetupErrorStep(effectiveStatus));
         } else {
             hideSetupError();
         }
 
         // Start polling if any step is running
-        if (status.running_command) {
+        if (effectiveStatus.running_command) {
             startSetupPolling();
         }
     }
 
     // Update sticky setup banner
-    updateSetupBanner(status.complete);
+    updateSetupBanner(effectiveStatus.complete);
 }
 
 function syncSetupBannerOffset() {
@@ -2087,9 +2948,37 @@ function updateVoiceProgress(stepData) {
             `;
 }
 
-function showSetupError(message) {
-    const errorDiv = document.getElementById('setupError');
-    const errorMsg = document.getElementById('setupErrorMessage');
+function inferSetupErrorStep(status = setupStatus) {
+    if (!status?.steps) return null;
+
+    if (status.steps.localization?.status === 'error') return 1;
+    if (status.steps.voices?.status === 'error') return 2;
+    if (status.steps.tts?.status === 'error') return 3;
+    if (status.steps.llm?.status === 'error') return 4;
+
+    switch (status.running_command) {
+        case 'extract_localization': return 1;
+        case 'extract_voices': return 2;
+        case 'test_tts': return 3;
+        case 'test_llm': return 4;
+        default: return null;
+    }
+}
+
+let _lastSetupError = null;
+
+function showSetupError(message, stepNum = null) {
+    const targetStep = stepNum || inferSetupErrorStep();
+    if (!targetStep) return;
+
+    const errorKey = `${targetStep}:${message}`;
+    const isNewError = errorKey !== _lastSetupError;
+
+    hideSetupError(false);
+
+    const errorDiv = document.getElementById(`setupStep${targetStep}Error`);
+    const errorMsg = document.getElementById(`setupStep${targetStep}ErrorMessage`);
+    if (!errorDiv || !errorMsg) return;
 
     // Convert URLs to clickable links while escaping other HTML
     const urlRegex = /(https?:\/\/[^\s]+)/g;
@@ -2099,19 +2988,27 @@ function showSetupError(message) {
     errorMsg.innerHTML = messageWithLinks;
     errorDiv.style.display = 'block';
 
-    // Scroll error into view with padding so user can see it
-    setTimeout(() => {
-        const rect = errorDiv.getBoundingClientRect();
-        const bottomPadding = 100;
-        const targetY = window.scrollY + rect.bottom + bottomPadding - window.innerHeight;
-        if (targetY > window.scrollY) {
-            window.scrollTo({ top: targetY, behavior: 'smooth' });
-        }
-    }, 50);  // Small delay to ensure element is rendered
+    // Only scroll on a genuinely new error, not repeated polling of the same one.
+    if (isNewError) {
+        _lastSetupError = errorKey;
+        setTimeout(() => {
+            const rect = errorDiv.getBoundingClientRect();
+            const topPadding = 120;
+            const targetY = window.scrollY + rect.top - topPadding;
+            if (rect.bottom > window.innerHeight || rect.top < 0) {
+                window.scrollTo({ top: targetY, behavior: 'smooth' });
+            }
+        }, 50);
+    }
 }
 
-function hideSetupError() {
-    document.getElementById('setupError').style.display = 'none';
+function hideSetupError(resetLastError = true) {
+    if (resetLastError) {
+        _lastSetupError = null;
+    }
+    document.querySelectorAll('.setup-step-error').forEach(errorEl => {
+        errorEl.style.display = 'none';
+    });
 }
 
 function startSetupPolling() {
@@ -2172,12 +3069,12 @@ async function startLocalizationExtraction() {
             checkSetupStatus();
         } else {
             const data = await response.json();
-            showSetupError(data.error || 'Failed to start extraction');
+            showSetupError(data.error || 'Failed to start extraction', 1);
             btn.disabled = false;
             btnText.textContent = 'Retry';
         }
     } catch (e) {
-        showSetupError('Network error: Could not connect to server');
+        showSetupError('Network error: Could not connect to server', 1);
         btn.disabled = false;
         btnText.textContent = 'Retry';
     }
@@ -2205,12 +3102,12 @@ async function startVoiceExtraction() {
             checkSetupStatus();
         } else {
             const data = await response.json();
-            showSetupError(data.error || 'Failed to start voice extraction');
+            showSetupError(data.error || 'Failed to start voice extraction', 2);
             btn.disabled = false;
             btnText.textContent = 'Retry';
         }
     } catch (e) {
-        showSetupError('Network error: Could not connect to server');
+        showSetupError('Network error: Could not connect to server', 2);
         btn.disabled = false;
         btnText.textContent = 'Retry';
     }
@@ -2243,7 +3140,7 @@ async function startTtsTest() {
             showToast(`TTS working! Voice: ${data.voice_used}`, 'success');
             checkSetupStatus();
         } else {
-            showSetupError(`TTS Error: ${data.error}`);
+            showSetupError(`TTS Error: ${data.error}`, 3);
             btn.disabled = false;
             btnText.textContent = 'Retry';
         }
@@ -2252,7 +3149,7 @@ async function startTtsTest() {
         const msg = isOffline
             ? 'Server is not running. Make sure the game is open before testing.'
             : `Network error: ${e.message}`;
-        showSetupError(msg);
+        showSetupError(msg, 3);
         btn.disabled = false;
         btnText.textContent = 'Retry';
     }
@@ -2288,7 +3185,7 @@ async function startLlmTest() {
             if (data.results) {
                 updateLlmModelResults(data.results);
             }
-            showSetupError(`LLM Error: ${data.error}`);
+            showSetupError(`LLM Error: ${data.error}`, 4);
             btn.disabled = false;
             btnText.textContent = 'Retry';
         }
@@ -2297,7 +3194,7 @@ async function startLlmTest() {
         const msg = isOffline
             ? 'Server is not running. Make sure the game is open before testing.'
             : `Network error: ${e.message}`;
-        showSetupError(msg);
+        showSetupError(msg, 4);
         btn.disabled = false;
         btnText.textContent = 'Retry';
     }
@@ -2312,9 +3209,10 @@ function updateLlmModelResults(results) {
         div.className = 'setup-model-item ' + (info.success ? 'success' : 'error');
         div.innerHTML = `
                     <span class="setup-model-status">${info.success ? '✓' : '✗'}</span>
-                    <span class="setup-model-name">${modelId}</span>
-                    <span class="setup-model-uses">(${info.used_for.join(', ')})</span>
-                    ${info.error ? `<div class="setup-model-error">${info.error}</div>` : ''}
+                    <span class="setup-model-name">${escapeHtml(modelId)}</span>
+                    <span class="setup-model-uses">(${escapeHtml(info.used_for.join(', '))})</span>
+                    ${info.warning ? `<div class="setup-model-warning">${escapeHtml(info.warning)}</div>` : ''}
+                    ${info.error ? `<div class="setup-model-error">${escapeHtml(info.error)}</div>` : ''}
                 `;
         container.appendChild(div);
     }
@@ -2373,15 +3271,22 @@ const CharacterSearch = (() => {
 
             // Get searchable content
             const nameInput = card.querySelector('.character-name-input');
-            const guidanceInput = card.querySelector('.character-guidance-input');
+            const staticBioInput = card.querySelector('.character-static-bio-input');
+            const guidanceInput = card.querySelector('.character-editor-guidance-input');
             const titleText = card.querySelector('.character-title-text');
 
-            const name = (nameInput?.value || titleText?.textContent || '').toLowerCase();
-            const guidance = (guidanceInput?.value || '').toLowerCase();
+            const name = [
+                nameInput?.value || '',
+                titleText?.textContent || ''
+            ].join(' ').toLowerCase();
+            const searchText = [
+                staticBioInput?.value || '',
+                guidanceInput?.value || ''
+            ].join(' ').toLowerCase();
 
-            // Check if search term matches name or guidance
+            // Check if search term matches name or profile text
             const matchesName = name.includes(normalizedSearch);
-            const matchesGuidance = guidance.includes(normalizedSearch);
+            const matchesGuidance = searchText.includes(normalizedSearch);
             const isVisible = normalizedSearch === '' || matchesName || matchesGuidance;
 
             // Apply filter with animation
@@ -2490,6 +3395,305 @@ const CharacterSearch = (() => {
 })();
 
 // ============================================
+//  Page Search
+// ============================================
+
+const ConfigPageSearch = (() => {
+    let searchInput = null;
+    let clearButton = null;
+    let prevButton = null;
+    let nextButton = null;
+    let statusDisplay = null;
+    let controlsWrap = null;
+    let matches = [];
+    let activeIndex = -1;
+
+    function updateStatus() {
+        if (!statusDisplay) return;
+
+        if (matches.length === 0) {
+            statusDisplay.textContent = searchInput && searchInput.value.trim() ? '0 matches' : '';
+            return;
+        }
+
+        statusDisplay.textContent = `${activeIndex + 1} / ${matches.length}`;
+    }
+
+    function updateButtonState() {
+        const hasQuery = Boolean(searchInput && searchInput.value.trim());
+        if (clearButton) {
+            clearButton.style.display = hasQuery ? 'inline-flex' : 'none';
+        }
+        if (controlsWrap) {
+            controlsWrap.style.display = hasQuery ? 'flex' : 'none';
+        }
+
+        const disabled = matches.length === 0;
+        if (prevButton) prevButton.disabled = disabled;
+        if (nextButton) nextButton.disabled = disabled;
+    }
+
+    function clearHighlights(root = document.querySelector('.grimoire')) {
+        if (!root) return;
+
+        root.querySelectorAll('mark.config-search-match').forEach(mark => {
+            const parent = mark.parentNode;
+            if (!parent) return;
+
+            parent.replaceChild(document.createTextNode(mark.textContent), mark);
+            parent.normalize();
+        });
+
+        root.querySelectorAll('.config-search-input-match, .config-search-input-match-active').forEach(el => {
+            el.classList.remove('config-search-input-match', 'config-search-input-match-active');
+        });
+
+        matches = [];
+        activeIndex = -1;
+        updateStatus();
+        updateButtonState();
+    }
+
+    function shouldSkipTextNode(node) {
+        if (!node || !node.parentElement) return true;
+
+        const parent = node.parentElement;
+        if (!node.nodeValue || !node.nodeValue.trim()) return true;
+        if (parent.closest('#configSearchPanel')) return true;
+        if (parent.closest('#chapterEvents')) return true;
+        if (parent.closest('#historyTableBody, #historyAllTableBody, #historyAllCount, #commitmentRecentBody, #commitmentAllBody, #commitmentAllCount, #commitmentRecentEmpty')) return true;
+        if (parent.closest('script, style, option, select, textarea')) return true;
+        if (parent.closest('.toast, .toast-container')) return true;
+
+        return false;
+    }
+
+    function shouldSkipValueElement(el) {
+        if (!el) return true;
+        if (el.closest('#configSearchPanel')) return true;
+        if (el.closest('#chapterEvents')) return true;
+        if (el.closest('#historyTableBody, #historyAllTableBody, #historyAllCount, #commitmentRecentBody, #commitmentAllBody, #commitmentAllCount, #commitmentRecentEmpty')) return true;
+        if (el.closest('.toast, .toast-container')) return true;
+        if (el.matches('input[type="hidden"], input[type="checkbox"], input[type="radio"], input[type="range"], input[type="file"], input[type="button"], input[type="submit"], input[type="reset"]')) return true;
+
+        return false;
+    }
+
+    function collectTextNodes(root) {
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+            acceptNode(node) {
+                return shouldSkipTextNode(node)
+                    ? NodeFilter.FILTER_REJECT
+                    : NodeFilter.FILTER_ACCEPT;
+            }
+        });
+
+        const nodes = [];
+        let current = walker.nextNode();
+        while (current) {
+            nodes.push(current);
+            current = walker.nextNode();
+        }
+        return nodes;
+    }
+
+    function collectValueMatches(root, queryLower) {
+        const valueMatches = [];
+        const controls = root.querySelectorAll('input, textarea, select');
+
+        controls.forEach(control => {
+            if (shouldSkipValueElement(control)) return;
+
+            const value = control.tagName === 'SELECT'
+                ? control.options[control.selectedIndex]?.text || control.value || ''
+                : control.value || '';
+            const valueLower = value.toLowerCase();
+            let matchIndex = valueLower.indexOf(queryLower);
+
+            while (matchIndex !== -1) {
+                control.classList.add('config-search-input-match');
+                valueMatches.push({
+                    type: 'value',
+                    element: control,
+                    start: matchIndex,
+                    end: matchIndex + queryLower.length
+                });
+                matchIndex = valueLower.indexOf(queryLower, matchIndex + queryLower.length);
+            }
+        });
+
+        return valueMatches;
+    }
+
+    function highlightNode(node, queryLower) {
+        const text = node.nodeValue;
+        const textLower = text.toLowerCase();
+        let startIndex = 0;
+        let matchIndex = textLower.indexOf(queryLower, startIndex);
+
+        if (matchIndex === -1) return [];
+
+        const fragment = document.createDocumentFragment();
+        const nodeMatches = [];
+
+        while (matchIndex !== -1) {
+            if (matchIndex > startIndex) {
+                fragment.appendChild(document.createTextNode(text.slice(startIndex, matchIndex)));
+            }
+
+            const mark = document.createElement('mark');
+            mark.className = 'config-search-match';
+            mark.textContent = text.slice(matchIndex, matchIndex + queryLower.length);
+            fragment.appendChild(mark);
+            nodeMatches.push(mark);
+
+            startIndex = matchIndex + queryLower.length;
+            matchIndex = textLower.indexOf(queryLower, startIndex);
+        }
+
+        if (startIndex < text.length) {
+            fragment.appendChild(document.createTextNode(text.slice(startIndex)));
+        }
+
+        node.parentNode.replaceChild(fragment, node);
+        return nodeMatches.map(mark => ({ type: 'text', element: mark }));
+    }
+
+    function resizePanelTextareas(panel) {
+        if (!panel) return;
+
+        const textareas = panel.querySelectorAll('textarea');
+        if (textareas.length === 0) return;
+
+        requestAnimationFrame(() => {
+            textareas.forEach(textarea => {
+                textarea.style.height = 'auto';
+                textarea.style.height = textarea.scrollHeight + 'px';
+            });
+        });
+    }
+
+    function expandParents(el) {
+        const chapter = el.closest('.chapter');
+        if (chapter) {
+            chapter.classList.remove('collapsed');
+            _resizeChapterTextareas(chapter);
+        }
+
+        let panel = el.closest('.sub-panel');
+        while (panel) {
+            panel.classList.remove('collapsed');
+            resizePanelTextareas(panel);
+            panel = panel.parentElement?.closest('.sub-panel');
+        }
+    }
+
+    function focusMatch(index) {
+        if (matches.length === 0) return;
+
+        if (activeIndex >= 0 && matches[activeIndex]) {
+            const previous = matches[activeIndex];
+            const previousElement = previous.element;
+            if (previous.type === 'value') {
+                previousElement.classList.remove('config-search-input-match-active');
+            } else {
+                previousElement.classList.remove('config-search-match-active');
+            }
+        }
+
+        activeIndex = (index + matches.length) % matches.length;
+        const match = matches[activeIndex];
+        const matchElement = match.element;
+        expandParents(matchElement);
+
+        if (match.type === 'value') {
+            matchElement.classList.add('config-search-input-match-active');
+            matchElement.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+            matchElement.focus({ preventScroll: true });
+            if (typeof matchElement.setSelectionRange === 'function') {
+                try {
+                    matchElement.setSelectionRange(match.start, match.end);
+                } catch (e) {
+                    // Some form controls expose a value but do not support text selection.
+                }
+            }
+        } else {
+            matchElement.classList.add('config-search-match-active');
+            matchElement.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+        }
+
+        updateStatus();
+        updateButtonState();
+    }
+
+    function performSearch(rawQuery) {
+        const root = document.querySelector('.grimoire');
+        if (!root) return;
+
+        clearHighlights(root);
+        const query = rawQuery.trim();
+        if (!query) return;
+
+        const queryLower = query.toLowerCase();
+        const textNodes = collectTextNodes(root);
+
+        textNodes.forEach(node => {
+            matches.push(...highlightNode(node, queryLower));
+        });
+        matches.push(...collectValueMatches(root, queryLower));
+
+        if (matches.length > 0) {
+            focusMatch(0);
+        } else {
+            updateStatus();
+            updateButtonState();
+        }
+    }
+
+    function clearSearch() {
+        if (searchInput) {
+            searchInput.value = '';
+            clearHighlights();
+            searchInput.focus();
+        }
+    }
+
+    function init() {
+        searchInput = document.getElementById('configSearchInput');
+        clearButton = document.getElementById('configSearchClear');
+        prevButton = document.getElementById('configSearchPrev');
+        nextButton = document.getElementById('configSearchNext');
+        statusDisplay = document.getElementById('configSearchStatus');
+        controlsWrap = document.querySelector('#configSearchPanel .nav-search-controls');
+
+        if (!searchInput) return;
+
+        updateStatus();
+        updateButtonState();
+
+        searchInput.addEventListener('input', e => performSearch(e.target.value));
+        searchInput.addEventListener('keydown', e => {
+            if (e.key === 'Enter') {
+                focusMatch(activeIndex + (e.shiftKey ? -1 : 1));
+                e.preventDefault();
+            } else if (e.key === 'Escape') {
+                clearSearch();
+                e.preventDefault();
+            }
+        });
+
+        clearButton?.addEventListener('click', clearSearch);
+        prevButton?.addEventListener('click', () => focusMatch(activeIndex - 1));
+        nextButton?.addEventListener('click', () => focusMatch(activeIndex + 1));
+    }
+
+    return {
+        init,
+        clearSearch
+    };
+})();
+
+// ============================================
 //  Auto-Expanding Textarea System
 // ============================================
 
@@ -2540,7 +3744,10 @@ const AutoExpandTextarea = (() => {
      */
     function initTextarea(textarea) {
         // Skip if already initialized
-        if (initializedTextareas.has(textarea)) return;
+        if (initializedTextareas.has(textarea)) {
+            resizeTextarea(textarea);
+            return;
+        }
         initializedTextareas.add(textarea);
 
         // Set initial size
@@ -2672,6 +3879,7 @@ const AutoExpandTextarea = (() => {
             });
         },
         initTextarea,
+        resizeTextarea,
         resizeAll
     };
 })();
@@ -2744,14 +3952,17 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Check setup status first (config not loaded yet, so config links won't be accurate)
     await checkSetupStatus();
+    await Promise.all([loadVoiceManifestIds(), loadCharacterDisplayNames()]);
 
     await loadConfig();
 
-    // Now that config is loaded, update the "configure settings first" links
-    updateSetupConfigLinks();
-
+    // Re-apply setup UI now that local provider/config state is available.
+    refreshSetupStateFromConfig();
     // Initialize VRAM monitoring if NeuTTS + GPU is selected
     updateVramMonitoring();
+
+    // Initialize OmniVoice panel if selected
+    updateOmniVoicePanel();
 
     // Initialize reasoning toggles for model inputs (after config loaded)
     if (window.ReasoningToggle) {
@@ -2762,9 +3973,16 @@ document.addEventListener('DOMContentLoaded', async () => {
         const masterEnabled = config.llm?.[provider]?.reasoning_enabled === true;
         ReasoningToggle.setMasterEnabled(masterEnabled);
     }
+    if (window.ProviderRouting) {
+        ProviderRouting.init(config);
+    }
+
+    await refreshOpenRouterModelAutocompletes();
 
     await loadDialogueHistory();
     await loadMigrationStatus();
+    await loadVectorMigrationStatus();
+    await loadGraphBackups();
     checkServerStatus();
 
     // Initialize commitments
@@ -2776,12 +3994,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Initialize character search filter
     CharacterSearch.init();
+    ConfigPageSearch.init();
 
     // Poll server status every 5 seconds (includes game time)
     setInterval(checkServerStatus, 5000);
-    // Poll dialogue history and commitments every 10 seconds
+    // Poll dialogue history every 10 seconds, commitments every 30 seconds
     setInterval(loadDialogueHistory, 10000);
-    setInterval(loadCommitments, 10000);
+    setInterval(loadCommitments, 30000);
 
     // Event delegation for character accordion toggles
     document.getElementById('bioList').addEventListener('click', (e) => {
@@ -2801,6 +4020,23 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
 
+    const owlCustomCharacterList = document.getElementById('owlCustomCharacterList');
+    owlCustomCharacterList?.addEventListener('click', (e) => {
+        const header = e.target.closest('.character-accordion-header');
+        if (!header) return;
+        const card = header.closest('.character-card');
+        if (!card) return;
+        card.classList.toggle('collapsed');
+
+        if (!card.classList.contains('collapsed')) {
+            setTimeout(() => {
+                card.querySelectorAll('.character-guidance-input').forEach(textarea => {
+                    AutoExpandTextarea.initTextarea(textarea);
+                });
+            }, 50);
+        }
+    });
+
     // Navigation link click handler - expand sections before scrolling
     document.querySelectorAll('.nav-links a').forEach(link => {
         link.addEventListener('click', (e) => {
@@ -2815,6 +4051,299 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     });
 });
+
+async function loadVoiceManifestIds() {
+    if (voiceManifestIdsPromise) {
+        return voiceManifestIdsPromise;
+    }
+
+    voiceManifestIdsPromise = fetch('data/voice_manifest.json', { cache: 'no-store' })
+        .then(resp => {
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            return resp.json();
+        })
+        .then(data => {
+            const voices = data?.voices && typeof data.voices === 'object' ? data.voices : {};
+            voiceManifestIds = Object.keys(voices).sort((a, b) => a.localeCompare(b));
+            refreshCharacterIdAutocompletes();
+            return voiceManifestIds;
+        })
+        .catch(err => {
+            console.error('Failed to load character IDs from voice_manifest.json:', err);
+            voiceManifestIds = [];
+            return voiceManifestIds;
+        });
+
+    return voiceManifestIdsPromise;
+}
+
+async function loadCharacterDisplayNames() {
+    try {
+        const resp = await fetch('/api/character-display-names', { cache: 'no-store' });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const mapping = await resp.json();
+        setCharacterDisplayNames(mapping);
+        // Re-apply display names to already-rendered character cards
+        document.querySelectorAll('#bioList .character-card').forEach(card => {
+            if (card.classList.contains('player-card')) return;
+            const nameInput = card.querySelector('.character-name-input');
+            const titleText = card.querySelector('.character-title-text');
+            if (nameInput && titleText) {
+                titleText.textContent = getCharacterDisplayName(nameInput.value, 'New Character');
+            }
+        });
+    } catch (err) {
+        console.error('Failed to load character display names:', err);
+    }
+}
+
+function setCharacterDisplayNames(mapping = {}) {
+    characterDisplayNames = {};
+    if (!mapping || typeof mapping !== 'object') {
+        return;
+    }
+
+    for (const [npcId, displayName] of Object.entries(mapping)) {
+        const normalizedId = String(npcId || '').trim();
+        const normalizedDisplay = String(displayName || '').trim();
+        if (!normalizedId || !normalizedDisplay) continue;
+        characterDisplayNames[normalizedId] = normalizedDisplay;
+        characterDisplayNames[normalizedId.toLowerCase()] = normalizedDisplay;
+    }
+}
+
+function getCharacterDisplayName(npcId, fallback = 'New Character') {
+    const normalizedId = String(npcId || '').trim();
+    if (!normalizedId) return fallback;
+
+    const lower = normalizedId.toLowerCase();
+    if (lower === 'player' || lower === 'playermale' || lower === 'playerfemale') {
+        return 'Player';
+    }
+
+    return characterDisplayNames[normalizedId] || characterDisplayNames[lower] || prettifyVoiceName(normalizedId);
+}
+
+async function loadOpenRouterModelIds() {
+    if (openRouterModelIdsPromise) {
+        return openRouterModelIdsPromise;
+    }
+
+    openRouterModelIdsPromise = fetch('/api/openrouter-models', { cache: 'no-store' })
+        .then(resp => {
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            return resp.json();
+        })
+        .then(data => {
+            openRouterModelIds = Array.isArray(data)
+                ? data.filter(id => typeof id === 'string' && id.trim())
+                    .sort((a, b) => a.localeCompare(b))
+                : [];
+            return openRouterModelIds;
+        })
+        .catch(err => {
+            console.error('Failed to load OpenRouter model IDs:', err);
+            openRouterModelIds = [];
+            return openRouterModelIds;
+        });
+
+    return openRouterModelIdsPromise;
+}
+
+async function loadOpenRouterEmbeddingModelIds() {
+    if (openRouterEmbeddingModelIdsPromise) {
+        return openRouterEmbeddingModelIdsPromise;
+    }
+
+    openRouterEmbeddingModelIdsPromise = fetch('/api/openrouter-embedding-models', { cache: 'no-store' })
+        .then(resp => {
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            return resp.json();
+        })
+        .then(data => {
+            openRouterEmbeddingModelIds = Array.isArray(data)
+                ? data.filter(id => typeof id === 'string' && id.trim())
+                    .sort((a, b) => a.localeCompare(b))
+                : ['openai/text-embedding-3-small'];
+            if (!openRouterEmbeddingModelIds.includes('openai/text-embedding-3-small')) {
+                openRouterEmbeddingModelIds.unshift('openai/text-embedding-3-small');
+            }
+            return openRouterEmbeddingModelIds;
+        })
+        .catch(err => {
+            console.error('Failed to load OpenRouter embedding model IDs:', err);
+            openRouterEmbeddingModelIds = ['openai/text-embedding-3-small'];
+            return openRouterEmbeddingModelIds;
+        });
+
+    return openRouterEmbeddingModelIdsPromise;
+}
+
+async function loadOpenRouterVisionModelIds() {
+    if (openRouterVisionModelIdsPromise) {
+        return openRouterVisionModelIdsPromise;
+    }
+
+    openRouterVisionModelIdsPromise = fetch('/api/openrouter-vision-models', { cache: 'no-store' })
+        .then(resp => {
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            return resp.json();
+        })
+        .then(data => {
+            openRouterVisionModelIds = Array.isArray(data)
+                ? data.filter(id => typeof id === 'string' && id.trim())
+                    .sort((a, b) => a.localeCompare(b))
+                : [];
+            return openRouterVisionModelIds;
+        })
+        .catch(err => {
+            console.error('Failed to load OpenRouter vision model IDs:', err);
+            openRouterVisionModelIds = [];
+            return openRouterVisionModelIds;
+        });
+
+    return openRouterVisionModelIdsPromise;
+}
+
+function getOpenRouterModelAutocompleteInputIds() {
+    return [
+        ...new Set([
+            ...Object.values(MODEL_FIELDS).map(field => field.elementId),
+            ...OPENROUTER_MODEL_AUTOCOMPLETE_EXTRA_INPUTS
+        ])
+    ];
+}
+
+function isOpenRouterAutocompleteEnabled() {
+    return config.llm?.provider === 'openrouter';
+}
+
+function getOpenRouterAutocompleteListForInput(input) {
+    if (input?.id === 'embeddingModel') return openRouterEmbeddingModelIds;
+    if (input?.id === MODEL_FIELDS.vision.elementId) return openRouterVisionModelIds;
+    return openRouterModelIds;
+}
+
+function ensureModelAutocompleteCombobox(input) {
+    if (!input) return null;
+
+    const existing = input.closest('.model-autocomplete-combobox');
+    if (existing) return existing;
+
+    const host = input.closest('.input-with-toggle') || input;
+    if (!host?.parentNode) return null;
+
+    const combobox = document.createElement('div');
+    combobox.className = 'model-autocomplete-combobox';
+
+    host.parentNode.insertBefore(combobox, host);
+    combobox.appendChild(host);
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'model-autocomplete-dropdown-btn';
+    const isEmbeddingInput = input.id === 'embeddingModel';
+    button.setAttribute('aria-label', isEmbeddingInput ? 'Browse OpenRouter embedding models' : 'Browse OpenRouter models');
+    button.title = isEmbeddingInput ? 'Browse OpenRouter embedding models' : 'Browse OpenRouter models';
+    button.innerHTML = '&#9662;';
+    combobox.appendChild(button);
+
+    return combobox;
+}
+
+function initializeOpenRouterModelAutocomplete(input, enabled) {
+    if (!window.Awesomplete || !input) return;
+    if (!enabled && !input._openrouterAwesomplete && !input.closest('.model-autocomplete-combobox')) return;
+
+    const combobox = ensureModelAutocompleteCombobox(input);
+    const dropdownBtn = combobox?.querySelector('.model-autocomplete-dropdown-btn');
+    if (!combobox || !dropdownBtn) return;
+
+    combobox.classList.toggle('autocomplete-disabled', !enabled);
+    dropdownBtn.style.display = enabled ? '' : 'none';
+
+    const filterFn = Awesomplete.FILTER_CONTAINS || ((text, userInput) =>
+        text.toLowerCase().includes(userInput.toLowerCase()));
+    const openRouterFilterFn = (text, userInput) =>
+        input._openrouterShowFullList || filterFn(text, userInput);
+
+    if (!input._openrouterAwesomplete) {
+        const awesomplete = new Awesomplete(input, {
+            list: enabled ? getOpenRouterAutocompleteListForInput(input) : [],
+            minChars: 1,
+            maxItems: OPENROUTER_MODEL_AUTOCOMPLETE_MAX_ITEMS,
+            autoFirst: false,
+            sort: false,
+            filter: openRouterFilterFn
+        });
+
+        input._openrouterAwesomplete = awesomplete;
+
+        input.addEventListener('awesomplete-selectcomplete', () => {
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+    } else {
+        input._openrouterAwesomplete.list = enabled ? getOpenRouterAutocompleteListForInput(input) : [];
+    }
+
+    dropdownBtn.onclick = (e) => {
+        e.preventDefault();
+        if (!enabled) return;
+
+        const awesomplete = input._openrouterAwesomplete;
+        if (!awesomplete) return;
+
+        input.focus();
+
+        if (!awesomplete.ul.hasAttribute('hidden')) {
+            awesomplete.close();
+            return;
+        }
+
+        const previousMinChars = awesomplete.minChars;
+        input._openrouterShowFullList = true;
+        awesomplete.minChars = 0;
+        awesomplete.evaluate();
+        awesomplete.open();
+        awesomplete.minChars = previousMinChars;
+        input._openrouterShowFullList = false;
+    };
+
+    if (!enabled) {
+        input._openrouterAwesomplete.close();
+    }
+}
+
+async function refreshOpenRouterModelAutocompletes() {
+    const enabled = isOpenRouterAutocompleteEnabled();
+    if (enabled) {
+        await Promise.all([
+            loadOpenRouterModelIds(),
+            loadOpenRouterEmbeddingModelIds(),
+            loadOpenRouterVisionModelIds()
+        ]);
+    }
+
+    for (const inputId of getOpenRouterModelAutocompleteInputIds()) {
+        const input = document.getElementById(inputId);
+        if (!input) continue;
+        initializeOpenRouterModelAutocomplete(input, enabled);
+    }
+
+    // Also refresh character LLM model override inputs (dynamic, no static IDs)
+    document.querySelectorAll('#bioList .character-llm-model-override').forEach(input => {
+        initializeOpenRouterModelAutocomplete(input, enabled);
+    });
+}
 
 // Server communication
 async function checkServerStatus() {
@@ -2848,10 +4377,13 @@ async function checkServerStatus() {
                     restartHint.textContent = 'Restart the Python server';
                 }
             }
-            // Update VR badge
+            // Update VR badge + VR section visibility
             const vrBadge = document.getElementById('vrBadge');
+            const vrSection = document.getElementById('chapterVR');
+            const vrNav = document.getElementById('navVR');
+            const vrActive = !!data.vr?.active;
             if (vrBadge) {
-                if (data.vr?.active) {
+                if (vrActive) {
                     vrBadge.style.display = '';
                     vrBadge.title = 'VR: ' + (data.vr.backend || 'Active');
                     if (vrBadge.querySelector('[data-lucide]')) lucide.createIcons({ nodes: [vrBadge] });
@@ -2859,15 +4391,52 @@ async function checkServerStatus() {
                     vrBadge.style.display = 'none';
                 }
             }
+            if (vrSection) vrSection.style.display = vrActive ? '' : 'none';
+            if (vrNav) vrNav.style.display = vrActive ? '' : 'none';
+            // Refresh display names when game first connects (player ready)
+            const gameNowAvailable = !!data.game_time?.available;
+            if (gameNowAvailable && !wasGameAvailable) {
+                loadCharacterDisplayNames();
+            }
+            wasGameAvailable = gameNowAvailable;
+            refreshPlayerContextFromServer();
             // Update game time display + cache for commitments
             cachedGameTime = data.game_time;
             updateGameTimeDisplay(data.game_time);
+            // Update NPC schedule display with current game time + player house
+            if (typeof updateNpcScheduleDisplay === 'function') {
+                updateNpcScheduleDisplay(data.game_time, data.player_house);
+            }
+            // Update companion/follower panels
+            updateCompanionPanel(data.companion);
+            updateFollowersPanel(data.followers);
+            // Update header background based on player house
+            const house = (data.player_house || '').toLowerCase();
+            const houseBackgrounds = {
+                gryffindor: '/images/gryffindor_commonroom.webp',
+                hufflepuff: '/images/hufflepuff_commonroom.webp',
+                ravenclaw: '/images/ravenclaw_commonroom.webp',
+                slytherin: '/images/slytherin_commonroom.webp'
+            };
+            const header = document.querySelector('.grimoire-header');
+            const houseBackground = houseBackgrounds[house] || '';
+            if (header && header.dataset.house !== house) {
+                header.dataset.house = house;
+                if (houseBackground) {
+                    header.style.setProperty('--house-bg', `url('${houseBackground}')`);
+                } else {
+                    header.style.removeProperty('--house-bg');
+                }
+            }
         } else {
             throw new Error('Not OK');
         }
     } catch (e) {
         document.getElementById('serverStatus').classList.add('disconnected');
         document.getElementById('serverStatusText').textContent = 'Server Disconnected';
+        // Hide companion/follower panels on disconnect
+        updateCompanionPanel(null);
+        updateFollowersPanel(null);
         // Track that server went offline during restart
         if (restartInProgress) {
             restartWentOffline = true;
@@ -2950,6 +4519,141 @@ function updateGameTimeDisplay(data) {
         if (timeText) timeText.textContent = 'Awaiting Game Data';
         if (dateText) dateText.textContent = '';
         display.style.display = 'block';
+    }
+}
+
+function updateAttentionMeterToggleState() {
+    const meterEnabled = document.getElementById('conv_attention_meter_enabled')?.checked;
+    const coldToggle = document.getElementById('conv_attention_cold_approach_enabled');
+    const coldWrapper = document.getElementById('conv_attention_cold_approach_wrapper');
+    if (!coldToggle) return;
+
+    const isDisabled = !meterEnabled;
+    coldToggle.disabled = isDisabled;
+    if (coldWrapper) {
+        coldWrapper.style.opacity = isDisabled ? '0.5' : '1';
+        coldWrapper.style.pointerEvents = isDisabled ? 'none' : 'auto';
+    }
+
+    // If meter turned off, uncheck cold approach too
+    if (isDisabled && coldToggle.checked) {
+        coldToggle.checked = false;
+        updateSetting('conversation.attention_cold_approach_enabled', false);
+    }
+}
+
+function updateFollowersToggleState() {
+    const actionsEnabled = document.getElementById('conv_actions_enabled')?.checked;
+    const followersToggle = document.getElementById('conv_followers_enabled');
+    const followersWrapper = document.getElementById('conv_followers_wrapper');
+    if (!followersToggle) return;
+
+    const isDisabled = !actionsEnabled;
+    followersToggle.disabled = isDisabled;
+    if (followersWrapper) {
+        followersWrapper.style.opacity = isDisabled ? '0.5' : '1';
+        followersWrapper.style.pointerEvents = isDisabled ? 'none' : 'auto';
+    }
+    // If NPC Actions turned off, uncheck followers too
+    if (isDisabled && followersToggle.checked) {
+        followersToggle.checked = false;
+        updateSetting('conversation.followers_enabled', false);
+    }
+}
+
+function updateCommentaryControlsState() {
+    const commentaryEnabled = document.getElementById('conv_commentary_enabled')?.checked;
+    const wrapper = document.getElementById('conv_commentary_children');
+    if (!wrapper) return;
+
+    const isDisabled = !commentaryEnabled;
+    const controls = wrapper.querySelectorAll('input, select, textarea, button');
+    controls.forEach(control => {
+        control.disabled = isDisabled;
+    });
+    wrapper.style.opacity = isDisabled ? '0.5' : '1';
+    wrapper.style.pointerEvents = isDisabled ? 'none' : 'auto';
+}
+
+function updateCompanionPanel(companion) {
+    const panel = document.getElementById('companionPanel');
+    const body = document.getElementById('companionBody');
+    if (!panel || !body) return;
+
+    if (companion && companion.id) {
+        body.innerHTML = '';
+        const entry = document.createElement('div');
+        entry.className = 'tempus-panel-entry';
+        const name = document.createElement('span');
+        name.className = 'tempus-panel-name';
+        name.textContent = companion.name || prettifyVoiceName(companion.id);
+        name.title = companion.id;
+        entry.appendChild(name);
+        const btn = document.createElement('button');
+        btn.className = 'tempus-dismiss-btn';
+        btn.title = 'Dismiss companion';
+        btn.innerHTML = '<i data-lucide="x"></i>';
+        btn.onclick = () => dismissCompanion(companion.name || companion.id);
+        entry.appendChild(btn);
+        body.appendChild(entry);
+        panel.classList.remove('tempus-hidden');
+        lucide.createIcons({ nodes: [panel] });
+    } else {
+        panel.classList.add('tempus-hidden');
+    }
+}
+
+function updateFollowersPanel(followers) {
+    const panel = document.getElementById('followersPanel');
+    const body = document.getElementById('followersBody');
+    if (!panel || !body) return;
+
+    if (followers && followers.length > 0) {
+        body.innerHTML = '';
+        for (const f of followers) {
+            const entry = document.createElement('div');
+            entry.className = 'tempus-panel-entry';
+            const name = document.createElement('span');
+            name.className = 'tempus-panel-name';
+            name.textContent = f.name || prettifyVoiceName(f.id);
+            name.title = f.id;
+            entry.appendChild(name);
+            const btn = document.createElement('button');
+            btn.className = 'tempus-dismiss-btn';
+            btn.title = 'Remove follower';
+            btn.innerHTML = '<i data-lucide="x"></i>';
+            btn.onclick = () => dismissFollower(f.id, f.name || f.id);
+            entry.appendChild(btn);
+            body.appendChild(entry);
+        }
+        panel.classList.remove('tempus-hidden');
+        lucide.createIcons({ nodes: [panel] });
+    } else {
+        panel.classList.add('tempus-hidden');
+    }
+}
+
+async function dismissCompanion(displayName) {
+    if (!confirm(`Dismiss ${displayName} as companion?\n\nThis can break active quests that require a companion.`)) return;
+    try {
+        await fetch('/api/dismiss-companion', { method: 'POST' });
+        showToast(`${displayName} dismissed`, 'success');
+    } catch (e) {
+        showToast('Failed to dismiss companion', 'error');
+    }
+}
+
+async function dismissFollower(voiceName, displayName) {
+    if (!confirm(`Remove ${displayName} as follower?`)) return;
+    try {
+        await fetch('/api/dismiss-follower', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ voice_name: voiceName })
+        });
+        showToast(`${displayName} removed`, 'success');
+    } catch (e) {
+        showToast('Failed to remove follower', 'error');
     }
 }
 
@@ -3071,7 +4775,12 @@ async function loadConfig() {
         const response = await fetch('/api/config');
         if (response.ok) {
             config = await response.json();
+            currentPlayerContext = config.player_context || { ready: false, player_name: '', normalized_name: '' };
+            loadedPlayerContext = { ...currentPlayerContext };
+            stripLegacyConfigFields(config);
             await populateForm(config);
+            updateMemoryDataManagementPlayerState();
+            updateOwlPostPlayerState();
         }
     } catch (e) {
         console.error('Failed to load config:', e);
@@ -3081,11 +4790,154 @@ async function loadConfig() {
     }
 }
 
+function getPlayerCardTitle() {
+    const playerName = (loadedPlayerContext?.player_name || '').trim();
+    return playerName ? `Player: ${playerName}` : 'Player';
+}
+
+function getPlayerCardNameLabel() {
+    return (loadedPlayerContext?.player_name || '').trim() || 'Player';
+}
+
+function updatePlayerCardLabels() {
+    document.querySelectorAll('#bioList .character-card.player-card').forEach(card => {
+        const title = card.querySelector('.character-title-text');
+        if (title) title.textContent = getPlayerCardTitle();
+        const nameLabel = card.querySelector('.player-name-label');
+        if (nameLabel) nameLabel.textContent = getPlayerCardNameLabel();
+    });
+}
+
+function isPlayerContextReady() {
+    return currentPlayerContext?.ready === true;
+}
+
+function setMemoryDataStatus(elementId, text, color = 'var(--text-secondary)') {
+    const el = document.getElementById(elementId);
+    if (!el) return;
+    el.textContent = text || '';
+    el.style.color = color;
+}
+
+function setMemoryDataButton(elementId, enabled, title = '') {
+    const btn = document.getElementById(elementId);
+    if (!btn) return;
+    btn.style.display = 'inline-block';
+    btn.disabled = !enabled;
+    btn.title = title;
+}
+
+function setMemoryDataManagementNoPlayerState() {
+    setMemoryDataStatus('migratePendingCount', '');
+    setMemoryDataStatus('vectorMigratePendingCount', '');
+    setMemoryDataStatus('graphBackupsStatus', '');
+
+    setMemoryDataButton('migrateBtn', false, '');
+    setMemoryDataButton('vectorMigrateBtn', false, '');
+    setMemoryDataButton('clearAllMemoriesBtn', false, '');
+    setMemoryDataButton('resetMemorySystemBtn', false, '');
+    setMemoryDataButton('refreshGraphBackupsBtn', false, '');
+
+    const backupsList = document.getElementById('graphBackupsList');
+    if (backupsList) backupsList.innerHTML = '';
+}
+
+function updateMemoryDataManagementPlayerState() {
+    if (!isPlayerContextReady()) {
+        setMemoryDataManagementNoPlayerState();
+        return false;
+    }
+
+    setMemoryDataButton('clearAllMemoriesBtn', true, 'Clear memory data for the loaded player');
+    setMemoryDataButton('resetMemorySystemBtn', true, 'Reset memory data for the loaded player');
+    setMemoryDataButton('refreshGraphBackupsBtn', true, 'Refresh memory snapshots for the loaded player');
+    return true;
+}
+
+function setOwlPostStatus(elementId, text, color = 'var(--text-secondary)') {
+    const el = document.getElementById(elementId);
+    if (!el) return;
+    el.textContent = text || '';
+    el.style.color = color;
+}
+
+function setOwlPostButton(elementId, enabled, title = '') {
+    const btn = document.getElementById(elementId);
+    if (!btn) return;
+    btn.disabled = !enabled;
+    btn.title = title;
+}
+
+function setOwlPostNoPlayerState() {
+    setOwlPostStatus('owlMailDangerStatus', '');
+    setOwlPostStatus('owlBoardsDangerStatus', '');
+    setOwlPostStatus('owlLogStatus', '');
+    setOwlPostButton('resetOwlMailBtn', false, '');
+    setOwlPostButton('resetOwlBoardsBtn', false, '');
+    setOwlPostButton('clearOwlLogBtn', false, '');
+}
+
+function updateOwlPostPlayerState() {
+    if (!isPlayerContextReady()) {
+        setOwlPostNoPlayerState();
+        return false;
+    }
+
+    setOwlPostStatus('owlMailDangerStatus', '');
+    setOwlPostStatus('owlBoardsDangerStatus', '');
+    setOwlPostStatus('owlLogStatus', '');
+    setOwlPostButton('resetOwlMailBtn', true, 'Reset owl mail for the loaded player');
+    setOwlPostButton('resetOwlBoardsBtn', true, 'Reset notice boards for the loaded player');
+    setOwlPostButton('clearOwlLogBtn', true, 'Clear the Owl Post activity log for the loaded player');
+    return true;
+}
+
+async function refreshPlayerContextFromServer() {
+    if (playerContextCheckInFlight) return;
+    playerContextCheckInFlight = true;
+    try {
+        const response = await fetch('/api/player-context', { cache: 'no-store' });
+        if (!response.ok) return;
+        const data = await response.json();
+        const oldKey = currentPlayerContext?.normalized_name || '';
+        const newKey = data?.normalized_name || '';
+        const changed = !!newKey && oldKey !== newKey;
+
+        currentPlayerContext = data || { ready: false, player_name: '', normalized_name: '' };
+        updateMemoryDataManagementPlayerState();
+        updateOwlPostPlayerState();
+
+        if (!changed) return;
+
+        if (dirty) {
+            if (lastPlayerDirtyWarningKey !== newKey) {
+                lastPlayerDirtyWarningKey = newKey;
+                showToast('Player changed. This page is still editing the previous character bio until you save or reload.', 'warning');
+            }
+            return;
+        }
+
+        lastPlayerDirtyWarningKey = '';
+        isInitializing = true;
+        await loadConfig();
+        showToast(`Loaded settings for ${currentPlayerContext.player_name || 'current player'}`, 'info');
+    } catch (e) {
+        console.error('Failed to refresh player context:', e);
+    } finally {
+        playerContextCheckInFlight = false;
+    }
+}
+
 async function populateForm(cfg) {
     // Server
     setCheckbox('modEnabled', cfg.server?.enabled !== false);
     setCheckbox('autoOpenConfig', cfg.server?.auto_open_config !== false);
     setCheckbox('devModeEnabled', cfg.dev?.enabled === true);
+    setCheckbox('simpleModeToggle', cfg.ui?.simple_mode !== false);
+
+    // VR
+    setCheckbox('vrPresetEnabled', cfg.vr?.preset_enabled !== false);
+    setCheckbox('audioVrTracking', cfg.audio?.vr_tracking !== false);
 
     // LLM Provider - Dynamic provider settings
     const currentLLMProvider = cfg.llm?.provider || 'gemini';
@@ -3147,6 +4999,8 @@ async function populateForm(cfg) {
     for (const agentId of Object.keys(AGENT_CONFIGS)) {
         renderAgentSettings(agentId);
     }
+    updateRangeValue('agent_vision_cooldown_seconds', (cfg.agents?.vision?.cooldown_seconds ?? 5) + 's');
+    updateRangeValue('agent_vision_wait_timeout_seconds', (cfg.agents?.vision?.wait_timeout_seconds ?? 5) + 's');
     // Update model placeholders based on current provider (without changing values)
     await updateModelPlaceholders(currentLLMProvider);
 
@@ -3154,9 +5008,7 @@ async function populateForm(cfg) {
     setFieldValue('masterVolume', cfg.audio?.volume ?? 100);
     setFieldValue('narrationVolume', cfg.audio?.narration_volume ?? 80);
     setCheckbox('audioReverb', cfg.audio?.reverb !== false);
-    setCheckbox('audioVrTracking', cfg.audio?.vr_tracking !== false);
     setFieldValue('audioCameraOffset', cfg.audio?.camera_offset ?? 0);
-    setCheckbox('lipsyncFallback', cfg.lipsync?.fallback === true);
 
     // Pronunciation replacements
     const pronEl = document.getElementById('pronunciationReplacements');
@@ -3164,6 +5016,7 @@ async function populateForm(cfg) {
         const pronData = cfg.audio?.pronunciation_replacements;
         const hasData = pronData && typeof pronData === 'object' && Object.keys(pronData).length > 0;
         pronEl.value = pronunciationReplacementsToText(hasData ? pronData : DEFAULT_PRONUNCIATION_REPLACEMENTS);
+        resizeTextareaAfterProgrammaticUpdate(pronEl);
         if (!hasData) {
             updateSetting('audio.pronunciation_replacements', DEFAULT_PRONUNCIATION_REPLACEMENTS);
         }
@@ -3175,6 +5028,7 @@ async function populateForm(cfg) {
     setFieldValue('ambientDedupWindow', cfg.history?.ambient_dedup_window || 15);
     setCheckbox('trackAmbient', cfg.history?.track_ambient !== false);
     setCheckbox('trackCutscene', cfg.history?.track_cutscene !== false);
+    setCheckbox('archiveTtsWavs', cfg.tts?.archive_enabled !== false);
     setCheckbox('realisticMemory', cfg.history?.realistic_memory !== false);
     const maxLocEntries = cfg.history?.max_location_entries ?? 2;
     setFieldValue('maxLocationEntries', maxLocEntries);
@@ -3183,46 +5037,98 @@ async function populateForm(cfg) {
 
     // Commitments
     setCheckbox('commitmentsEnabled', cfg.commitments?.enabled === true);
+    setFieldValue('commitment_location_resolver_model', cfg.commitment?.location_resolver_model || '');
+
+    // Owl Post
+    setCheckbox('owlPostEnabled', cfg.owl_post?.enabled !== false);
+    setCheckbox('owlPostBoardsEnabled', cfg.owl_post?.boards_enabled !== false);
+    setFieldValue('owlPostOrchestratorModel', cfg.owl_post?.orchestrator_model || '');
+    setFieldValue('owlPostMailModel', cfg.owl_post?.mail_model || '');
+    setFieldValue('owlPostBoardModel', cfg.owl_post?.board_model || '');
+    setFieldValue('owlPostSummarizeModel', cfg.owl_post?.summarize_model || '');
+    const mailInterval = cfg.owl_post?.mail_interval ?? 180;
+    const boardInterval = cfg.owl_post?.board_interval ?? 300;
+    const convCooldown = cfg.owl_post?.conversation_cooldown ?? 300;
+    setFieldValue('owlPostMailInterval', mailInterval);
+    updateRangeValue('owlPostMailInterval', mailInterval + 's');
+    setFieldValue('owlPostBoardInterval', boardInterval);
+    updateRangeValue('owlPostBoardInterval', boardInterval + 's');
+    setFieldValue('owlPostConvCooldown', convCooldown);
+    updateRangeValue('owlPostConvCooldown', convCooldown + 's');
+    const maxBoardPostsPerDay = cfg.owl_post?.max_board_posts_per_day ?? 0;
+    setFieldValue('owlPostMaxBoardPostsPerDay', maxBoardPostsPerDay);
+    updateRangeValue('owlPostMaxBoardPostsPerDay', maxBoardPostsPerDay == 0 ? 'Unlimited' : maxBoardPostsPerDay);
+    const deliveryMin = cfg.owl_post?.delivery_minutes ?? 20;
+    setFieldValue('owlPostDeliveryMinutes', deliveryMin);
+    updateRangeValue('owlPostDeliveryMinutes', deliveryMin + ' min');
+    populateOwlCustomCharacters(cfg.owl_post?.custom_characters || []);
+    refreshVoiceReferenceHelpText();
 
     // Long-Term Memory
     setCheckbox('memoryEnabled', cfg.memory?.enabled === true);
-    setFieldValue('chapterModel', cfg.memory?.chapter_model || 'gemini-2.0-flash');
-    setFieldValue('proseModel', cfg.memory?.prose_model || 'gemini-2.0-flash');
-    setFieldValue('graphitiModel', cfg.memory?.graphiti_model || 'gemini-2.0-flash');
-    setFieldValue('graphitiSmallModel', cfg.memory?.graphiti_small_model || 'gemini-2.0-flash');
-    setFieldValue('rerankerModel', cfg.memory?.reranker_model || 'meta-llama/llama-3.1-8b-instruct');
+    setFieldValue('embeddingModel', cfg.memory?.embedding_model || '');
+    setFieldValue('chapterModel', cfg.memory?.chapter_model || '');
+    setFieldValue('proseModel', cfg.memory?.prose_model || '');
+    setFieldValue('graphitiModel', cfg.memory?.graphiti_model || '');
+    setFieldValue('graphitiSmallModel', cfg.memory?.graphiti_small_model || '');
+    setFieldValue('rerankerModel', cfg.memory?.reranker_model || '');
     setFieldValue('maxConcurrency', cfg.memory?.max_concurrency || 2);
     setFieldValue('chapterEntryThreshold', cfg.memory?.chapter_entry_threshold || 30);
+    setCheckbox('memoryIncludeCutscene', cfg.memory?.include_cutscene !== false);
+    setCheckbox('memoryWhitelistedNpcsOnly', cfg.memory?.whitelisted_npcs_only === true);
 
     // Show provider-specific concurrency warnings
     updateConcurrencyHints(cfg.llm?.provider || 'gemini');
 
     // Conversation - Chat Models
-    setFieldValue('conv_chat_model', cfg.conversation?.chat_model || GEMINI_3_FLASH);
+    setFieldValue('conv_chat_model', cfg.conversation?.chat_model || '');
     setFieldValue('conv_temperature', cfg.conversation?.temperature || 1.0);
     setFieldValue('conv_max_tokens', cfg.conversation?.max_tokens || 8192);
     updateGemini3TempHint();
 
     // Conversation - General settings
     setFieldValue('conv_max_turns', cfg.conversation?.max_turns || 6);
-    setCheckbox('conv_target_use_crosshair', cfg.conversation?.target_selection_use_crosshair === true);
-    setFieldValue('conv_target_model', cfg.conversation?.target_selection_model || 'gemini-2.5-flash-lite');
+    setCheckbox('conv_target_use_crosshair', cfg.conversation?.target_selection_use_crosshair !== false);
+    setFieldValue('conv_target_model', cfg.conversation?.target_selection_model || '');
     setFieldValue('conv_speaker_max_tokens', cfg.conversation?.speaker_selection_max_tokens || 512);
-    setFieldValue('conv_interjection_model', cfg.conversation?.interjection_model || 'gemini-2.5-flash-lite');
+    setFieldValue('conv_interjection_model', cfg.conversation?.interjection_model || '');
+    setFieldValue('background_commentary_model', cfg.conversation?.commentary_model || '');
+    setFieldValue('background_commentary_max_tokens', cfg.conversation?.commentary_max_tokens || 8192);
     updateRangeValue('conv_speaker_max_tokens', (cfg.conversation?.speaker_selection_max_tokens || 512) + ' tokens');
+    updateRangeValue('background_commentary_max_tokens', (cfg.conversation?.commentary_max_tokens || 8192) + ' tokens');
     // Input correction: use provider-aware default if not explicitly set
     const inputCorrectionExplicit = cfg.conversation?.input_correction_enabled;
     const inputCorrectionDefault = FEATURE_DEFAULTS[cfg.llm?.provider || 'gemini']?.['conversation.input_correction_enabled']?.default ?? false;
     setCheckbox('conv_input_correction_enabled', inputCorrectionExplicit !== undefined ? inputCorrectionExplicit : inputCorrectionDefault);
-    setFieldValue('conv_input_correction_model', cfg.conversation?.input_correction_model || 'gemini-2.5-flash-lite');
+    setFieldValue('conv_input_correction_model', cfg.conversation?.input_correction_model || '');
     setCheckbox('conv_actions_enabled', cfg.conversation?.actions_enabled === true);
+    setCheckbox('conv_followers_enabled', cfg.conversation?.followers_enabled !== false);
+    setCheckbox('conv_conversation_fpv', cfg.conversation?.conversation_fpv === true);
+    setFieldValue('conv_conversation_fpv_transition', cfg.conversation?.conversation_fpv_transition || 'normal');
+    updateConversationFpvSubSettings(cfg.conversation?.conversation_fpv === true);
+    setCheckbox('conv_conversation_look_at_speaker', cfg.conversation?.conversation_look_at_speaker === true);
+    setCheckbox('conv_attention_meter_enabled', cfg.conversation?.attention_meter_enabled !== false);
+    setCheckbox('conv_attention_cold_approach_enabled', cfg.conversation?.attention_cold_approach_enabled !== false);
+    updateAttentionMeterToggleState();
+    updateFollowersToggleState();
     // Floo Flame Companions is now compatible with NPC Actions (uses SetSystemicCompanionBP)
     setCheckbox('conv_gear_context', cfg.conversation?.gear_context !== false);
     setCheckbox('conv_mission_context', cfg.conversation?.mission_context !== false);
+    setCheckbox('conv_followup_nudge', cfg.conversation?.followup_nudge !== false);
+    setCheckbox('conv_farewell_line', cfg.conversation?.farewell_line !== false);
     setCheckbox('conv_sentence_subtitles', cfg.conversation?.sentence_subtitles !== false);
-    // Companion callout blocking: default 1440 (1 game day)
-    setFieldValue('conv_companion_callout_block', cfg.conversation?.companion_callout_block_minutes ?? 1440);
+    setCheckbox('conv_auto_mute_ambient', cfg.conversation?.auto_mute_ambient === true);
+    setCheckbox('conv_gaze_enabled', cfg.conversation?.gaze_enabled !== false);
+    setCheckbox('conv_commentary_enabled', cfg.commentary?.enabled !== false);
+    const commentaryCooldown = cfg.commentary?.global_cooldown_seconds ?? 60;
+    setFieldValue('conv_commentary_cooldown', commentaryCooldown);
+    updateRangeValue('conv_commentary_cooldown', commentaryCooldown + ' s');
+    const commentaryWindow = cfg.commentary?.aggregation_window_seconds ?? 4;
+    setFieldValue('conv_commentary_window', commentaryWindow);
+    updateRangeValue('conv_commentary_window', commentaryWindow + ' s');
+    updateCommentaryControlsState();
     setCheckbox('conv_companion_move_enabled', cfg.conversation?.companion_move_enabled !== false);
+    setCheckbox('conv_emotes_enabled', cfg.conversation?.emotes_enabled !== false);
     setCheckbox('conv_narration_enabled', cfg.conversation?.narration_enabled === true);
     // Companion follow distance (meters)
     const followDist = cfg.conversation?.companion_follow_distance_m ?? 2.0;
@@ -3233,6 +5139,8 @@ async function populateForm(cfg) {
     setFieldValue('input_chat_hotkey', cfg.input?.chat_hotkey || 'enter');
     setFieldValue('input_stop_hotkey', cfg.input?.stop_hotkey || 'delete');
     setFieldValue('input_mode_hotkey', cfg.input?.mode_hotkey || 'home');
+    setFieldValue('input_fpv_hotkey', cfg.input?.fpv_hotkey || 'insert');
+    setFieldValue('input_owlpost_hotkey', cfg.input?.owlpost_hotkey || 'backquote');
     setCheckbox('input_preview_lock', cfg.input?.preview_lock !== false);
 
     // Time Dilation settings
@@ -3251,10 +5159,37 @@ async function populateForm(cfg) {
         document.getElementById('interjectionPromptMode').value = cfg.prompts.interjection_prompt_mode;
     }
 
-    // Character settings (editor guidance + viseme scales + temp mods)
-    // Support both new 'editor_guidance' and legacy 'bios' key
+    // Owl Post prompts
+    if (cfg.prompts?.owl_board_rules) {
+        document.getElementById('owlBoardRulesPrompt').value = cfg.prompts.owl_board_rules;
+    }
+    if (cfg.prompts?.owl_mail_classifier) {
+        document.getElementById('owlMailClassifierPrompt').value = cfg.prompts.owl_mail_classifier;
+    }
+    if (cfg.prompts?.owl_mail_letter) {
+        document.getElementById('owlMailLetterPrompt').value = cfg.prompts.owl_mail_letter;
+    }
+    if (cfg.prompts?.owl_board_thread) {
+        document.getElementById('owlBoardThreadPrompt').value = cfg.prompts.owl_board_thread;
+    }
+    if (cfg.prompts?.owl_board_reply) {
+        document.getElementById('owlBoardReplyPrompt').value = cfg.prompts.owl_board_reply;
+    }
+
+    // Character settings (static bios + editor guidance + viseme scales + temp mods)
+    const staticBios = cfg.prompts?.static_bios || {};
     const editorGuidance = cfg.prompts?.editor_guidance || cfg.prompts?.bios || {};
-    await populateCharacters(editorGuidance, cfg.lipsync?.npc_scales || {}, cfg.tts?.npc_temp_modifiers || {}, cfg.tts?.npc_model_overrides || {});
+    await populateCharacters(
+        staticBios,
+        editorGuidance,
+        cfg.lipsync?.npc_scales || {},
+        cfg.tts?.npc_temp_modifiers || {},
+        cfg.tts?.npc_model_overrides || {},
+        cfg.memory?.npc_long_term_memory || {},
+        cfg.memory?.whitelisted_npcs_only === true,
+        cfg.conversation?.npc_llm_model_overrides || {}
+    );
+    refreshCharacterLongTermMemoryVisibility(cfg.memory?.whitelisted_npcs_only === true);
 
     // Update range display values
     updateRangeValue('conv_temperature', document.getElementById('conv_temperature').value);
@@ -3276,12 +5211,37 @@ async function populateForm(cfg) {
         ReasoningToggle.refresh();
     }
 
+    applySimpleMode();
+
     // Update local TTS/STT availability based on game language
     const setupLanguage = cfg.setup?.language || 'EN_US';
     updatePocketTTSAvailability(setupLanguage);
     updateParakeetSTTAvailability(setupLanguage);
     updateCanarySTTAvailability(setupLanguage);
     updateMoonshineSTTAvailability(setupLanguage);
+
+    // Backfill empty model fields from current provider's presets
+    const currentProvider = cfg.llm?.provider || 'gemini';
+    const presets = MODEL_PRESETS?.[currentProvider];
+    if (presets) {
+        for (const [key, field] of Object.entries(MODEL_FIELDS)) {
+            const element = document.getElementById(field.elementId);
+            if (!element) continue;
+            const presetModel = presets[key];
+            if (presetModel) {
+                element.placeholder = presetModel;
+                if (!element.value) {
+                    element.value = presetModel;
+                    if (field.isAgent) {
+                        updateAgentSetting(field.agentId, field.prefix, field.fieldId, presetModel);
+                    } else {
+                        updateSetting(field.path, presetModel);
+                    }
+                    console.log(`[ModelPresets] Backfilled ${key}: ${presetModel}`);
+                }
+            }
+        }
+    }
 }
 
 function setFieldValue(id, value) {
@@ -3296,34 +5256,201 @@ function setCheckbox(id, value) {
     if (el) el.checked = value !== false;
 }
 
+function getActiveVoiceReferenceFolderInfo(language = null) {
+    const selectedLanguage = language || config?.setup?.language || 'EN_US';
+    const voiceLanguage = UNDUBBED_LANGUAGE_VALUES.has(selectedLanguage) ? 'EN_US' : selectedLanguage;
+
+    if (voiceLanguage === 'EN_US') {
+        return {
+            selectedLanguage,
+            voiceLanguage,
+            folderHtml: '<code>voice_references/</code>',
+        };
+    }
+
+    const folderName = voiceLanguage.toLowerCase();
+    return {
+        selectedLanguage,
+        voiceLanguage,
+        folderHtml: `<code>voice_references/${folderName}/</code>`,
+    };
+}
+
+function getVoiceReferenceHelpHtml(voiceIdExample, options = {}) {
+    const info = getActiveVoiceReferenceFolderInfo(options.language);
+    const safeVoiceId = escapeHtml(voiceIdExample || 'YourVoiceId');
+
+    return `To use your own voice, place a 5-15 second WAV clip named ` +
+        `<code>${safeVoiceId}_reference.wav</code> in ${info.folderHtml}. ` +
+        `<a href="#" onclick="openVoiceReferencesFolder(); return false;">Open folder</a>`;
+}
+
+function refreshOwlCustomCharacterVoiceHints() {
+    document.querySelectorAll('#owlCustomCharacterList .character-card').forEach(card => {
+        const hint = card.querySelector('.owl-custom-character-voice-hint');
+        const voiceId = card.dataset.npcId || 'YourVoiceId';
+        if (!hint) return;
+        hint.innerHTML = getVoiceReferenceHelpHtml(voiceId);
+    });
+}
+
+function refreshVoiceReferenceHelpText() {
+    const playerHint = document.getElementById('playerVoiceReferenceHint');
+    if (playerHint) {
+        playerHint.innerHTML =
+            `Optional override for player voice. Leave empty to use the normal player voice. ` +
+            `${getVoiceReferenceHelpHtml('YourVoiceId')}`;
+    }
+
+    const narratorHint = document.getElementById('narratorVoiceReferenceHint');
+    if (narratorHint) {
+        narratorHint.innerHTML = getVoiceReferenceHelpHtml('Narrator');
+    }
+
+    refreshOwlCustomCharacterVoiceHints();
+}
+
+async function openVoiceReferencesFolder() {
+    try {
+        const response = await fetch('/api/setup/open-voice-references', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ language: config?.setup?.language || 'EN_US' }),
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+            showToast(data.error || 'Failed to open voice references folder', 'error');
+            return false;
+        }
+
+        return false;
+    } catch (e) {
+        showToast('Failed to open voice references folder', 'error');
+        return false;
+    }
+}
+
+function getLLMFeatureGateField(feature) {
+    return LLM_PROVIDER_FEATURE_GATES.find(gate => gate.feature === feature);
+}
+
+function getLLMProviderFeatureDefault(provider, fieldId) {
+    const providerConfig = LLM_PROVIDERS[provider];
+    for (const field of providerConfig?.fields || []) {
+        if (field.type !== 'toggle_group') continue;
+        const child = (field.fields || []).find(item => item.id === fieldId);
+        if (child) return child.default === true;
+    }
+    return false;
+}
+
+function isLLMFeatureDisabledByProvider(feature, provider = config.llm?.provider || 'gemini') {
+    if (feature === 'owl_post' && provider === 'gemini') {
+        return true;
+    }
+    const gate = getLLMFeatureGateField(feature);
+    if (!gate) return false;
+    const value = config.llm?.[provider]?.[gate.id];
+    return value !== undefined ? value === true : getLLMProviderFeatureDefault(provider, gate.id);
+}
+
+function setControlsDisabled(ids, disabled) {
+    for (const id of ids) {
+        const el = document.getElementById(id);
+        if (el) el.disabled = disabled;
+    }
+}
+
+function setDescendantControlsDisabled(containerId, disabled) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    container.querySelectorAll('input, select, textarea, button').forEach(el => {
+        el.disabled = disabled;
+    });
+}
+
+function updateProviderFeatureWarning(id, disabled, html) {
+    const warning = document.getElementById(id);
+    if (!warning) return;
+    warning.innerHTML = disabled ? html : '';
+    warning.style.display = disabled ? 'block' : 'none';
+}
+
+function updateLLMFeatureAvailability(provider = config.llm?.provider || 'gemini') {
+    const providerLabel = LLM_PROVIDERS[provider]?.label || provider;
+
+    const inputCorrectionDisabled = isLLMFeatureDisabledByProvider('input_correction', provider);
+    setControlsDisabled(['conv_input_correction_enabled', 'conv_input_correction_model'], inputCorrectionDisabled);
+    updateProviderFeatureWarning(
+        'inputCorrectionProviderWarning',
+        inputCorrectionDisabled,
+        `<i data-lucide="alert-triangle"></i> Input Correction is disabled for ${escapeHtml(providerLabel)} by LLM Provider settings.`
+    );
+
+    const visionDisabled = isLLMFeatureDisabledByProvider('vision', provider);
+    setDescendantControlsDisabled('agent_vision_settings', visionDisabled);
+    const visionPanel = document.getElementById('agentVision');
+    if (visionPanel) visionPanel.style.opacity = visionDisabled ? '0.65' : '';
+    updateProviderFeatureWarning(
+        'visionProviderWarning',
+        visionDisabled,
+        `<i data-lucide="alert-triangle"></i> Vision is disabled for ${escapeHtml(providerLabel)} by LLM Provider settings.`
+    );
+
+    const owlDisabled = isLLMFeatureDisabledByProvider('owl_post', provider);
+    const owlReason = provider === 'gemini'
+        ? 'Owl Post is disabled for Gemini provider. Switch to OpenRouter, OpenAI, or another compatible provider to enable NPC letters and notice boards.'
+        : `Owl Post is disabled for ${escapeHtml(providerLabel)} by LLM Provider settings.`;
+    const owlContent = document.querySelector('#chapterOwlPost .chapter-content');
+    if (owlContent) owlContent.classList.toggle('disabled', owlDisabled);
+    setDescendantControlsDisabled('chapterOwlPost', owlDisabled);
+    updateProviderFeatureWarning(
+        'owlPostGeminiWarning',
+        owlDisabled,
+        `<i data-lucide="alert-triangle"></i> ${owlReason}`
+    );
+
+    lucide?.createIcons?.({ nameAttr: 'data-lucide', attrs: {} });
+}
+
 function updateMemoryAvailability(provider) {
     const memoryToggle = document.getElementById('memoryEnabled');
     const memoryWarning = document.getElementById('memoryGeminiWarning');
+    const memoryDisabled = isLLMFeatureDisabledByProvider('memory', provider);
+    setControlsDisabled(['embeddingModel'], memoryDisabled);
 
-    if (provider === 'gemini') {
-        // Disable memory for Gemini
+    if (memoryDisabled) {
+        // Disable memory for providers that should not run memory-heavy workflows.
         const wasEnabled = memoryToggle?.checked;
         if (memoryToggle) {
             memoryToggle.checked = false;
             memoryToggle.disabled = true;
         }
         if (memoryWarning) {
+            const providerLabel = LLM_PROVIDERS[provider]?.label || provider;
+            memoryWarning.innerHTML = `<i data-lucide="alert-triangle"></i> Long-term memory is disabled for ${escapeHtml(providerLabel)} by LLM Provider settings.`;
             memoryWarning.style.display = 'block';
         }
         updateSetting('memory.enabled', false);
+        refreshCharacterLabels(false);
         // Notify user if memory was enabled and is now being disabled
         if (wasEnabled && !isInitializing) {
-            showToast('Long-term memory disabled (not compatible with Gemini provider)', 'info');
+            showToast('Long-term memory disabled for this LLM provider', 'info');
         }
     } else {
-        // Enable memory toggle for OpenRouter/OpenAI
+        // Enable memory toggle when the provider gate allows it.
         if (memoryToggle) {
             memoryToggle.disabled = false;
         }
         if (memoryWarning) {
             memoryWarning.style.display = 'none';
         }
+        refreshCharacterLabels(config?.memory?.enabled === true);
     }
+
+    // Owl Post — same treatment
+    updateLLMFeatureAvailability(provider);
 }
 
 function updateGemini3TempHint() {
@@ -3365,23 +5492,26 @@ function updatePocketTTSAvailability(language) {
     ttsDropdown.innerHTML = generateProviderDropdown('tts', ttsDropdown.value);
 }
 
-async function populateCharacters(editorGuidance, npcScales = {}, ttsTempMods = {}, modelOverrides = {}) {
+async function populateCharacters(staticBios = {}, editorGuidance = {}, npcScales = {}, ttsTempMods = {}, modelOverrides = {}, npcLongTermMemory = {}, memoryWhitelistOnly = false, llmModelOverrides = {}) {
     const container = document.getElementById('bioList');
     container.innerHTML = '';
 
     // Check if memory is enabled for generated bio display
     const memoryEnabled = config?.memory?.enabled || false;
 
-    // Always show Player guidance first (not collapsible)
-    const playerGuidance = editorGuidance.Player || '';
-    addCharacterCard('Player', playerGuidance, 1.0, 0, true, memoryEnabled);
+    // Always show Player bio first (not collapsible)
+    const playerBio = staticBios.Player || '';
+    addCharacterCard('Player', playerBio, '', 1.0, 0, true, memoryEnabled, '', false, memoryWhitelistOnly);
 
-    // Collect all unique NPC names from guidance, scales, temp mods, model overrides, and generated bios
+    // Collect all unique NPC names from bios, guidance, scales, temp mods, model overrides, and generated bios
     const allNpcs = new Set([
+        ...Object.keys(staticBios).filter(n => n !== 'Player'),
         ...Object.keys(editorGuidance).filter(n => n !== 'Player'),
         ...Object.keys(npcScales).filter(n => n !== 'Player'),
         ...Object.keys(ttsTempMods).filter(n => n !== 'Player'),
-        ...Object.keys(modelOverrides).filter(n => n !== 'Player')
+        ...Object.keys(modelOverrides).filter(n => n !== 'Player'),
+        ...Object.keys(llmModelOverrides).filter(n => n !== 'Player'),
+        ...Object.keys(npcLongTermMemory).filter(n => n !== 'Player')
     ]);
 
     // If memory is enabled, also fetch NPCs with generated bios
@@ -3401,19 +5531,33 @@ async function populateCharacters(editorGuidance, npcScales = {}, ttsTempMods = 
 
     // Then other characters (collapsible, default collapsed)
     for (const name of allNpcs) {
+        const staticBio = staticBios[name] || '';
         const guidance = editorGuidance[name] || '';
         const scale = npcScales[name] || 1.0;
         const tempMod = ttsTempMods[name] || 0;
         const model = modelOverrides[name] || '';
-        addCharacterCard(name, guidance, scale, tempMod, false, memoryEnabled, model);
+        const llmModel = llmModelOverrides[name] || '';
+        addCharacterCard(
+            name,
+            staticBio,
+            guidance,
+            scale,
+            tempMod,
+            false,
+            memoryEnabled,
+            model,
+            npcLongTermMemory[name] === true,
+            memoryWhitelistOnly,
+            llmModel
+        );
     }
 
     // Load generated bios for all NPCs (if memory enabled)
     if (memoryEnabled) {
-        const cards = document.querySelectorAll('.character-card:not(.player-card)');
+        const cards = document.querySelectorAll('#bioList .character-card:not(.player-card)');
         cards.forEach(card => {
             const npcId = card.dataset.npcId;
-            if (npcId) {
+            if (npcId && isCharacterMemoryEffectivelyEnabled(card, memoryEnabled)) {
                 loadGeneratedBio(npcId, card);
             }
         });
@@ -3427,112 +5571,46 @@ async function populateCharacters(editorGuidance, npcScales = {}, ttsTempMods = 
 
 // Legacy alias for backwards compatibility
 function populateBios(bios, npcScales = {}, ttsTempMods = {}, modelOverrides = {}) {
-    populateCharacters(bios, npcScales, ttsTempMods, modelOverrides);
+    populateCharacters(bios, {}, npcScales, ttsTempMods, modelOverrides);
 }
 
-/**
- * Refresh labels, hints, and placeholders for all character cards based on memory state.
- * Called when memory toggle changes to update UI without page refresh.
- */
-function refreshCharacterLabels(memoryEnabled) {
-    const cards = document.querySelectorAll('.character-card');
-    cards.forEach(card => {
-        const isPlayer = card.classList.contains('player-card');
-
-        // Update guidance field label and hint
-        const guidanceLabel = card.querySelector('.field-label');
-        const guidanceHint = card.querySelector('.field-hint');
-        const guidanceTextarea = card.querySelector('.character-guidance-input');
-
-        if (guidanceLabel && (guidanceLabel.textContent.includes('Bio') || guidanceLabel.textContent.includes('Guidance'))) {
-            // Player always shows "Bio", NPCs switch based on memory state
-            guidanceLabel.textContent = isPlayer ? 'Bio' : (memoryEnabled ? "Editor's Guidance" : 'Bio');
-        }
-
-        if (guidanceHint && !guidanceHint.querySelector('.btn-link')) {
-            guidanceHint.textContent = isPlayer
-                ? 'Static facts about the player known to all NPCs (personality, background, etc.). Always injected alongside dynamic memories.'
-                : (memoryEnabled
-                    ? 'Character essence used when generating bio from memory. Used as fallback context if no bio has been generated yet.'
-                    : 'Biographical context injected into prompts when this character speaks.');
-        }
-
-        if (guidanceTextarea) {
-            guidanceTextarea.placeholder = isPlayer
-                ? 'e.g. Ambitious, cunning, from a wealthy family...'
-                : (memoryEnabled
-                    ? 'e.g. Speaks with subtle arrogance. Protective of family...'
-                    : 'Character biography/background...');
-        }
-
-        // Toggle generated bio section visibility
-        if (!isPlayer) {
-            const bioSection = card.querySelector('.generated-bio-section');
-            if (memoryEnabled) {
-                // Show generated bio section if it exists
-                if (!bioSection) {
-                    // Create section if it doesn't exist
-                    const npcId = card.dataset.npcId;
-                    const bioSectionHTML = `
-                                <div class="field-group generated-bio-section">
-                                    <label class="field-label">
-                                        Generated Bio
-                                        <span class="bio-timestamp" style="font-weight: normal; font-size: 0.75rem; opacity: 0.7;"></span>
-                                    </label>
-                                    <p class="field-hint">
-                                        Auto-generated from long-term memory.
-                                        <button type="button" class="btn-link" onclick="regenerateBioFromCard(this)" style="font-size: 0.8rem;">Regenerate</button>
-                                    </p>
-                                    <div class="generated-bio-display" style="background: var(--parchment-light); border: 1px solid var(--leather-border); border-radius: 4px; padding: 8px; min-height: 60px; font-size: 0.85rem; white-space: pre-wrap;">
-                                        <span style="opacity: 0.5; font-style: italic;">No generated bio yet. Click Regenerate or wait for a conversation.</span>
-                                    </div>
-                                </div>
-                            `;
-                    const content = card.querySelector('.character-accordion-content');
-                    // Insert after the guidance field
-                    const guidanceFieldGroup = card.querySelector('.field-group');
-                    if (guidanceFieldGroup && content) {
-                        guidanceFieldGroup.insertAdjacentHTML('afterend', bioSectionHTML);
-                        // Load existing bio if available
-                        if (npcId) {
-                            loadGeneratedBio(npcId, card);
-                        }
-                    }
-                } else {
-                    bioSection.style.display = '';
-                }
-            } else {
-                // Hide generated bio section
-                if (bioSection) {
-                    bioSection.style.display = 'none';
-                }
-            }
-        }
-    });
+function isMemoryWhitelistOnlyEnabled() {
+    return config?.memory?.whitelisted_npcs_only === true;
 }
 
-function addCharacterCard(name = '', guidance = '', visemeScale = 1.0, ttsTempMod = 0, isPlayer = false, memoryEnabled = false, modelOverride = '') {
-    const container = document.getElementById('bioList');
-    const card = document.createElement('div');
-    card.className = isPlayer ? 'character-card player-card' : 'character-card collapsed';
-    card.dataset.npcId = name;  // Store NPC ID for bio fetching
+function isNpcLongTermMemoryEnabled(npcId) {
+    if (!npcId) return false;
+    return config?.memory?.npc_long_term_memory?.[npcId] === true;
+}
 
-    const displayName = name || 'New Character';
-    const toggleIcon = isPlayer ? '' : '<span class="character-accordion-toggle">&#9660;</span>';
+function setNpcLongTermMemoryEnabled(npcId, enabled) {
+    if (!npcId) return;
+    config.memory = config.memory || {};
+    config.memory.npc_long_term_memory = config.memory.npc_long_term_memory || {};
+    if (enabled) {
+        config.memory.npc_long_term_memory[npcId] = true;
+    } else {
+        delete config.memory.npc_long_term_memory[npcId];
+    }
+}
 
-    const nameField = isPlayer
-        ? `<span style="font-family: var(--font-display); font-weight: 600;">Player</span>`
-        : `<input type="text" class="character-name-input" value="${escapeHtml(name)}" placeholder="Character ID (e.g. SebastianSallow)" onchange="updateCharacterTitle(this); this.closest('.character-card').dataset.npcId = this.value; markDirty()">`;
+function isCharacterMemoryEffectivelyEnabled(card, memoryEnabledOverride = null) {
+    if (!card || card.classList.contains('player-card')) return false;
 
-    const removeBtn = isPlayer
-        ? ''
-        : `<button class="btn btn-danger" onclick="event.stopPropagation(); removeCharacterCard(this);" style="padding: 4px 8px; font-size: 0.7rem;">Remove</button>`;
+    const memoryEnabled = memoryEnabledOverride !== null
+        ? memoryEnabledOverride
+        : (config?.memory?.enabled === true);
+    if (!memoryEnabled) return false;
 
-    // Format ttsTempMod with sign for display
-    const ttsTempModDisplay = ttsTempMod >= 0 ? `+${ttsTempMod.toFixed(2)}` : ttsTempMod.toFixed(2);
+    if (!isMemoryWhitelistOnlyEnabled()) {
+        return true;
+    }
 
-    // Generated bio section (only for NPCs when memory enabled, hidden otherwise)
-    const generatedBioSection = (isPlayer || !memoryEnabled) ? '' : `
+    return card.querySelector('.character-long-term-memory-toggle')?.checked === true;
+}
+
+function getGeneratedBioSectionHtml() {
+    return `
                 <div class="field-group generated-bio-section">
                     <label class="field-label">
                         Generated Bio
@@ -3545,6 +5623,198 @@ function addCharacterCard(name = '', guidance = '', visemeScale = 1.0, ttsTempMo
                     <div class="generated-bio-display" style="background: var(--parchment-light); border: 1px solid var(--leather-border); border-radius: 4px; padding: 8px; min-height: 60px; font-size: 0.85rem; white-space: pre-wrap;">
                         <span style="opacity: 0.5; font-style: italic;">No generated bio yet. Click Regenerate or wait for a conversation.</span>
                     </div>
+                </div>
+            `;
+}
+
+function refreshCharacterCardMemoryState(card, memoryEnabledOverride = null) {
+    if (!card) return;
+
+    const isPlayer = card.classList.contains('player-card');
+    const effectiveMemoryEnabled = isCharacterMemoryEffectivelyEnabled(card, memoryEnabledOverride);
+
+    if (isPlayer) {
+        return;
+    }
+
+    const guidanceFieldGroup = card.querySelector('.character-guidance-field');
+    if (guidanceFieldGroup) {
+        guidanceFieldGroup.style.display = effectiveMemoryEnabled ? '' : 'none';
+    }
+
+    const bioSection = card.querySelector('.generated-bio-section');
+    if (effectiveMemoryEnabled) {
+        if (!bioSection) {
+            const content = card.querySelector('.character-accordion-content');
+            if (guidanceFieldGroup && content) {
+                guidanceFieldGroup.insertAdjacentHTML('afterend', getGeneratedBioSectionHtml());
+            }
+        } else {
+            bioSection.style.display = '';
+        }
+
+        const npcId = card.dataset.npcId;
+        if (npcId) {
+            loadGeneratedBio(npcId, card);
+        }
+    } else if (bioSection) {
+        bioSection.style.display = 'none';
+    }
+}
+
+function refreshCharacterLongTermMemoryVisibility(showToggle) {
+    document.querySelectorAll('#bioList .character-card:not(.player-card)').forEach(card => {
+        const toggleSection = card.querySelector('.character-memory-toggle-section');
+        if (toggleSection) {
+            toggleSection.style.display = showToggle ? '' : 'none';
+        }
+        refreshCharacterCardMemoryState(card);
+    });
+    updateClearNpcButton();
+}
+
+/**
+ * Refresh generated bio visibility for all character cards based on memory state.
+ */
+function refreshCharacterLabels(memoryEnabled) {
+    document.querySelectorAll('#bioList .character-card').forEach(card => {
+        refreshCharacterCardMemoryState(card, memoryEnabled);
+    });
+    updateClearNpcButton();
+}
+
+function onCharacterLongTermMemoryToggle(checkbox) {
+    const card = checkbox?.closest('.character-card');
+    const npcId = card?.dataset?.npcId?.trim();
+    setNpcLongTermMemoryEnabled(npcId, checkbox?.checked === true);
+    markDirty();
+    refreshCharacterCardMemoryState(card);
+    updateClearNpcButton();
+}
+
+function handleCharacterIdChange(input) {
+    const card = input.closest('.character-card');
+    const value = input.value.trim();
+    if (card) {
+        card.dataset.npcId = value;
+    }
+    updateCharacterTitle(input);
+    markDirty();
+}
+
+function initializeCharacterIdAutocomplete(card) {
+    if (!window.Awesomplete || !card || card.classList.contains('player-card')) return;
+
+    const input = card.querySelector('.character-name-input');
+    if (!input) return;
+
+    if (input._awesomplete) {
+        input._awesomplete.list = voiceManifestIds;
+        return;
+    }
+
+    const combobox = input.closest('.character-id-combobox');
+    const dropdownBtn = combobox?.querySelector('.character-id-dropdown-btn');
+
+    const filterFn = Awesomplete.FILTER_CONTAINS || ((text, userInput) =>
+        text.toLowerCase().includes(userInput.toLowerCase()));
+
+    const awesomplete = new Awesomplete(input, {
+        list: voiceManifestIds,
+        minChars: 1,
+        maxItems: 12,
+        autoFirst: false,
+        sort: false,
+        filter: filterFn
+    });
+
+    input._awesomplete = awesomplete;
+
+    input.addEventListener('awesomplete-selectcomplete', () => {
+        handleCharacterIdChange(input);
+    });
+
+    if (dropdownBtn) {
+        dropdownBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            input.focus();
+
+            const previousMinChars = awesomplete.minChars;
+            awesomplete.minChars = 0;
+
+            if (awesomplete.ul.childNodes.length === 0) {
+                awesomplete.evaluate();
+            } else if (awesomplete.ul.hasAttribute('hidden')) {
+                awesomplete.open();
+            } else {
+                awesomplete.close();
+            }
+
+            awesomplete.minChars = previousMinChars;
+        });
+    }
+}
+
+function refreshCharacterIdAutocompletes() {
+    document.querySelectorAll('#bioList .character-card:not(.player-card)').forEach(card => {
+        initializeCharacterIdAutocomplete(card);
+    });
+}
+
+function addCharacterCard(
+    name = '',
+    staticBio = '',
+    guidance = '',
+    visemeScale = 1.0,
+    ttsTempMod = 0,
+    isPlayer = false,
+    memoryEnabled = false,
+    modelOverride = '',
+    longTermMemoryEnabled = false,
+    showLongTermMemoryToggle = false,
+    llmModelOverride = ''
+) {
+    const container = document.getElementById('bioList');
+    const card = document.createElement('div');
+    card.className = isPlayer ? 'character-card player-card' : 'character-card collapsed';
+    card.dataset.npcId = name;  // Store NPC ID for bio fetching
+    const effectiveMemoryEnabled = memoryEnabled && (!showLongTermMemoryToggle || longTermMemoryEnabled);
+
+    const displayName = isPlayer ? getPlayerCardTitle() : getCharacterDisplayName(name, 'New Character');
+    const toggleIcon = isPlayer ? '' : '<span class="character-accordion-toggle">&#9660;</span>';
+
+    const nameField = isPlayer
+        ? `<span class="player-name-label" style="font-family: var(--font-display); font-weight: 600;">${escapeHtml(getPlayerCardNameLabel())}</span>`
+        : `
+            <div class="character-id-combobox">
+                <input type="text" class="character-name-input" value="${escapeHtml(name)}" placeholder="Character ID (e.g. SebastianSallow)" autocomplete="off" spellcheck="false" onchange="handleCharacterIdChange(this)">
+                <button type="button" class="character-id-dropdown-btn" aria-label="Browse character IDs" title="Browse character IDs">&#9662;</button>
+            </div>
+        `;
+
+    const removeBtn = isPlayer
+        ? ''
+        : `<button class="btn btn-danger" onclick="event.stopPropagation(); removeCharacterCard(this);" style="padding: 4px 8px; font-size: 0.7rem;">Remove</button>`;
+
+    // Format ttsTempMod with sign for display
+    const ttsTempModDisplay = ttsTempMod >= 0 ? `+${ttsTempMod.toFixed(2)}` : ttsTempMod.toFixed(2);
+
+    // Generated bio section (only for NPCs when memory enabled, hidden otherwise)
+    const generatedBioSection = (isPlayer || !effectiveMemoryEnabled) ? '' : getGeneratedBioSectionHtml();
+
+    const longTermMemorySection = isPlayer ? '' : `
+                <div class="field-group character-memory-toggle-section" style="display: ${showLongTermMemoryToggle ? '' : 'none'};">
+                    <div class="toggle-wrapper">
+                        <span class="toggle-label">Enable Long Term Memory</span>
+                        <label class="toggle">
+                            <input type="checkbox" class="character-long-term-memory-toggle" ${longTermMemoryEnabled ? 'checked' : ''}
+                                   onchange="onCharacterLongTermMemoryToggle(this)">
+                            <span class="toggle-track">
+                                <span class="toggle-thumb"></span>
+                            </span>
+                        </label>
+                    </div>
+                    <p class="field-hint">Allow this NPC to use long-term memory when whitelisted-only mode is enabled.</p>
                 </div>
             `;
 
@@ -3561,26 +5831,32 @@ function addCharacterCard(name = '', guidance = '', visemeScale = 1.0, ttsTempMo
                     <div class="field-group">
                         <label class="field-label">Character ID</label>
                         ${nameField}
+                        <p class="field-hint character-id-hint">Case-sensitive. Use the exact voice ID, usually TitleCase like SebastianSallow. Custom IDs still work.</p>
                     </div>
                     `}
                     <div class="field-group">
-                        <label class="field-label">${isPlayer ? 'Bio' : (memoryEnabled ? "Editor's Guidance" : 'Bio')}</label>
+                        <label class="field-label">Bio</label>
                         <p class="field-hint">${isPlayer
-            ? 'Static facts about the player known to all NPCs (personality, background, etc.). Always injected alongside dynamic memories.'
-            : (memoryEnabled
-                ? 'Character essence used when generating bio from memory. Used as fallback context if no bio has been generated yet.'
-                : 'Biographical context injected into prompts when this character speaks.')}</p>
-                        <textarea class="character-guidance-input" placeholder="${isPlayer
+            ? 'Static facts about the player known to all NPCs. Always included alongside dynamic memories when available.'
+            : 'Immutable lore and background. Injected directly when long-term memory is off, and added alongside generated memory when it is on.'}</p>
+                        <textarea class="character-guidance-input character-static-bio-input" placeholder="${isPlayer
             ? 'e.g. Ambitious, cunning, from a wealthy family...'
-            : (memoryEnabled
-                ? 'e.g. Speaks with subtle arrogance. Protective of family...'
-                : 'Character biography/background...')}"
+            : 'Character biography, lore, and background...'}"
+                                  onchange="markDirty()">${escapeHtml(staticBio)}</textarea>
+                    </div>
+                    ${isPlayer ? '' : `
+                    <div class="field-group character-guidance-field" style="${effectiveMemoryEnabled ? '' : 'display: none;'}">
+                        <label class="field-label">Editor's Guidance</label>
+                        <p class="field-hint">Optional. Short notes for how the Generated Bio should interpret and preserve this character. Use this for character essence, tone, or interpretation hints. Do not put long lore here; put that in Bio.</p>
+                        <textarea class="character-guidance-input character-editor-guidance-input" placeholder="e.g. Keep her dry wit and guarded warmth. Avoid flattening him into comic relief. Preserve that she is deeply loyal to family."
                                   onchange="markDirty()">${escapeHtml(guidance)}</textarea>
                     </div>
+                    `}
                     ${generatedBioSection}
-                    <div class="field-group">
-                        <label class="field-label">Viseme Scale</label>
-                        <p class="field-hint">Lip sync intensity (0.5 = subtle, 1.0 = normal, 1.5 = exaggerated)</p>
+                    ${longTermMemorySection}
+                    <div class="field-group" data-simple-hide="true">
+                        <label class="field-label">Lipsync Intensity</label>
+                        <p class="field-hint">0.5 = subtle, 1.0 = normal, 1.5 = exaggerated</p>
                         <div class="range-wrapper">
                             <input type="range" class="character-viseme-scale" min="0.5" max="1.5" step="0.1" value="${visemeScale}"
                                    oninput="this.nextElementSibling.textContent = this.value; markDirty()">
@@ -3588,7 +5864,7 @@ function addCharacterCard(name = '', guidance = '', visemeScale = 1.0, ttsTempMo
                         </div>
                     </div>
                     ${isPlayer ? '' : `
-                    <div class="field-group">
+                    <div class="field-group" data-simple-hide="true">
                         <label class="field-label">TTS Temperature Modifier</label>
                         <p class="field-hint">Defaults are usually best. Only increase if voice sounds flat; too high causes instability.</p>
                         <div class="range-wrapper">
@@ -3597,7 +5873,13 @@ function addCharacterCard(name = '', guidance = '', visemeScale = 1.0, ttsTempMo
                             <span class="range-value">${ttsTempModDisplay}</span>
                         </div>
                     </div>
-                    <div class="field-group">
+                    <div class="field-group" data-simple-hide="true">
+                        <label class="field-label">LLM Model Override</label>
+                        <p class="field-hint">Use a different LLM for this character's dialogue. Leave empty to use the global chat model.</p>
+                        <input type="text" class="character-llm-model-override" value="${escapeHtml(llmModelOverride)}" placeholder="Use global chat model"
+                               onchange="markDirty()">
+                    </div>
+                    <div class="field-group" data-simple-hide="true">
                         <label class="field-label">TTS Model Override</label>
                         <p class="field-hint">If you prefer a specific TTS model for this character. Leave empty to use the provider default.</p>
                         <input type="text" class="character-model-override" value="${escapeHtml(modelOverride)}" placeholder="Use provider default"
@@ -3609,10 +5891,21 @@ function addCharacterCard(name = '', guidance = '', visemeScale = 1.0, ttsTempMo
             `;
     container.appendChild(card);
 
-    // Load generated bio if memory is enabled and this is an NPC
-    if (memoryEnabled && !isPlayer && name) {
+    if (!isPlayer) {
+        initializeCharacterIdAutocomplete(card);
+        // Initialize OpenRouter autocomplete on LLM model override input
+        const llmModelInput = card.querySelector('.character-llm-model-override');
+        if (llmModelInput) {
+            initializeOpenRouterModelAutocomplete(llmModelInput, isOpenRouterAutocompleteEnabled());
+        }
+    }
+
+    // Load generated bio if memory is effectively enabled for this NPC
+    if (effectiveMemoryEnabled && !isPlayer && name) {
         loadGeneratedBio(name, card);
     }
+
+    applySimpleMode();
 
     // Refresh character search filter after adding card
     if (typeof CharacterSearch !== 'undefined') {
@@ -3637,7 +5930,8 @@ function removeCharacterCard(button) {
 // Legacy alias
 function addBioCard(name = '', bio = '', visemeScale = 1.0, ttsTempMod = 0, isPlayer = false) {
     const memoryEnabled = config?.memory?.enabled || false;
-    addCharacterCard(name, bio, visemeScale, ttsTempMod, isPlayer, memoryEnabled);
+    const memoryWhitelistOnly = config?.memory?.whitelisted_npcs_only === true;
+    addCharacterCard(name, bio, '', visemeScale, ttsTempMod, isPlayer, memoryEnabled, '', false, memoryWhitelistOnly);
 }
 
 async function loadGeneratedBio(npcId, card) {
@@ -3721,7 +6015,7 @@ async function regenerateBio(npcId, buttonElement) {
 function updateCharacterTitle(input) {
     const card = input.closest('.character-card');
     const titleText = card.querySelector('.character-title-text');
-    titleText.textContent = input.value || 'New Character';
+    titleText.textContent = getCharacterDisplayName(input.value, 'New Character');
 }
 
 function escapeHtml(text) {
@@ -3741,16 +6035,377 @@ function addCharacterBio() {
     markDirty();
 }
 
+function deriveOwlCustomCharacterId(name) {
+    return String(name || '').replace(/[^A-Za-z0-9]+/g, '');
+}
+
+function updateOwlCustomCharacterEmptyState() {
+    const container = document.getElementById('owlCustomCharacterList');
+    if (!container) return;
+
+    const existingEmpty = container.querySelector('.owl-custom-character-empty');
+    const hasCards = container.querySelector('.character-card') !== null;
+
+    if (!hasCards) {
+        if (!existingEmpty) {
+            const empty = document.createElement('div');
+            empty.className = 'field-hint owl-custom-character-empty';
+            empty.textContent = 'No mail-only custom characters yet.';
+            container.appendChild(empty);
+        }
+        return;
+    }
+
+    if (existingEmpty) {
+        existingEmpty.remove();
+    }
+}
+
+function updateOwlCustomCharacterName(input) {
+    const card = input.closest('.character-card');
+    if (!card) return;
+
+    const name = input.value.trim();
+    const derivedId = deriveOwlCustomCharacterId(name);
+    const title = card.querySelector('.character-title-text');
+
+    if (title) {
+        title.textContent = name || 'New Custom Character';
+    }
+    const voiceHint = card.querySelector('.owl-custom-character-voice-hint');
+    if (voiceHint) {
+        voiceHint.innerHTML = getVoiceReferenceHelpHtml(derivedId || 'YourVoiceId');
+    }
+
+    card.dataset.npcId = derivedId;
+    markDirty();
+}
+
+function addOwlCustomCharacterCard(name = '', bio = '') {
+    const container = document.getElementById('owlCustomCharacterList');
+    if (!container) return null;
+
+    const card = document.createElement('div');
+    card.className = 'character-card owl-custom-character-card collapsed';
+    const titleText = name || 'New Custom Character';
+    const derivedId = deriveOwlCustomCharacterId(name);
+
+    card.innerHTML = `
+                <div class="character-accordion-header">
+                    <div class="character-accordion-title">
+                        <span class="character-title-text">${escapeHtml(titleText)}</span>
+                    </div>
+                    <span class="character-accordion-toggle"><i data-lucide="chevron-down"></i></span>
+                </div>
+                <div class="character-accordion-content">
+                    <div class="field-group">
+                        <label class="field-label">Name</label>
+                        <p class="field-hint">Display name used in Owl Post.</p>
+                        <input type="text" class="owl-custom-character-name" value="${escapeHtml(name)}"
+                               placeholder="e.g. John Smith"
+                               oninput="updateOwlCustomCharacterName(this)"
+                               onchange="markDirty()">
+                    </div>
+                    <div class="field-group">
+                        <label class="field-label">Voice</label>
+                        <p class="field-hint owl-custom-character-voice-hint">${getVoiceReferenceHelpHtml(derivedId || 'YourVoiceId')}</p>
+                    </div>
+                    <div class="field-group">
+                        <label class="field-label">Bio</label>
+                        <p class="field-hint">Background and personality used when this character replies by mail.</p>
+                        <textarea class="character-guidance-input owl-custom-character-bio"
+                                  placeholder="e.g. The player's father. Formal, thoughtful, and quietly protective."
+                                  oninput="markDirty()"
+                                  onchange="markDirty()">${escapeHtml(bio)}</textarea>
+                    </div>
+                    <div class="character-actions">
+                        <button class="btn btn-secondary" onclick="removeOwlCustomCharacterCard(this)">Remove</button>
+                    </div>
+                </div>
+            `;
+
+    container.appendChild(card);
+    card.dataset.npcId = derivedId;
+    updateOwlCustomCharacterEmptyState();
+
+    const textarea = card.querySelector('.character-guidance-input');
+    if (textarea) {
+        AutoExpandTextarea.initTextarea(textarea);
+    }
+
+    if (window.lucide) {
+        lucide.createIcons({ nodes: [card] });
+    }
+
+    return card;
+}
+
+function populateOwlCustomCharacters(characters = []) {
+    const container = document.getElementById('owlCustomCharacterList');
+    if (!container) return;
+
+    container.innerHTML = '';
+    characters.forEach(entry => {
+        if (!entry || typeof entry !== 'object') return;
+        addOwlCustomCharacterCard(entry.name || entry.id || '', entry.bio || '');
+    });
+    updateOwlCustomCharacterEmptyState();
+}
+
+function addOwlCustomCharacter() {
+    const card = addOwlCustomCharacterCard('', '');
+    if (card) {
+        card.classList.remove('collapsed');
+    }
+    markDirty();
+}
+
+function removeOwlCustomCharacterCard(button) {
+    const card = button.closest('.character-card');
+    if (!card) return;
+    card.remove();
+    updateOwlCustomCharacterEmptyState();
+    markDirty();
+}
+
+function collectOwlCustomCharactersForSave() {
+    const cards = document.querySelectorAll('#owlCustomCharacterList .character-card');
+    const characters = [];
+    const errors = [];
+    const seenIds = new Map();
+    const builtInIds = new Set((voiceManifestIds || []).map(id => String(id).toLowerCase()));
+    const reservedIds = new Set(['player']);
+
+    cards.forEach((card, index) => {
+        const nameInput = card.querySelector('.owl-custom-character-name');
+        const bioField = card.querySelector('.owl-custom-character-bio');
+
+        const name = nameInput?.value.trim() || '';
+        const id = deriveOwlCustomCharacterId(name);
+        const bio = bioField?.value || '';
+
+        card.dataset.npcId = id;
+
+        if (!id) {
+            errors.push(`Custom character #${index + 1} needs a name with at least one letter or number.`);
+            return;
+        }
+
+        const lowerId = id.toLowerCase();
+        if (reservedIds.has(lowerId)) {
+            errors.push(`"${name}" conflicts with a reserved name. Choose a different name.`);
+            return;
+        }
+        if (builtInIds.has(lowerId)) {
+            errors.push(`"${name}" conflicts with an existing in-game voice name. Choose a different name.`);
+            return;
+        }
+        if (seenIds.has(lowerId)) {
+            errors.push(`Two custom characters would use the same voice file name. Choose different names.`);
+            return;
+        }
+
+        seenIds.set(lowerId, index + 1);
+        characters.push({ name, id, bio });
+    });
+
+    return { characters, errors };
+}
+
 // Pagination state
-let allHistory = [];
-let filteredHistory = null;  // null = no filter (show all)
+let historyRecentEntries = [];
+let historyPageEntries = [];
+let historyVisibleCount = 0;
+let historyRawCount = null;
+let historyTotalPages = 1;
+let historySelectedNpcId = 'all';
+let historyNpcOptions = [];
 let npcChapters = null;      // Chapter data for selected NPC (for dividers)
-let currentPage = 1;
+let historyChaptersNpcId = null;
+let historyCurrentPage = 1;
+let historyLoadError = '';
+let queuedHistoryLoadOptions = null;
 const ITEMS_PER_PAGE = 100;
 
 // Edit mode state
 let historyEditMode = false;
-let selectedHistoryEntries = new Set();  // stores timestamps as strings for precision
+let selectedHistoryEntries = new Map();  // row key -> raw dialogue row IDs
+
+function normalizeHistorySourceIds(entry) {
+    if (!entry || !Array.isArray(entry.sourceEntryIds)) return [];
+    return Array.from(new Set(
+        entry.sourceEntryIds
+            .map(id => Number(id))
+            .filter(id => Number.isInteger(id) && id > 0)
+    )).sort((a, b) => a - b);
+}
+
+function getHistoryEntryKey(entry) {
+    const sourceIds = normalizeHistorySourceIds(entry);
+    if (sourceIds.length > 0) {
+        return `id-${sourceIds.join('-')}`;
+    }
+    const timestamp = String(entry?.timestamp ?? '0').replace(/\./g, '_');
+    return `ts-${timestamp}`;
+}
+
+function getHistoryArchiveAudio(entry) {
+    const urls = [];
+    const paths = [];
+    const seenUrls = new Set();
+    const seenPaths = new Set();
+
+    function addUnique(values, target, seen) {
+        for (const value of values || []) {
+            if (typeof value !== 'string' || !value) continue;
+            if (seen.has(value)) continue;
+            seen.add(value);
+            target.push(value);
+        }
+    }
+
+    addUnique(entry?.ttsArchiveUrl ? [entry.ttsArchiveUrl] : [], urls, seenUrls);
+    addUnique(Array.isArray(entry?.ttsArchiveUrls) ? entry.ttsArchiveUrls : [], urls, seenUrls);
+    addUnique(entry?.ttsArchivePath ? [entry.ttsArchivePath] : [], paths, seenPaths);
+    addUnique(Array.isArray(entry?.ttsArchivePaths) ? entry.ttsArchivePaths : [], paths, seenPaths);
+
+    return {
+        url: urls[0] || '',
+        path: paths[0] || ''
+    };
+}
+
+function renderHistoryTextContent(entry, text, entryKey) {
+    const safeText = escapeHtml(text || '...');
+    const archive = getHistoryArchiveAudio(entry);
+    if (!archive.url) {
+        return safeText;
+    }
+
+    return `
+                <div class="history-text-content">
+                    <span class="history-text-label">${safeText}</span>
+                    <button type="button" class="history-audio-toggle" data-entry-key="${escapeHtml(entryKey)}" data-audio-url="${escapeHtml(archive.url)}" data-audio-path="${escapeHtml(archive.path)}" data-state="stopped" aria-label="Play archived audio" title="Play archived audio">
+                        <i data-lucide="play"></i>
+                    </button>
+                </div>
+            `;
+}
+
+function refreshHistoryAudioControls(root, syncActive = false) {
+    if (syncActive && window.HistoryAudioPlayer && typeof window.HistoryAudioPlayer.syncState === 'function') {
+        window.HistoryAudioPlayer.syncState(root);
+        return;
+    }
+    if (window.lucide && root) {
+        lucide.createIcons({ nodes: [root] });
+    }
+}
+
+function stopHistoryAudio() {
+    if (window.HistoryAudioPlayer && typeof window.HistoryAudioPlayer.stopAll === 'function') {
+        window.HistoryAudioPlayer.stopAll();
+    }
+}
+
+function getSelectedHistoryEntryIds() {
+    const ids = new Set();
+    selectedHistoryEntries.forEach(sourceIds => {
+        for (const id of sourceIds || []) {
+            ids.add(id);
+        }
+    });
+    return Array.from(ids).sort((a, b) => a - b);
+}
+
+function pruneHistoryAfterDelete(history, deletedIds) {
+    if (!Array.isArray(history) || deletedIds.length === 0) return history;
+    const deletedIdSet = new Set(deletedIds);
+    return history.filter(entry => {
+        const sourceIds = normalizeHistorySourceIds(entry);
+        return !sourceIds.some(id => deletedIdSet.has(id));
+    });
+}
+
+function getHistoryPerspectiveValue() {
+    const select = document.getElementById('historyPerspective');
+    const value = select?.value || historySelectedNpcId || 'all';
+    return value || 'all';
+}
+
+function getHistoryViewRequestParams() {
+    const params = new URLSearchParams({
+        page: String(historyCurrentPage || 1),
+        page_size: String(ITEMS_PER_PAGE),
+        recent_limit: '10'
+    });
+    const npcId = getHistoryPerspectiveValue();
+    if (npcId && npcId !== 'all') {
+        params.set('npc_id', npcId);
+    }
+    return params;
+}
+
+function renderHistoryMessage(message) {
+    const recentBody = document.getElementById('historyTableBody');
+    const allBody = document.getElementById('historyAllTableBody');
+    const countEl = document.getElementById('historyAllCount');
+    const colspan = historyEditMode ? 5 : 3;
+    const safeMessage = escapeHtml(message || 'No dialogue history yet');
+    const markup = `<tr><td colspan="${colspan}" style="text-align:center;opacity:0.6;">${safeMessage}</td></tr>`;
+
+    if (recentBody) {
+        recentBody.innerHTML = markup;
+        refreshHistoryAudioControls(recentBody, document.getElementById('historyRecent')?.classList.contains('active'));
+    }
+    if (allBody) {
+        allBody.innerHTML = markup;
+        refreshHistoryAudioControls(allBody, document.getElementById('historyAll')?.classList.contains('active'));
+    }
+    if (countEl) {
+        countEl.textContent = message || 'No dialogue history yet';
+    }
+    renderPagination(1);
+}
+
+function applyHistoryViewPayload(payload) {
+    historyRecentEntries = Array.isArray(payload?.recent_entries) ? payload.recent_entries : [];
+    historyPageEntries = Array.isArray(payload?.page_entries) ? payload.page_entries : [];
+    historyVisibleCount = Number.isInteger(payload?.visible_count) ? payload.visible_count : 0;
+    historyRawCount = Number.isInteger(payload?.raw_count) ? payload.raw_count : null;
+    historyTotalPages = Math.max(1, Number(payload?.total_pages) || 1);
+    historyCurrentPage = Math.max(1, Number(payload?.page) || 1);
+    historySelectedNpcId = payload?.selected_npc_id || 'all';
+    historyNpcOptions = Array.isArray(payload?.npc_options) ? payload.npc_options : [];
+    historyLoadError = '';
+}
+
+async function loadHistoryChaptersForSelection(forceRefresh = false) {
+    const npcId = historySelectedNpcId;
+    if (!npcId || npcId === 'all') {
+        npcChapters = null;
+        historyChaptersNpcId = null;
+        return;
+    }
+
+    if (!forceRefresh && npcChapters && historyChaptersNpcId === npcId) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/memories/chapters/${encodeURIComponent(npcId)}`);
+        if (response.ok) {
+            npcChapters = await response.json();
+            historyChaptersNpcId = npcId;
+        } else {
+            npcChapters = null;
+            historyChaptersNpcId = null;
+        }
+    } catch (e) {
+        npcChapters = null;
+        historyChaptersNpcId = null;
+    }
+}
 
 // NPC name utilities (mirrors Python's dialogue.py)
 const GENERIC_NPC_PREFIXES = [
@@ -3806,75 +6461,41 @@ function getUniqueNPCsFromHistory(history) {
     );
 }
 
-function populatePerspectiveDropdown(history) {
+function populatePerspectiveDropdown(options, selectedNpcId = 'all') {
     const select = document.getElementById('historyPerspective');
     if (!select) return;
-    const currentValue = select.value;
 
     // Clear existing options except "All"
     select.innerHTML = '<option value="all">All (default)</option>';
 
-    // Get unique NPCs and add as options
-    const npcIds = getUniqueNPCsFromHistory(history);
-    for (const npcId of npcIds) {
+    for (const optionData of (options || [])) {
         const option = document.createElement('option');
-        option.value = npcId;
-        option.textContent = prettifyVoiceName(npcId);
+        option.value = optionData.id;
+        option.textContent = optionData.name || prettifyVoiceName(optionData.id);
         select.appendChild(option);
     }
 
-    // Restore selection if still valid
-    if (currentValue && [...select.options].some(o => o.value === currentValue)) {
-        select.value = currentValue;
-    } else {
-        select.value = 'all';
-        filteredHistory = null;
-    }
+    const normalizedSelection = [...select.options].some(o => o.value === selectedNpcId)
+        ? selectedNpcId
+        : 'all';
+    select.value = normalizedSelection;
+    historySelectedNpcId = normalizedSelection;
 
     // Update clear button visibility
     updateClearNpcButton();
 }
 
-async function filterHistoryByPerspective(resetPage = true) {
-    const npcId = document.getElementById('historyPerspective').value;
-
-    if (npcId === 'all') {
-        filteredHistory = null;
-        npcChapters = null;
-    } else {
-        filteredHistory = allHistory.filter(entry => {
-            // NPC was the speaker
-            if (entry.voiceName === npcId) return true;
-            // NPC was in earshot
-            if (Array.isArray(entry.earshot) && entry.earshot.includes(npcId)) return true;
-            // Legacy entry (no earshot field) - include for backwards compat
-            if (!('earshot' in entry)) return true;
-            return false;
-        });
-
-        // Fetch chapter data for this NPC (for displaying dividers)
-        try {
-            const response = await fetch(`/api/memories/chapters/${encodeURIComponent(npcId)}`);
-            if (response.ok) {
-                const data = await response.json();
-                npcChapters = data;
-            } else {
-                npcChapters = null;
-            }
-        } catch (e) {
-            npcChapters = null;
-        }
+async function filterHistoryByPerspective(resetPage = true, stopAudioPlayback = true) {
+    if (stopAudioPlayback) {
+        stopHistoryAudio();
     }
-
-    // Update clear button
-    updateClearNpcButton();
-
-    // Re-render tables with filtered data
-    if (resetPage) currentPage = 1;
-    const historyToRender = filteredHistory || allHistory;
-    const collapsed = collapseSpells(historyToRender);
-    populateHistoryTable(collapsed.slice(-10).reverse(), true);
-    renderAllHistory();
+    historySelectedNpcId = getHistoryPerspectiveValue();
+    if (resetPage) historyCurrentPage = 1;
+    if (historySelectedNpcId === 'all' || historyChaptersNpcId !== historySelectedNpcId) {
+        npcChapters = null;
+        historyChaptersNpcId = null;
+    }
+    await loadDialogueHistory({ allowDuringEdit: true });
 }
 
 function updateClearNpcButton() {
@@ -3895,11 +6516,14 @@ function updateClearNpcButton() {
         if (migrateBtn) {
             // Only show migrate button if:
             // 1. Memory is enabled
-            // 2. NPC has NOT been migrated yet (no chapters)
+            // 1.5 NPC is effectively allowed to use memory when whitelist mode is on
+            // 2. NPC has NOT been migrated into the active memory backend yet
             const memoryEnabled = config.memory?.enabled === true;
-            const hasChapters = npcChapters && (npcChapters.closed_chapters?.length > 0 || npcChapters.open_chapter);
+            const whitelistOnly = isMemoryWhitelistOnlyEnabled();
+            const npcMemoryEnabled = !whitelistOnly || isNpcLongTermMemoryEnabled(npcId);
+            const hasMemoryFacts = npcChapters?.has_memory_facts === true;
 
-            if (memoryEnabled && !hasChapters) {
+            if (memoryEnabled && npcMemoryEnabled && !hasMemoryFacts) {
                 migrateBtn.style.display = 'inline-block';
                 migrateBtn.textContent = `Migrate ${shortName}`;
             } else {
@@ -3918,6 +6542,7 @@ async function clearNpcMemory() {
         `This will remove ${displayName} from all conversation memories.\n\n` +
         `• ${displayName} will be removed from all earshot witness lists\n` +
         `• Entries only witnessed by ${displayName} will be deleted\n` +
+        `• Player lines addressed only to ${displayName}, with no remaining witnesses, will be deleted\n` +
         `• Entries where ${displayName} spoke will be deleted\n\n` +
         `This cannot be undone. Continue?`
     );
@@ -3934,8 +6559,11 @@ async function clearNpcMemory() {
 
         // Reset to "All" and refresh
         document.getElementById('historyPerspective').value = 'all';
-        filteredHistory = null;
-        await loadDialogueHistory();
+        historySelectedNpcId = 'all';
+        historyCurrentPage = 1;
+        npcChapters = null;
+        historyChaptersNpcId = null;
+        await loadDialogueHistory({ allowDuringEdit: true });
     } catch (error) {
         console.error('Error clearing NPC dialogue:', error);
         showToast('Error clearing dialogue', 'error');
@@ -3955,7 +6583,7 @@ async function migrateNpcMemory() {
         `This will:\n` +
         `• Analyze their conversation history\n` +
         `• Create chapters from the dialogue\n` +
-        `• Add episodes to the knowledge graph\n\n` +
+        `• Extract searchable long-term facts\n\n` +
         `This may take a while depending on history size.`
     );
     if (!confirmed) return;
@@ -4008,7 +6636,8 @@ async function migrateNpcMemory() {
                         );
                     }
                     // Refresh to update button visibility and memory UI
-                    await filterHistoryByPerspective(false);
+                    historyChaptersNpcId = null;
+                    await loadDialogueHistory({ allowDuringEdit: true });
                     await refreshMemoryUI();
                     break;
 
@@ -4036,37 +6665,45 @@ async function migrateNpcMemory() {
     };
 }
 
-async function loadDialogueHistory() {
+async function loadDialogueHistory(options = {}) {
+    const allowDuringEdit = options.allowDuringEdit === true;
+
     // Skip auto-refresh during edit mode to prevent disruption
-    if (historyEditMode) return;
-    if (historyLoadInFlight) return;
+    if (historyEditMode && !allowDuringEdit) return;
+    if (historyLoadInFlight) {
+        queuedHistoryLoadOptions = {
+            allowDuringEdit: Boolean(queuedHistoryLoadOptions?.allowDuringEdit || allowDuringEdit)
+        };
+        return;
+    }
     historyLoadInFlight = true;
     try {
-        const response = await fetchWithTimeout('/api/dialogue-history');
-        if (response.ok) {
-            allHistory = await response.json();
-
-            // Populate NPC perspective dropdown
-            populatePerspectiveDropdown(allHistory);
-
-            // Apply current filter if any
-            const npcId = document.getElementById('historyPerspective')?.value;
-            if (npcId && npcId !== 'all') {
-                filterHistoryByPerspective(false);  // Don't reset page on refresh
-            } else {
-                filteredHistory = null;
-                // Collapse spells first (on chronological data), then reverse for display
-                const collapsed = collapseSpells(allHistory);
-                // Recent tab: last 10, newest first
-                populateHistoryTable(collapsed.slice(-10).reverse(), true);
-                // All History tab: paginated, newest first
-                renderAllHistory();
-            }
+        const response = await fetchWithTimeout(`/api/dialogue-history/view?${getHistoryViewRequestParams().toString()}`, {}, 8000);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
         }
+
+        const payload = await response.json();
+        applyHistoryViewPayload(payload);
+        await loadHistoryChaptersForSelection();
+
+        populatePerspectiveDropdown(historyNpcOptions, historySelectedNpcId);
+        populateHistoryTable(historyRecentEntries, true);
+        renderAllHistory();
+        populateCommitmentCreateNpcDropdown();
     } catch (e) {
-        // Silently ignore timeout/network errors during polling
+        console.error('Failed to load dialogue history:', e);
+        historyLoadError = e?.name === 'AbortError'
+            ? 'Dialogue history load timed out.'
+            : 'Dialogue history failed to load.';
+        renderHistoryMessage(historyLoadError);
     } finally {
         historyLoadInFlight = false;
+        if (queuedHistoryLoadOptions) {
+            const nextOptions = queuedHistoryLoadOptions;
+            queuedHistoryLoadOptions = null;
+            await loadDialogueHistory(nextOptions);
+        }
     }
 }
 
@@ -4095,6 +6732,10 @@ function collapseSpells(history) {
             last.lineID === entry.lineID) {
             // Merge into existing entry
             last.count = (last.count || 1) + 1;
+            last.sourceEntryIds = Array.from(new Set([
+                ...normalizeHistorySourceIds(last),
+                ...normalizeHistorySourceIds(entry)
+            ])).sort((a, b) => a - b);
             if (!last.firstGameTime) {
                 last.firstGameTime = last.gameTime;
                 last.firstGameDate = last.gameDate;
@@ -4132,7 +6773,7 @@ function populateHistoryTable(history, alreadyCollapsed = false) {
     if (historyEditMode) {
         if (!thead.querySelector('.history-checkbox-cell')) {
             thead.innerHTML = `
-                        <th class="history-checkbox-cell"><input type="checkbox" class="history-checkbox history-select-all" onchange="this.checked ? selectAllHistoryEntries() : deselectAllHistoryEntries()" title="Select all"></th>
+                        <th class="history-checkbox-cell"><input type="checkbox" class="history-checkbox history-select-all" onchange="toggleAllVisibleHistoryEntries(this)" title="Select all"></th>
                         <th>Speaker</th>
                         <th>Text</th>
                         <th>Time</th>
@@ -4154,9 +6795,10 @@ function populateHistoryTable(history, alreadyCollapsed = false) {
 
     for (const entry of collapsed) {
         const row = document.createElement('tr');
-        const timestamp = entry.timestamp;
-        const timestampStr = String(timestamp);
-        row.dataset.timestamp = timestampStr;
+        const entryKey = getHistoryEntryKey(entry);
+        const sourceIds = normalizeHistorySourceIds(entry);
+        const sourceIdsStr = sourceIds.join(',');
+        row.dataset.entryKey = entryKey;
 
         let speaker = entry.speaker || entry.voiceName || 'Unknown';
         let text = entry.text || '...';
@@ -4170,8 +6812,8 @@ function populateHistoryTable(history, alreadyCollapsed = false) {
             time = formatEntryTime(entry);
             rowClass = 'history-row-location';
         }
-        // Handle broom events
-        else if (entry.type === 'broom') {
+        // Handle mount events
+        else if (entry.type === 'broom' || entry.type === 'mount') {
             speaker = '🧹';
             time = formatEntryTime(entry);
             rowClass = 'history-row-broom';
@@ -4190,21 +6832,21 @@ function populateHistoryTable(history, alreadyCollapsed = false) {
             time = formatEntryTime(entry);
         }
 
-        const isSelected = selectedHistoryEntries.has(timestampStr);
+        const isSelected = selectedHistoryEntries.has(entryKey);
         row.className = rowClass + (isSelected ? ' selected' : '');
 
         if (historyEditMode) {
             row.innerHTML = `
-                        <td class="history-checkbox-cell"><input type="checkbox" class="history-checkbox" data-timestamp="${timestampStr}" ${isSelected ? 'checked' : ''} onchange="toggleHistoryEntrySelection('${timestampStr}', this)"></td>
+                        <td class="history-checkbox-cell"><input type="checkbox" class="history-checkbox" data-entry-key="${entryKey}" data-source-ids="${sourceIdsStr}" ${isSelected ? 'checked' : ''} onchange="toggleHistoryEntrySelection(this.dataset.entryKey, this.dataset.sourceIds, this)"></td>
                         <td class="history-speaker">${escapeHtml(speaker)}</td>
-                        <td class="history-text">${escapeHtml(text)}</td>
+                        <td class="history-text">${renderHistoryTextContent(entry, text, entryKey)}</td>
                         <td class="history-time">${time}</td>
-                        <td class="history-delete-cell"><button class="history-delete-btn" onclick="deleteSingleHistoryEntry('${timestampStr}')" title="Delete entry">&#10005;</button></td>
+                        <td class="history-delete-cell"><button class="history-delete-btn" data-entry-key="${entryKey}" data-source-ids="${sourceIdsStr}" onclick="deleteSingleHistoryEntry(this.dataset.entryKey, this.dataset.sourceIds)" title="Delete entry">&#10005;</button></td>
                     `;
         } else {
             row.innerHTML = `
                         <td class="history-speaker">${escapeHtml(speaker)}</td>
-                        <td class="history-text">${escapeHtml(text)}</td>
+                        <td class="history-text">${renderHistoryTextContent(entry, text, entryKey)}</td>
                         <td class="history-time">${time}</td>
                     `;
         }
@@ -4215,34 +6857,21 @@ function populateHistoryTable(history, alreadyCollapsed = false) {
         const colspan = historyEditMode ? 5 : 3;
         tbody.innerHTML = `<tr><td colspan="${colspan}" style="text-align:center;opacity:0.6;">No dialogue history yet</td></tr>`;
     }
+
+    refreshHistoryAudioControls(tbody, document.getElementById('historyRecent')?.classList.contains('active'));
 }
 
 function renderAllHistory() {
-    // Use filtered history if set, otherwise all history
-    const historyToRender = filteredHistory || allHistory;
+    const pageData = Array.isArray(historyPageEntries) ? historyPageEntries : [];
+    const selectedNpcId = historySelectedNpcId || 'all';
 
-    // Collapse consecutive spells first, then reverse for newest-first display
-    const collapsed = collapseSpells(historyToRender);
-    const reversed = [...collapsed].reverse(); // Newest first
-    const totalPages = Math.ceil(reversed.length / ITEMS_PER_PAGE) || 1;
-
-    // Clamp current page
-    if (currentPage > totalPages) currentPage = totalPages;
-    if (currentPage < 1) currentPage = 1;
-
-    // Get page slice
-    const start = (currentPage - 1) * ITEMS_PER_PAGE;
-    const end = start + ITEMS_PER_PAGE;
-    const pageData = reversed.slice(start, end);
-
-    // Update count (show collapsed count, indicate if filtered)
     const countEl = document.getElementById('historyAllCount');
-    if (filteredHistory) {
-        const npcId = document.getElementById('historyPerspective')?.value;
-        const npcName = prettifyVoiceName(npcId);
-        countEl.textContent = `${collapsed.length} entries for ${npcName}`;
+    if (selectedNpcId !== 'all') {
+        const npcName = prettifyVoiceName(selectedNpcId);
+        countEl.textContent = `${historyVisibleCount} entries for ${npcName}`;
     } else {
-        countEl.textContent = `${collapsed.length} entries total (${allHistory.length} raw)`;
+        const rawCountText = Number.isInteger(historyRawCount) ? ` (${historyRawCount} raw)` : '';
+        countEl.textContent = `${historyVisibleCount} entries total${rawCountText}`;
     }
 
     // Update header for edit mode
@@ -4251,7 +6880,7 @@ function renderAllHistory() {
     if (historyEditMode) {
         if (!thead.querySelector('.history-checkbox-cell')) {
             thead.innerHTML = `
-                        <th class="history-checkbox-cell"><input type="checkbox" class="history-checkbox history-select-all" onchange="this.checked ? selectAllHistoryEntries() : deselectAllHistoryEntries()" title="Select all"></th>
+                        <th class="history-checkbox-cell"><input type="checkbox" class="history-checkbox history-select-all" onchange="toggleAllVisibleHistoryEntries(this)" title="Select all"></th>
                         <th>Speaker</th>
                         <th>Text</th>
                         <th>Time</th>
@@ -4272,7 +6901,7 @@ function renderAllHistory() {
 
     // Helper to find which chapter an entry belongs to (by timestamp)
     function findChapterForEntry(entry) {
-        if (!npcChapters || !filteredHistory) return null;
+        if (!npcChapters || selectedNpcId === 'all') return null;
         const ts = entry.timestamp;
         if (!ts) return null;
 
@@ -4324,9 +6953,10 @@ function renderAllHistory() {
         }
 
         const row = document.createElement('tr');
-        const timestamp = entry.timestamp;
-        const timestampStr = String(timestamp);
-        row.dataset.timestamp = timestampStr;
+        const entryKey = getHistoryEntryKey(entry);
+        const sourceIds = normalizeHistorySourceIds(entry);
+        const sourceIdsStr = sourceIds.join(',');
+        row.dataset.entryKey = entryKey;
 
         let speaker = entry.speaker || entry.voiceName || 'Unknown';
         let text = entry.text || '...';
@@ -4340,8 +6970,8 @@ function renderAllHistory() {
             time = formatEntryTime(entry);
             rowClass = 'history-row-location';
         }
-        // Handle broom events
-        else if (entry.type === 'broom') {
+        // Handle mount events
+        else if (entry.type === 'broom' || entry.type === 'mount') {
             speaker = '🧹';
             time = formatEntryTime(entry);
             rowClass = 'history-row-broom';
@@ -4360,21 +6990,21 @@ function renderAllHistory() {
             time = formatEntryTime(entry);
         }
 
-        const isSelected = selectedHistoryEntries.has(timestampStr);
+        const isSelected = selectedHistoryEntries.has(entryKey);
         row.className = rowClass + (isSelected ? ' selected' : '');
 
         if (historyEditMode) {
             row.innerHTML = `
-                        <td class="history-checkbox-cell"><input type="checkbox" class="history-checkbox" data-timestamp="${timestampStr}" ${isSelected ? 'checked' : ''} onchange="toggleHistoryEntrySelection('${timestampStr}', this)"></td>
+                        <td class="history-checkbox-cell"><input type="checkbox" class="history-checkbox" data-entry-key="${entryKey}" data-source-ids="${sourceIdsStr}" ${isSelected ? 'checked' : ''} onchange="toggleHistoryEntrySelection(this.dataset.entryKey, this.dataset.sourceIds, this)"></td>
                         <td class="history-speaker">${escapeHtml(speaker)}</td>
-                        <td class="history-text">${escapeHtml(text)}</td>
+                        <td class="history-text">${renderHistoryTextContent(entry, text, entryKey)}</td>
                         <td class="history-time">${time}</td>
-                        <td class="history-delete-cell"><button class="history-delete-btn" onclick="deleteSingleHistoryEntry('${timestampStr}')" title="Delete entry">&#10005;</button></td>
+                        <td class="history-delete-cell"><button class="history-delete-btn" data-entry-key="${entryKey}" data-source-ids="${sourceIdsStr}" onclick="deleteSingleHistoryEntry(this.dataset.entryKey, this.dataset.sourceIds)" title="Delete entry">&#10005;</button></td>
                     `;
         } else {
             row.innerHTML = `
                         <td class="history-speaker">${escapeHtml(speaker)}</td>
-                        <td class="history-text">${escapeHtml(text)}</td>
+                        <td class="history-text">${renderHistoryTextContent(entry, text, entryKey)}</td>
                         <td class="history-time">${time}</td>
                     `;
         }
@@ -4386,8 +7016,10 @@ function renderAllHistory() {
         tbody.innerHTML = `<tr><td colspan="${colspan}" style="text-align:center;opacity:0.6;">No dialogue history yet</td></tr>`;
     }
 
+    refreshHistoryAudioControls(tbody, document.getElementById('historyAll')?.classList.contains('active'));
+
     // Render pagination
-    renderPagination(totalPages);
+    renderPagination(historyTotalPages);
 }
 
 function renderPagination(totalPages) {
@@ -4400,12 +7032,16 @@ function renderPagination(totalPages) {
     const prevBtn = document.createElement('button');
     prevBtn.className = 'pagination-btn';
     prevBtn.innerHTML = '&laquo;';
-    prevBtn.disabled = currentPage === 1;
-    prevBtn.onclick = () => { currentPage--; renderAllHistory(); };
+    prevBtn.disabled = historyCurrentPage === 1;
+    prevBtn.onclick = async () => {
+        stopHistoryAudio();
+        historyCurrentPage = Math.max(1, historyCurrentPage - 1);
+        await loadDialogueHistory({ allowDuringEdit: true });
+    };
     container.appendChild(prevBtn);
 
     // Page numbers with ellipsis
-    const pages = getPaginationRange(currentPage, totalPages);
+    const pages = getPaginationRange(historyCurrentPage, totalPages);
     for (const page of pages) {
         if (page === '...') {
             const ellipsis = document.createElement('span');
@@ -4414,9 +7050,13 @@ function renderPagination(totalPages) {
             container.appendChild(ellipsis);
         } else {
             const btn = document.createElement('button');
-            btn.className = 'pagination-btn' + (page === currentPage ? ' active' : '');
+            btn.className = 'pagination-btn' + (page === historyCurrentPage ? ' active' : '');
             btn.textContent = page;
-            btn.onclick = () => { currentPage = page; renderAllHistory(); };
+            btn.onclick = async () => {
+                stopHistoryAudio();
+                historyCurrentPage = page;
+                await loadDialogueHistory({ allowDuringEdit: true });
+            };
             container.appendChild(btn);
         }
     }
@@ -4425,8 +7065,12 @@ function renderPagination(totalPages) {
     const nextBtn = document.createElement('button');
     nextBtn.className = 'pagination-btn';
     nextBtn.innerHTML = '&raquo;';
-    nextBtn.disabled = currentPage === totalPages;
-    nextBtn.onclick = () => { currentPage++; renderAllHistory(); };
+    nextBtn.disabled = historyCurrentPage === totalPages;
+    nextBtn.onclick = async () => {
+        stopHistoryAudio();
+        historyCurrentPage = Math.min(totalPages, historyCurrentPage + 1);
+        await loadDialogueHistory({ allowDuringEdit: true });
+    };
     container.appendChild(nextBtn);
 }
 
@@ -4499,6 +7143,8 @@ function toggleSubPanel(el) {
     }
 }
 
+let providerSectionScrollTimeout = null;
+
 function scrollToSection(id) {
     const section = document.getElementById(id);
     if (section) {
@@ -4509,7 +7155,20 @@ function scrollToSection(id) {
     }
 }
 
+function restoreProviderSectionScroll(sectionId) {
+    if (providerSectionScrollTimeout) {
+        clearTimeout(providerSectionScrollTimeout);
+    }
+
+    providerSectionScrollTimeout = setTimeout(() => {
+        scrollToSection(sectionId);
+        providerSectionScrollTimeout = null;
+    }, 100);
+}
+
 function switchTab(event, tabId) {
+    stopHistoryAudio();
+
     // Update tab buttons
     const tabs = event.target.parentElement;
     tabs.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -4522,8 +7181,13 @@ function switchTab(event, tabId) {
 
     // Initialize commitment create form when its tab is opened
     if (tabId === 'commitmentsCreate') {
+        loadCommitmentLocations();
         populateCommitmentCreateNpcDropdown();
         initCommitmentDatePickers();
+    }
+
+    if (tabId === 'eventsCostTab') {
+        loadSystemEventCosts();
     }
 }
 
@@ -4541,6 +7205,9 @@ function updateSetting(path, value) {
         obj = obj[parts[i]];
     }
     obj[parts[parts.length - 1]] = value;
+    if (path === 'setup.language') {
+        refreshVoiceReferenceHelpText();
+    }
     markDirty();
 }
 
@@ -4565,16 +7232,20 @@ function validateModelNames() {
         { path: 'conversation.chat_model', label: 'Chat Model' },
         { path: 'conversation.target_selection_model', label: 'Target Selection Model' },
         { path: 'conversation.interjection_model', label: 'Interjection Model' },
-        { path: 'conversation.input_correction_model', label: 'Input Correction Model' },
+        { path: 'conversation.commentary_model', label: 'Companion Commentary Model' },
+        { path: 'conversation.input_correction_model', label: 'Input Correction Model', feature: 'input_correction' },
+        { path: 'memory.embedding_model', label: 'Embedding Model', feature: 'memory' },
         { path: 'memory.chapter_model', label: 'Chapter Detection Model' },
         { path: 'memory.prose_model', label: 'Memory Prose Model' },
-        { path: 'memory.graphiti_model', label: 'Graphiti Model (Main)' },
-        { path: 'memory.graphiti_small_model', label: 'Graphiti Model (Small)' },
+        { path: 'memory.graphiti_model', label: 'Fact Extraction Model' },
+        { path: 'memory.graphiti_small_model', label: 'Fact Deduplication Model' },
         { path: 'memory.reranker_model', label: 'Reranker Model' },
-        { path: 'agents.vision.llm.model', label: 'Vision Agent Model' }
+        { path: 'agents.vision.llm.model', label: 'Vision Agent Model', feature: 'vision' }
     ];
 
     for (const field of modelFields) {
+        if (field.feature && isLLMFeatureDisabledByProvider(field.feature, provider)) continue;
+
         // Navigate nested path to get model value
         const parts = field.path.split('.');
         let value = config;
@@ -4610,6 +7281,10 @@ async function saveSettings() {
     btn.classList.add('loading');
     document.getElementById('saveText').innerHTML = '<span class="spinner"></span> Saving...';
 
+    if (window.ProviderRouting) {
+        ProviderRouting.sync();
+    }
+
     // Ensure latest API key text is captured even if the field never blurred.
     const llmKeyField = document.getElementById('llmApiKey');
     if (llmKeyField) {
@@ -4620,13 +7295,24 @@ async function saveSettings() {
         }
     }
 
-    // Validate provider fields (API keys, etc.)
-    const providerErrors = validateActiveProviderFields();
-    if (providerErrors.length > 0) {
+    // Provider API-key checks are heuristic warnings, not hard save blockers.
+    const providerWarnings = validateActiveProviderFields();
+    if (providerWarnings.length > 0) {
         btn.classList.remove('loading');
         document.getElementById('saveText').textContent = 'Save Configuration';
-        showToast(providerErrors[0], 'error');
-        return;
+        const confirmed = await showConfigConfirmModal({
+            title: 'Save anyway?',
+            message: 'This looks incorrect, but provider key formats can change. Save this configuration anyway?',
+            details: providerWarnings,
+            confirmText: 'Save Anyway',
+            cancelText: 'Review Settings'
+        });
+        if (!confirmed) {
+            showToast('Save cancelled', 'info');
+            return;
+        }
+        btn.classList.add('loading');
+        document.getElementById('saveText').innerHTML = '<span class="spinner"></span> Saving...';
     }
 
     // Validate model names against LLM provider
@@ -4650,24 +7336,47 @@ async function saveSettings() {
         return;
     }
 
-    // Collect character settings (editor guidance + viseme scales + tts temp modifiers)
+    await loadVoiceManifestIds();
+
+    const owlCustomCharacters = collectOwlCustomCharactersForSave();
+    if (owlCustomCharacters.errors.length > 0) {
+        btn.classList.remove('loading');
+        document.getElementById('saveText').textContent = 'Save Configuration';
+        showToast('Owl Post custom characters validation failed', 'error');
+        alert('Invalid Owl Post custom characters:\n\n' + owlCustomCharacters.errors.join('\n\n'));
+        return;
+    }
+
+    // Collect character settings (static bios + editor guidance + viseme scales + tts temp modifiers)
     config.prompts = config.prompts || {};
+    config.prompts.static_bios = {};
     config.prompts.editor_guidance = {};
     config.lipsync = config.lipsync || {};
     config.lipsync.npc_scales = {};
     config.tts = config.tts || {};
     config.tts.npc_temp_modifiers = {};
     config.tts.npc_model_overrides = {};
+    config.conversation = config.conversation || {};
+    config.conversation.npc_llm_model_overrides = {};
+    config.memory = config.memory || {};
+    config.memory.npc_long_term_memory = {};
+    config.owl_post = config.owl_post || {};
+    config.owl_post.custom_characters = owlCustomCharacters.characters;
 
     document.querySelectorAll('#bioList .character-card').forEach(card => {
         const isPlayer = card.classList.contains('player-card');
         const name = isPlayer ? 'Player' : (card.querySelector('.character-name-input')?.value.trim() || '');
-        const guidance = card.querySelector('.character-guidance-input')?.value.trim() || '';
+        const staticBio = card.querySelector('.character-static-bio-input')?.value.trim() || '';
+        const guidance = card.querySelector('.character-editor-guidance-input')?.value.trim() || '';
         const visemeScale = parseFloat(card.querySelector('.character-viseme-scale')?.value || '1.0');
         const ttsTempMod = parseFloat(card.querySelector('.character-tts-temp-mod')?.value || '0');
         const modelOverride = card.querySelector('.character-model-override')?.value.trim() || '';
+        const llmModelOverride = card.querySelector('.character-llm-model-override')?.value.trim() || '';
 
         if (name) {
+            if (isPlayer || staticBio) {
+                config.prompts.static_bios[name] = staticBio;
+            }
             // Save guidance if not empty
             if (guidance) {
                 config.prompts.editor_guidance[name] = guidance;
@@ -4684,18 +7393,31 @@ async function saveSettings() {
             if (!isPlayer && modelOverride) {
                 config.tts.npc_model_overrides[name] = modelOverride;
             }
+            // Save LLM model override if not empty and not Player
+            if (!isPlayer && llmModelOverride) {
+                config.conversation.npc_llm_model_overrides[name] = llmModelOverride;
+            }
+            if (!isPlayer && card.querySelector('.character-long-term-memory-toggle')?.checked) {
+                config.memory.npc_long_term_memory[name] = true;
+            }
         }
     });
     config.prompts.default = document.getElementById('defaultPrompt').value;
     config.prompts.world_lore = document.getElementById('worldLore').value;
     config.prompts.scene_continuation = document.getElementById('sceneContinuationPrompt').value;
     config.prompts.interjection_prompt_mode = document.getElementById('interjectionPromptMode').value;
+    config.prompts.owl_board_rules = document.getElementById('owlBoardRulesPrompt').value;
+    config.prompts.owl_mail_classifier = document.getElementById('owlMailClassifierPrompt').value;
+    config.prompts.owl_mail_letter = document.getElementById('owlMailLetterPrompt').value;
+    config.prompts.owl_board_thread = document.getElementById('owlBoardThreadPrompt').value;
+    config.prompts.owl_board_reply = document.getElementById('owlBoardReplyPrompt').value;
 
     // Sync pronunciation replacements from textarea (in case onchange hasn't fired)
     const pronEl = document.getElementById('pronunciationReplacements');
     if (pronEl) {
         parsePronunciationReplacements(pronEl.value);
     }
+    stripLegacyConfigFields(config);
 
     try {
         const response = await fetch('/api/config', {
@@ -4708,6 +7430,7 @@ async function saveSettings() {
             dirty = false;
             showToast('Configuration saved successfully', 'success');
             document.getElementById('saveText').textContent = 'Save Configuration';
+            await checkSetupStatus();
         } else {
             throw new Error('Save failed');
         }
@@ -4726,13 +7449,14 @@ async function saveSettings() {
 const DEFAULT_PRONUNCIATION_REPLACEMENTS = {
     'Accio': 'Ackeeyoh|/ˈæk.i.oʊ/',
     'O.W.L.s': 'Owls',
+    'O.W.L.': 'Owl',
     'Stupefy': '/ˈstuː.pɪ.faɪ/',
     'Legilimens': 'Lehjillihmenz|/lɛˈdʒɪl.ɪ.mɛnz/',
     'Crucio': 'Kroosheeoh|/ˈkruː.ʃi.oʊ/',
     'Levioso': 'Leveeohso|/ˌlɛv.iˈoʊ.soʊ/',
     'Alohomora': '/ˌæl.oʊ.hoʊˈmɔːr.ə/',
     'Petrificus Totalus': '/pɛˈtrɪf.ɪ.kəs toʊˈtæl.əs/',
-    'Ominis': '/ˈɑː.mɪ.nɪs/',
+    'Ominis': 'ominous|/ˈɑː.mə.nəs/',
     'Natsai': 'Notsigh|/ˈnɑːt.saɪ/',
     'Onai': 'Ohnigh|/oʊˈnaɪ/',
     'Ranrok': 'Ran-rock|/ˈræn.rɒk/',
@@ -4752,9 +7476,22 @@ function resetPronunciationReplacements() {
     const el = document.getElementById('pronunciationReplacements');
     if (el) {
         el.value = pronunciationReplacementsToText(DEFAULT_PRONUNCIATION_REPLACEMENTS);
+        resizeTextareaAfterProgrammaticUpdate(el);
         parsePronunciationReplacements(el.value);
         markDirty();
     }
+}
+
+function resizeTextareaAfterProgrammaticUpdate(textarea) {
+    if (!textarea) return;
+    requestAnimationFrame(() => {
+        if (typeof AutoExpandTextarea !== 'undefined' && AutoExpandTextarea.resizeTextarea) {
+            AutoExpandTextarea.resizeTextarea(textarea);
+        } else {
+            textarea.style.height = 'auto';
+            textarea.style.height = textarea.scrollHeight + 'px';
+        }
+    });
 }
 
 function parsePronunciationReplacements(text) {
@@ -4836,6 +7573,19 @@ async function resetInterjectionPromptMode() {
     }
 }
 
+async function resetOwlPrompt(settingsKey, textareaId) {
+    try {
+        const response = await fetch(`/api/config/defaults/owl-prompt/${settingsKey}`);
+        const data = await response.json();
+        const textarea = document.getElementById(textareaId);
+        textarea.value = data.prompt;
+        updateSetting(`prompts.${settingsKey}`, data.prompt);
+        showToast('Prompt reset to default', 'success');
+    } catch (e) {
+        showToast('Failed to reset prompt', 'error');
+    }
+}
+
 function exportHistory() {
     const npcId = document.getElementById('historyPerspective').value;
 
@@ -4852,8 +7602,11 @@ function clearHistory() {
     if (confirm('Clear all dialogue history? This cannot be undone.')) {
         fetch('/api/dialogue-history', { method: 'DELETE' })
             .then(() => {
-                currentPage = 1;
-                loadDialogueHistory();
+                historyCurrentPage = 1;
+                historySelectedNpcId = 'all';
+                npcChapters = null;
+                historyChaptersNpcId = null;
+                loadDialogueHistory({ allowDuringEdit: true });
                 showToast('History cleared', 'success');
             })
             .catch(() => showToast('Clear failed', 'error'));
@@ -4869,8 +7622,11 @@ function clearHistoryWithConfirm() {
     if (confirm(message)) {
         fetch('/api/dialogue-history', { method: 'DELETE' })
             .then(() => {
-                currentPage = 1;
-                loadDialogueHistory();
+                historyCurrentPage = 1;
+                historySelectedNpcId = 'all';
+                npcChapters = null;
+                historyChaptersNpcId = null;
+                loadDialogueHistory({ allowDuringEdit: true });
                 showToast('Dialogue history cleared', 'success');
             })
             .catch(() => showToast('Clear failed', 'error'));
@@ -4878,8 +7634,13 @@ function clearHistoryWithConfirm() {
 }
 
 async function clearAllMemories() {
+    if (!isPlayerContextReady()) {
+        setMemoryDataManagementNoPlayerState();
+        return;
+    }
+
     const message = 'Are you sure you want to clear all NPC long-term memories?\n\n' +
-        'This will delete the knowledge graph and all chapter data. ' +
+        'This will delete all memory facts and chapter data. ' +
         'NPCs will lose their persistent memories of past adventures.\n\n' +
         'This action cannot be undone.';
     if (confirm(message)) {
@@ -4890,6 +7651,8 @@ async function clearAllMemories() {
                 showToast('All NPC memories cleared', 'success');
                 // Refresh migration status
                 await loadMigrationStatus();
+                await loadVectorMigrationStatus();
+                await loadGraphBackups();
             } else {
                 showToast(data.error || 'Clear failed', 'error');
             }
@@ -4899,19 +7662,182 @@ async function clearAllMemories() {
     }
 }
 
+async function resetMemorySystem() {
+    if (!isPlayerContextReady()) {
+        setMemoryDataManagementNoPlayerState();
+        return;
+    }
+
+    const message = 'RESET MEMORY SYSTEM\n\n' +
+        'This will force-delete all memory database files without creating a backup.\n\n' +
+        'Use this only when the database is corrupted and Clear/Restore are not working.\n\n' +
+        'Type "RESET" to confirm.';
+    const answer = prompt(message);
+    if (answer !== 'RESET') return;
+
+    try {
+        const res = await fetch('/api/memories/reset', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+            const deleted = (data.deleted || []).join(', ') || 'nothing to delete';
+            const errCount = (data.errors || []).length;
+            const msg = errCount > 0
+                ? `Memory system reset (${errCount} file(s) could not be deleted)`
+                : 'Memory system fully reset';
+            showToast(msg, errCount > 0 ? 'warning' : 'success');
+            await loadMigrationStatus();
+            await loadVectorMigrationStatus();
+            await loadGraphBackups();
+        } else {
+            showToast(data.error || 'Reset failed', 'error');
+        }
+    } catch (e) {
+        showToast('Reset failed: ' + e.message, 'error');
+    }
+}
+
+function formatGraphBackupLabel(backup) {
+    const session = (backup.session || '').replace(/^session_/, 'Session ');
+    const time = backup.time || '';
+    const reason = backup.reason_label || backup.reason || 'backup';
+    const created = backup.created_at ? new Date(backup.created_at * 1000).toLocaleString() : '';
+    const kind = backup.kind_label || 'Backup';
+    return {
+        title: `${reason}`,
+        meta: [kind, backup.date, session, time].filter(Boolean).join(' • '),
+        created
+    };
+}
+
+function renderGraphBackups(backups) {
+    const listEl = document.getElementById('graphBackupsList');
+    const statusEl = document.getElementById('graphBackupsStatus');
+    if (!listEl || !statusEl) return;
+
+    listEl.innerHTML = '';
+
+    if (!Array.isArray(backups) || backups.length === 0) {
+        statusEl.textContent = 'No Cognis memory snapshots found.';
+        statusEl.style.color = 'var(--text-secondary)';
+        listEl.innerHTML = `
+            <div style="padding: 12px; border: 1px dashed var(--leather-border); border-radius: 4px; color: var(--text-secondary); background: var(--parchment-mid);">
+                No restorable Cognis memory snapshots available yet.
+            </div>
+        `;
+        return;
+    }
+
+    statusEl.textContent = `${backups.length} Cognis memory snapshot${backups.length !== 1 ? 's' : ''} available`;
+    statusEl.style.color = 'var(--text-secondary)';
+
+    for (const backup of backups) {
+        const { title, meta, created } = formatGraphBackupLabel(backup);
+        const card = document.createElement('div');
+        card.style.cssText = 'display:flex; justify-content:space-between; align-items:flex-start; gap:12px; padding:12px; border:1px solid var(--leather-border); border-radius:4px; background:var(--parchment-mid);';
+        card.innerHTML = `
+            <div style="min-width:0;">
+                <div style="font-weight:600; color:var(--ink-brown); margin-bottom:4px;">${escapeHtml(title)}</div>
+                <div style="font-size:0.85em; color:var(--text-secondary); margin-bottom:2px;">${escapeHtml(meta)}</div>
+                <div style="font-size:0.8em; color:var(--text-secondary);">${escapeHtml(created)}</div>
+            </div>
+            <div style="display:flex; align-items:center; gap:8px; flex-shrink:0;">
+                <button class="btn btn-secondary" data-backup-id="${escapeHtml(backup.backup_id)}">Restore</button>
+            </div>
+        `;
+        const btn = card.querySelector('button');
+        btn.addEventListener('click', () => restoreGraphBackup(backup.backup_id, title));
+        listEl.appendChild(card);
+    }
+}
+
+async function loadGraphBackups() {
+    const listEl = document.getElementById('graphBackupsList');
+    const statusEl = document.getElementById('graphBackupsStatus');
+    const refreshBtn = document.getElementById('refreshGraphBackupsBtn');
+    if (!listEl || !statusEl) return;
+
+    if (!isPlayerContextReady()) {
+        setMemoryDataManagementNoPlayerState();
+        return;
+    }
+
+    if (refreshBtn) refreshBtn.disabled = true;
+    statusEl.textContent = 'Loading Cognis memory snapshots...';
+    statusEl.style.color = 'var(--text-secondary)';
+
+    try {
+        const response = await fetch('/api/memories/backups');
+        const data = await response.json();
+        if (!response.ok || !data.success) {
+            throw new Error(data.error || 'Failed to load Cognis memory snapshots');
+        }
+        renderGraphBackups(data.backups || []);
+    } catch (e) {
+        console.error('Error loading memory snapshots:', e);
+        statusEl.textContent = e.message || 'Failed to load Cognis memory snapshots';
+        statusEl.style.color = 'var(--danger)';
+        listEl.innerHTML = '';
+    } finally {
+        if (refreshBtn) refreshBtn.disabled = !isPlayerContextReady();
+    }
+}
+
+async function restoreGraphBackup(backupId, backupTitle) {
+    if (!isPlayerContextReady()) {
+        setMemoryDataManagementNoPlayerState();
+        return;
+    }
+
+    const label = backupTitle || 'this memory snapshot';
+    const message = `Restore ${label}?\n\n` +
+        'Cognis memory snapshots replace memory facts, chapter files, staged chapter content, bios, and memory queue state together.\n\n' +
+        'Continue?';
+
+    if (!confirm(message)) return;
+
+    const refreshBtn = document.getElementById('refreshGraphBackupsBtn');
+    if (refreshBtn) refreshBtn.disabled = true;
+
+    try {
+        const response = await fetch('/api/memories/backups/restore', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ backup_id: backupId })
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success) {
+            throw new Error(data.error || 'Restore failed');
+        }
+
+        showToast('Memory snapshot restored', 'success');
+        await loadGraphBackups();
+        await refreshMemoryUI();
+        if (typeof loadNpcGraph === 'function') {
+            await loadNpcGraph();
+        }
+    } catch (e) {
+        console.error('Error restoring memory snapshot:', e);
+        showToast(`Restore failed: ${e.message}`, 'error');
+    } finally {
+        if (refreshBtn) refreshBtn.disabled = !isPlayerContextReady();
+    }
+}
+
 async function refreshMemoryUI() {
     /**
      * Refresh all memory-related UI after migration completes.
      * - Updates migration status count
-     * - Refreshes knowledge graph explorer NPC list
-     * - Reloads current graph if one is displayed
+     * - Refreshes memory inspector NPC list
+     * - Reloads current NPC facts if one is displayed
      * - Refreshes character bios with newly generated data
      */
 
     // Refresh migration status count
     await loadMigrationStatus();
+    await loadVectorMigrationStatus();
+    await loadGraphBackups();
 
-    // Refresh knowledge graph explorer (if loaded)
+    // Refresh memory inspector (if loaded)
     if (typeof refreshNpcList === 'function') {
         await refreshNpcList();
     }
@@ -4925,10 +7851,10 @@ async function refreshMemoryUI() {
     // Refresh character bios (reload generated bios for all cards)
     const memoryEnabled = config?.memory?.enabled || false;
     if (memoryEnabled) {
-        const cards = document.querySelectorAll('.character-card:not(.player-card)');
+        const cards = document.querySelectorAll('#bioList .character-card:not(.player-card)');
         for (const card of cards) {
             const npcId = card.dataset.npcId;
-            if (npcId) {
+            if (npcId && isCharacterMemoryEffectivelyEnabled(card, memoryEnabled)) {
                 await loadGeneratedBio(npcId, card);
             }
         }
@@ -4939,6 +7865,11 @@ async function loadMigrationStatus() {
     const countEl = document.getElementById('migratePendingCount');
     if (!countEl) return;
 
+    if (!isPlayerContextReady()) {
+        setMemoryDataManagementNoPlayerState();
+        return;
+    }
+
     try {
         const response = await fetch('/api/memories/migration-status');
         const data = await response.json();
@@ -4948,27 +7879,191 @@ async function loadMigrationStatus() {
             if (pending_count > 0) {
                 countEl.textContent = `${pending_count} NPC${pending_count !== 1 ? 's' : ''} pending migration (${migrated_count}/${total_npcs} already migrated, ${min_entries_threshold}+ entries required)`;
                 countEl.style.color = 'var(--gold-dark)';
+                setMemoryDataButton('migrateBtn', true, 'Migrate eligible dialogue history for the loaded player');
             } else if (total_npcs > 0) {
                 countEl.textContent = `All ${total_npcs} NPCs already migrated`;
                 countEl.style.color = 'var(--success)';
+                setMemoryDataButton('migrateBtn', false, 'All eligible NPCs are already migrated');
             } else {
                 countEl.textContent = `No NPCs with sufficient dialogue history found (minimum ${min_entries_threshold} entries required)`;
                 countEl.style.color = 'var(--text-secondary)';
+                setMemoryDataButton('migrateBtn', false, 'No eligible dialogue history to migrate');
             }
         } else {
-            countEl.textContent = '';
+            countEl.textContent = data.error || 'Unable to check migration status';
+            countEl.style.color = 'var(--text-secondary)';
+            setMemoryDataButton('migrateBtn', false, 'Migration status is unavailable');
         }
     } catch (e) {
         console.error('Error loading migration status:', e);
-        countEl.textContent = '';
+        countEl.textContent = 'Unable to check migration status';
+        countEl.style.color = 'var(--text-secondary)';
+        setMemoryDataButton('migrateBtn', false, 'Migration status is unavailable');
     }
+}
+
+async function loadVectorMigrationStatus() {
+    const countEl = document.getElementById('vectorMigratePendingCount');
+    const btn = document.getElementById('vectorMigrateBtn');
+    if (!countEl) return;
+
+    if (!isPlayerContextReady()) {
+        setMemoryDataManagementNoPlayerState();
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/memories/vector-migration-status');
+        const data = await response.json();
+
+        if (data.success) {
+            const count = data.mismatched_count || 0;
+            const model = data.current_model || 'current model';
+            if (count > 0) {
+                countEl.textContent = `${count} memor${count === 1 ? 'y has' : 'ies have'} vectors from another embedding model. Rebuild to use ${model}.`;
+                countEl.style.color = 'var(--gold-dark)';
+                if (btn) {
+                    btn.style.display = 'inline-block';
+                    btn.disabled = false;
+                    btn.title = 'Rebuild memory vectors for the current embedding model';
+                }
+            } else {
+                countEl.textContent = `All memory vectors match ${model}`;
+                countEl.style.color = 'var(--success)';
+                if (btn) {
+                    btn.style.display = 'inline-block';
+                    btn.disabled = true;
+                    btn.title = 'No memory vectors need rebuilding';
+                }
+            }
+        } else {
+            countEl.textContent = data.error || 'Unable to check memory vector status';
+            countEl.style.color = 'var(--text-secondary)';
+            if (btn) {
+                btn.style.display = 'inline-block';
+                btn.disabled = true;
+                btn.title = 'Memory vector status is unavailable';
+            }
+        }
+    } catch (e) {
+        console.error('Error loading vector migration status:', e);
+        countEl.textContent = 'Unable to check memory vector status';
+        countEl.style.color = 'var(--text-secondary)';
+        if (btn) {
+            btn.style.display = 'inline-block';
+            btn.disabled = true;
+            btn.title = 'Memory vector status is unavailable';
+        }
+    }
+}
+
+async function migrateMemoryVectors() {
+    const btn = document.getElementById('vectorMigrateBtn');
+    const status = document.getElementById('vectorMigrateStatus');
+    const countEl = document.getElementById('vectorMigratePendingCount');
+
+    if (!isPlayerContextReady()) {
+        setMemoryDataManagementNoPlayerState();
+        return;
+    }
+
+    const message = 'Rebuild memory vectors for the current embedding model?\n\n' +
+        'This will regenerate embeddings from stored memory text and update the vector search index.\n\n' +
+        'It may use embedding API quota and can be resumed safely if interrupted.\n\n' +
+        'Continue?';
+
+    if (!confirm(message)) return;
+
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Rebuilding...';
+    }
+    if (status) {
+        status.style.display = 'block';
+        status.textContent = 'Starting vector rebuild...';
+        status.style.color = 'var(--text-secondary)';
+    }
+
+    const eventSource = new EventSource('/api/memories/vector-migrate/stream');
+
+    eventSource.onmessage = async (event) => {
+        try {
+            const data = JSON.parse(event.data);
+
+            switch (data.type) {
+                case 'start':
+                    if (data.total > 0) {
+                        status.textContent = `Found ${data.total} memor${data.total === 1 ? 'y' : 'ies'} to rebuild for ${data.current_model || 'the current model'}...`;
+                    } else {
+                        status.textContent = 'No memory vectors need rebuilding.';
+                    }
+                    break;
+
+                case 'progress': {
+                    const total = data.total || 0;
+                    const current = data.current || 0;
+                    const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+                    status.textContent = `[${current}/${total}] ${data.message || 'Rebuilding vectors...'} (${pct}%)`;
+                    break;
+                }
+
+                case 'complete':
+                    eventSource.close();
+                    status.textContent = `Complete: rebuilt ${data.rebuilt || 0} memory vector${(data.rebuilt || 0) === 1 ? '' : 's'}.`;
+                    status.style.color = 'var(--success)';
+                    showToast(`Rebuilt ${data.rebuilt || 0} memory vector${(data.rebuilt || 0) === 1 ? '' : 's'}`, 'success');
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.textContent = 'Rebuild Vectors';
+                    }
+                    await loadVectorMigrationStatus();
+                    if (typeof refreshMemoryInspector === 'function') {
+                        await refreshMemoryInspector();
+                    }
+                    break;
+
+                case 'error':
+                    eventSource.close();
+                    status.textContent = `Error: ${data.message || 'Vector rebuild failed'}`;
+                    status.style.color = 'var(--danger)';
+                    showToast(data.message || 'Vector rebuild failed', 'error');
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.textContent = 'Rebuild Vectors';
+                    }
+                    await loadVectorMigrationStatus();
+                    break;
+            }
+        } catch (e) {
+            console.error('Error parsing vector migration SSE event:', e);
+        }
+    };
+
+    eventSource.onerror = () => {
+        eventSource.close();
+        if (status) {
+            status.textContent = 'Vector rebuild connection lost';
+            status.style.color = 'var(--danger)';
+        }
+        showToast('Vector rebuild failed - connection lost', 'error');
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = 'Rebuild Vectors';
+        }
+        if (countEl) loadVectorMigrationStatus();
+    };
 }
 
 async function migrateMemories() {
     const btn = document.getElementById('migrateBtn');
     const status = document.getElementById('migrateStatus');
 
-    const message = 'This will process all existing dialogue history into chapters and add them to the knowledge graph.\n\n' +
+    if (!isPlayerContextReady()) {
+        setMemoryDataManagementNoPlayerState();
+        return;
+    }
+
+    const message = 'This will process all existing dialogue history into chapters and extract searchable memory facts.\n\n' +
         'This may take a while for large histories (multiple LLM calls per NPC).\n\n' +
         'Continue?';
 
@@ -5041,12 +8136,13 @@ async function migrateMemories() {
     };
 }
 
-// Knowledge Graph Explorer Functions - see /js/graph.js
+// Memory Inspector Functions - see /js/graph.js
 
 // ============================================
 // History Edit Mode Functions
 // ============================================
 function toggleHistoryEditMode() {
+    stopHistoryAudio();
     historyEditMode = !historyEditMode;
     const chapterContent = document.querySelector('#chapterHistory .chapter-content');
     const editBtn = document.getElementById('historyEditBtn');
@@ -5068,27 +8164,34 @@ function toggleHistoryEditMode() {
         // Refresh data when exiting edit mode
         loadDialogueHistory();
     }
-    // Re-render tables to show/hide checkboxes (respect NPC filter)
-    const historyToRender = filteredHistory || allHistory;
-    const collapsed = collapseSpells(historyToRender);
-    populateHistoryTable(collapsed.slice(-10).reverse(), true);
+    // Re-render tables to show/hide checkboxes using current server view state
+    populateHistoryTable(historyRecentEntries, true);
     renderAllHistory();
     updateHistorySelectionUI();
 }
 
-function toggleHistoryEntrySelection(timestampStr, checkbox) {
-    if (checkbox.checked) {
-        selectedHistoryEntries.add(timestampStr);
-    } else {
-        selectedHistoryEntries.delete(timestampStr);
-    }
-    updateHistorySelectionUI();
-    updateRowSelectionState(timestampStr, checkbox.checked);
+function parseHistorySourceIds(sourceIdsStr) {
+    if (!sourceIdsStr) return [];
+    return sourceIdsStr
+        .split(',')
+        .map(id => Number(id))
+        .filter(id => Number.isInteger(id) && id > 0);
 }
 
-function updateRowSelectionState(timestampStr, isSelected) {
+function toggleHistoryEntrySelection(entryKey, sourceIdsStr, checkbox) {
+    const sourceIds = parseHistorySourceIds(sourceIdsStr);
+    if (checkbox.checked) {
+        selectedHistoryEntries.set(entryKey, sourceIds);
+    } else {
+        selectedHistoryEntries.delete(entryKey);
+    }
+    updateHistorySelectionUI();
+    updateRowSelectionState(entryKey, checkbox.checked);
+}
+
+function updateRowSelectionState(entryKey, isSelected) {
     // Update row visual state
-    document.querySelectorAll(`tr[data-timestamp="${timestampStr}"]`).forEach(row => {
+    document.querySelectorAll(`tr[data-entry-key="${entryKey}"]`).forEach(row => {
         if (isSelected) {
             row.classList.add('selected');
         } else {
@@ -5097,16 +8200,33 @@ function updateRowSelectionState(timestampStr, isSelected) {
     });
 }
 
-function selectAllHistoryEntries() {
-    // Select all visible entries in current view
-    const activeTab = document.querySelector('.tab-content.active');
-    const tbody = activeTab.querySelector('tbody');
-    const checkboxes = tbody.querySelectorAll('.history-checkbox');
+function getHistorySelectionTbody(triggerCheckbox) {
+    if (triggerCheckbox) {
+        return triggerCheckbox.closest('table')?.querySelector('tbody') || null;
+    }
+
+    const activeHistoryTab = document.querySelector('#chapterHistory .tab-content.active');
+    return activeHistoryTab?.querySelector('tbody') || null;
+}
+
+function toggleAllVisibleHistoryEntries(triggerCheckbox) {
+    if (triggerCheckbox.checked) {
+        selectAllHistoryEntries(triggerCheckbox);
+    } else {
+        deselectAllHistoryEntries(triggerCheckbox);
+    }
+}
+
+function selectAllHistoryEntries(triggerCheckbox = null) {
+    // Select all visible entries in the table that owns the select-all checkbox.
+    const tbody = getHistorySelectionTbody(triggerCheckbox);
+    if (!tbody) return;
+    const checkboxes = tbody.querySelectorAll('.history-checkbox:not(.history-select-all)');
 
     checkboxes.forEach(cb => {
-        const timestampStr = cb.dataset.timestamp;
-        if (timestampStr) {
-            selectedHistoryEntries.add(timestampStr);
+        const entryKey = cb.dataset.entryKey;
+        if (entryKey) {
+            selectedHistoryEntries.set(entryKey, parseHistorySourceIds(cb.dataset.sourceIds));
             cb.checked = true;
             cb.closest('tr').classList.add('selected');
         }
@@ -5114,9 +8234,21 @@ function selectAllHistoryEntries() {
     updateHistorySelectionUI();
 }
 
-function deselectAllHistoryEntries() {
-    selectedHistoryEntries.clear();
-    document.querySelectorAll('.history-checkbox').forEach(cb => {
+function deselectAllHistoryEntries(triggerCheckbox = null) {
+    const tbody = getHistorySelectionTbody(triggerCheckbox);
+    const checkboxes = tbody
+        ? tbody.querySelectorAll('.history-checkbox:not(.history-select-all)')
+        : document.querySelectorAll('.history-checkbox:not(.history-select-all)');
+
+    if (!triggerCheckbox) {
+        selectedHistoryEntries.clear();
+    }
+
+    checkboxes.forEach(cb => {
+        const entryKey = cb.dataset.entryKey;
+        if (triggerCheckbox && entryKey) {
+            selectedHistoryEntries.delete(entryKey);
+        }
         cb.checked = false;
         cb.closest('tr').classList.remove('selected');
     });
@@ -5128,10 +8260,16 @@ function updateHistorySelectionUI() {
     document.getElementById('historySelectedCount').textContent = count;
     document.getElementById('deleteSelectedBtn').disabled = count === 0;
 
+    document.querySelectorAll('.history-checkbox:not(.history-select-all)').forEach(cb => {
+        const isSelected = selectedHistoryEntries.has(cb.dataset.entryKey);
+        cb.checked = isSelected;
+        cb.closest('tr')?.classList.toggle('selected', isSelected);
+    });
+
     // Update select-all checkboxes
     document.querySelectorAll('.history-select-all').forEach(cb => {
         const tbody = cb.closest('table').querySelector('tbody');
-        const rowCheckboxes = tbody.querySelectorAll('.history-checkbox');
+        const rowCheckboxes = tbody.querySelectorAll('.history-checkbox:not(.history-select-all)');
         const allChecked = rowCheckboxes.length > 0 &&
             Array.from(rowCheckboxes).every(c => c.checked);
         cb.checked = allChecked;
@@ -5149,28 +8287,18 @@ async function deleteSelectedHistoryEntries() {
     if (!confirm(message)) return;
 
     try {
-        // Convert string timestamps to numbers for API
-        const timestamps = Array.from(selectedHistoryEntries).map(s => parseFloat(s));
+        const entryIds = getSelectedHistoryEntryIds();
         const response = await fetch('/api/dialogue-history/entries', {
             method: 'DELETE',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ timestamps })
+            body: JSON.stringify({ entry_ids: entryIds })
         });
 
         if (response.ok) {
             const result = await response.json();
-            // Remove from local data (compare as strings for precision)
-            allHistory = allHistory.filter(e => !selectedHistoryEntries.has(String(e.timestamp)));
-            if (filteredHistory) {
-                filteredHistory = filteredHistory.filter(e => !selectedHistoryEntries.has(String(e.timestamp)));
-            }
             selectedHistoryEntries.clear();
-
-            // Re-render (respect NPC filter)
-            const historyToRender = filteredHistory || allHistory;
-            const collapsed = collapseSpells(historyToRender);
-            populateHistoryTable(collapsed.slice(-10).reverse(), true);
-            renderAllHistory();
+            historyChaptersNpcId = null;
+            await loadDialogueHistory({ allowDuringEdit: true });
             updateHistorySelectionUI();
 
             showToast(`Deleted ${result.deleted} ${result.deleted === 1 ? 'entry' : 'entries'}`, 'success');
@@ -5182,30 +8310,21 @@ async function deleteSelectedHistoryEntries() {
     }
 }
 
-async function deleteSingleHistoryEntry(timestampStr) {
+async function deleteSingleHistoryEntry(entryKey, sourceIdsStr) {
     if (!confirm('Delete this entry? This cannot be undone.')) return;
 
     try {
-        const timestamp = parseFloat(timestampStr);
+        const entryIds = parseHistorySourceIds(sourceIdsStr);
         const response = await fetch('/api/dialogue-history/entries', {
             method: 'DELETE',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ timestamps: [timestamp] })
+            body: JSON.stringify({ entry_ids: entryIds })
         });
 
         if (response.ok) {
-            // Remove from local data (compare as strings for precision)
-            allHistory = allHistory.filter(e => String(e.timestamp) !== timestampStr);
-            if (filteredHistory) {
-                filteredHistory = filteredHistory.filter(e => String(e.timestamp) !== timestampStr);
-            }
-            selectedHistoryEntries.delete(timestampStr);
-
-            // Re-render (respect NPC filter)
-            const historyToRender = filteredHistory || allHistory;
-            const collapsed = collapseSpells(historyToRender);
-            populateHistoryTable(collapsed.slice(-10).reverse(), true);
-            renderAllHistory();
+            selectedHistoryEntries.delete(entryKey);
+            historyChaptersNpcId = null;
+            await loadDialogueHistory({ allowDuringEdit: true });
             updateHistorySelectionUI();
 
             showToast('Entry deleted', 'success');
@@ -5251,7 +8370,8 @@ function importHistory(input) {
                             ? `Imported ${result.added} entries (${result.total} total)`
                             : `Imported ${result.added} entries for ${prettifyVoiceName(npcId)}`;
                         showToast(msg, 'success');
-                        loadDialogueHistory();
+                        historyChaptersNpcId = null;
+                        loadDialogueHistory({ allowDuringEdit: true });
                     }
                 })
                 .catch(() => showToast('Import failed', 'error'));
@@ -5289,7 +8409,7 @@ function importCharacters(input) {
                     if (result.error) {
                         showToast('Import failed: ' + result.error, 'error');
                     } else {
-                        showToast(`Imported ${result.editor_guidance || 0} character guidance, ${result.viseme_scales || 0} viseme scales`, 'success');
+                        showToast(`Imported ${result.static_bios || 0} bios, ${result.editor_guidance || 0} character guidance, ${result.viseme_scales || 0} viseme scales`, 'success');
                         loadConfig();
                     }
                 })
@@ -5323,7 +8443,7 @@ async function loadCommitments() {
     if (commitmentLoadInFlight) return;
     commitmentLoadInFlight = true;
     try {
-        const response = await fetchWithTimeout('/api/commitments');
+        const response = await fetchWithTimeout('/api/commitments', {}, 5000);
         if (response.ok) {
             allCommitments = await response.json();
             populateCommitmentNpcFilter();
@@ -5726,7 +8846,7 @@ function startInlineEdit(commitment, tr) {
     });
 }
 
-async function saveInlineEdit(commitmentId, locationId, picker) {
+async function saveInlineEdit(commitmentId, rawLocationId, picker) {
     const dateStr = picker?.selectedDates?.[0];
     if (!dateStr) {
         showToast('Please select a date and time', 'error');
@@ -5739,11 +8859,23 @@ async function saveInlineEdit(commitmentId, locationId, picker) {
     const mi = String(dateStr.getMinutes()).padStart(2, '0');
     const gameTimeStart = `${y}/${mo}/${d} ${h}:${mi}`;
 
+    // Parse "LocationKey::label" format from dropdown
+    let locationId = rawLocationId;
+    let spotLabel = null;
+    if (rawLocationId.includes('::')) {
+        const parts = rawLocationId.split('::');
+        locationId = parts[0];
+        spotLabel = parts[1];
+    }
+
+    const body = { location_id: locationId, game_time_start: gameTimeStart };
+    if (spotLabel) body.spot_label = spotLabel;
+
     try {
         const resp = await fetch(`/api/commitments/${commitmentId}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ location_id: locationId, game_time_start: gameTimeStart })
+            body: JSON.stringify(body)
         });
         if (resp.ok) {
             if (picker) picker.destroy();
@@ -5815,14 +8947,11 @@ function populateCommitmentCreateNpcDropdown() {
     if (!select) return;
     const currentVal = select.value;
 
-    // Get NPCs from dialogue history
-    const npcIds = getUniqueNPCsFromHistory(allHistory);
-
     select.innerHTML = '<option value="">Select NPC...</option>';
-    for (const id of npcIds) {
+    for (const optionData of historyNpcOptions) {
         const opt = document.createElement('option');
-        opt.value = id;
-        opt.textContent = prettifyVoiceName(id);
+        opt.value = optionData.id;
+        opt.textContent = optionData.name || prettifyVoiceName(optionData.id);
         select.appendChild(opt);
     }
     if (currentVal) select.value = currentVal;
@@ -5871,14 +9000,23 @@ function initCommitmentDatePickers() {
 
 async function createCommitment() {
     const npcId = document.getElementById('commitmentCreateNpc')?.value;
-    const locationId = document.getElementById('commitmentCreateLocation')?.value;
+    const rawLocationId = document.getElementById('commitmentCreateLocation')?.value;
     const dateVal = commitmentDatePicker?.selectedDates?.[0];
     const timeVal = commitmentTimePicker?.selectedDates?.[0];
 
     if (!npcId) { showToast('Please select an NPC', 'error'); return; }
-    if (!locationId) { showToast('Please select a location', 'error'); return; }
+    if (!rawLocationId) { showToast('Please select a location', 'error'); return; }
     if (!dateVal) { showToast('Please select a date', 'error'); return; }
     if (!timeVal) { showToast('Please select a time', 'error'); return; }
+
+    // Parse "location_id::label" format for labeled spots
+    let locationId = rawLocationId;
+    let spotLabel = null;
+    if (rawLocationId.includes('::')) {
+        const parts = rawLocationId.split('::');
+        locationId = parts[0];
+        spotLabel = parts[1];
+    }
 
     const y = dateVal.getFullYear();
     const mo = String(dateVal.getMonth() + 1).padStart(2, '0');
@@ -5887,11 +9025,14 @@ async function createCommitment() {
     const mi = String(timeVal.getMinutes()).padStart(2, '0');
     const gameTimeStart = `${y}/${mo}/${d} ${h}:${mi}`;
 
+    const body = { npc_id: npcId, location_id: locationId, game_time_start: gameTimeStart };
+    if (spotLabel) body.spot_label = spotLabel;
+
     try {
         const resp = await fetch('/api/commitments', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ npc_id: npcId, location_id: locationId, game_time_start: gameTimeStart })
+            body: JSON.stringify(body)
         });
         if (resp.ok) {
             showToast('Commitment created', 'success');
@@ -5913,7 +9054,7 @@ function showToast(message, type = 'success') {
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
     toast.innerHTML = `
-                <span>${type === 'success' ? '&#10003;' : '&#10007;'}</span>
+                <span>${type === 'error' ? '&#10007;' : '&#10003;'}</span>
                 <span>${escapeHtml(message)}</span>
             `;
     container.appendChild(toast);
@@ -5984,7 +9125,7 @@ function formatEventInfo(eventObj) {
 
     switch (type) {
         case 'llm':
-            return `${data.model || 'LLM'} (${data.context || 'chat'})`;
+            return `${data.model || 'LLM'} (${data.context || 'chat'})${data.provider_used ? ` via ${data.provider_used}` : ''}`;
         case 'tts':
             return `Voice: ${data.voice_id || 'unknown'}`;
         case 'voice_clone':
@@ -6018,6 +9159,12 @@ function formatEventDetail(eventObj) {
     }
 }
 
+function formatEventCost(costValue) {
+    const numericCost = Number(costValue);
+    if (!Number.isFinite(numericCost)) return null;
+    return `$${numericCost.toFixed(4)}`;
+}
+
 function formatEventMetric(eventObj) {
     const type = eventObj.type;
     const data = eventObj.data || {};
@@ -6026,7 +9173,13 @@ function formatEventMetric(eventObj) {
 
     switch (type) {
         case 'llm':
-            const tokenStr = tokens.total ? `${tokens.total}T` : null;
+            const cost = data.cost || {};
+            const costStr = formatEventCost(cost.total);
+            const tokenStr = tokens.total ? `${tokens.total}T${tokens.reasoning ? ` (${tokens.reasoning}R)` : ''}` : null;
+            if (costStr && tokenStr && latency) return `${costStr} / ${tokenStr} / ${latency}`;
+            if (costStr && tokenStr) return `${costStr} / ${tokenStr}`;
+            if (costStr && latency) return `${costStr} / ${latency}`;
+            if (costStr) return costStr;
             if (tokenStr && latency) return `${tokenStr} / ${latency}`;
             return tokenStr || latency || '—';
         case 'tts':
@@ -6054,6 +9207,7 @@ function renderEvent(eventObj) {
     const typeClass = eventObj.type.replace('_', '_');
     const statusClass = eventObj.status || 'success';
     const isError = eventObj.status === 'error' && eventObj.error;
+    const isWarning = eventObj.status === 'warning';
     const isSuccess = eventObj.status === 'success' || !eventObj.status;
     const timeStr = formatRelativeTime(eventObj.timestamp);
     const infoStr = formatEventInfo(eventObj);
@@ -6063,6 +9217,7 @@ function renderEvent(eventObj) {
     const row = document.createElement('div');
     let rowClass = 'event-row-new';
     if (isError) rowClass += ' event-row-error';
+    else if (isWarning) rowClass += ' event-row-warning';
     else if (isSuccess) rowClass += ' event-row-success';
     row.className = rowClass;
     row.id = `event-${eventObj.id}`;
@@ -6072,6 +9227,11 @@ function renderEvent(eventObj) {
     if (isError) {
         errorLine = `<div class="event-error-message">${escapeHtml(eventObj.error)}</div>`;
     }
+    const warning = eventObj.data?.warning || (isWarning ? eventObj.error : '');
+    let warningLine = '';
+    if (isWarning && warning) {
+        warningLine = `<div class="event-warning-message">${escapeHtml(warning)}</div>`;
+    }
 
     row.innerHTML = `
                 <div class="event-time">${timeStr}</div>
@@ -6079,6 +9239,7 @@ function renderEvent(eventObj) {
                 <div class="event-status ${statusClass}"></div>
                 <div class="event-info">${escapeHtml(infoStr)}</div>
                 <div class="event-metric">${escapeHtml(metricStr)}</div>
+                ${warningLine}
                 ${errorLine}
             `;
 
@@ -6136,6 +9297,67 @@ function updateEventList(events) {
     }
 }
 
+function getSystemEventCostTimeframe() {
+    return document.getElementById('eventCostTimeframe')?.value || 'today';
+}
+
+function updateSystemEventCostSummary(payload) {
+    const summaryEl = document.getElementById('eventCostSummary');
+    if (!summaryEl) return;
+
+    const timeframeLabel = payload?.timeframe_label || 'Today';
+    const totalCost = formatEventCost(payload?.total_cost || 0) || '$0.0000';
+    const callCount = Number(payload?.call_count || 0);
+    const featureCount = Number(payload?.feature_count || 0);
+    const callLabel = callCount === 1 ? 'billable call' : 'billable calls';
+    const featureLabel = featureCount === 1 ? 'feature' : 'features';
+    summaryEl.textContent = `${timeframeLabel}: ${totalCost} across ${callCount} ${callLabel} in ${featureCount} ${featureLabel}`;
+}
+
+function renderSystemEventCosts(payload) {
+    const tbody = document.getElementById('eventCostTableBody');
+    if (!tbody) return;
+
+    updateSystemEventCostSummary(payload || {});
+
+    const features = Array.isArray(payload?.features) ? payload.features : [];
+    if (features.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" class="event-cost-empty">No billable LLM cost for this timeframe yet</td></tr>';
+        return;
+    }
+
+    const rows = [];
+    for (const feature of features) {
+        const featureCost = formatEventCost(feature.total_cost) || '$0.0000';
+        rows.push(`
+            <tr class="event-cost-feature-row">
+                <td>${escapeHtml(feature.feature_label || 'Other')}</td>
+                <td>Total</td>
+                <td>${Number(feature.call_count || 0)}</td>
+                <td>${escapeHtml(featureCost)}</td>
+            </tr>
+        `);
+
+        const modules = Array.isArray(feature.modules) ? feature.modules : [];
+        for (const module of modules) {
+            const moduleCost = formatEventCost(module.total_cost) || '$0.0000';
+            const contextText = module.context ? ` <span class="event-cost-module-context">(${escapeHtml(module.context)})</span>` : '';
+            rows.push(`
+                <tr class="event-cost-module-row">
+                    <td>&nbsp;</td>
+                    <td class="event-cost-module-cell">
+                        <span class="event-cost-module-name">${escapeHtml(module.label || module.context || 'Unknown')}${contextText}</span>
+                    </td>
+                    <td>${Number(module.call_count || 0)}</td>
+                    <td>${escapeHtml(moduleCost)}</td>
+                </tr>
+            `);
+        }
+    }
+
+    tbody.innerHTML = rows.join('');
+}
+
 function loadSystemEvents() {
     if (eventsLoadInFlight) return;
     eventsLoadInFlight = true;
@@ -6154,6 +9376,27 @@ function loadSystemEvents() {
         });
 }
 
+function loadSystemEventCosts() {
+    if (eventCostsLoadInFlight) return;
+    eventCostsLoadInFlight = true;
+
+    const timeframe = encodeURIComponent(getSystemEventCostTimeframe());
+    fetchWithTimeout(`/api/system-events/costs?timeframe=${timeframe}`)
+        .then(response => response.json())
+        .then(payload => {
+            renderSystemEventCosts(payload);
+        })
+        .catch(() => {
+            const summaryEl = document.getElementById('eventCostSummary');
+            if (summaryEl) {
+                summaryEl.textContent = 'Cost totals unavailable right now';
+            }
+        })
+        .finally(() => {
+            eventCostsLoadInFlight = false;
+        });
+}
+
 function clearEvents() {
     if (!confirm('Clear all events?')) return;
 
@@ -6165,12 +9408,173 @@ function clearEvents() {
             if (listContainer) {
                 listContainer.innerHTML = '<div class="events-empty">No events logged yet</div>';
             }
+            renderSystemEventCosts({
+                timeframe: getSystemEventCostTimeframe(),
+                timeframe_label: document.getElementById('eventCostTimeframe')?.selectedOptions?.[0]?.textContent || 'Today',
+                total_cost: 0,
+                call_count: 0,
+                feature_count: 0,
+                features: [],
+            });
             showToast('Events cleared', 'success');
         })
         .catch(err => {
             console.error('[Events] Failed to clear:', err);
             showToast('Failed to clear events', 'error');
         });
+}
+
+// ============================================
+// Owl Post Activity Log
+// ============================================
+let _owlLogIds = new Set();
+
+function _formatOwlBadge(event) {
+    const labels = {
+        mail_sent: 'sent',
+        mail_reply: 'reply',
+        mail_skip: 'skip',
+        eval_no: 'eval',
+        board_thread: 'thread',
+        board_reply: 'reply',
+        board_skip: 'skip',
+        error: 'error',
+    };
+    return labels[event] || event;
+}
+
+function renderOwlLogEntry(entry) {
+    const row = document.createElement('div');
+    row.id = `owl-log-${entry.id}`;
+
+    const timeStr = formatRelativeTime(entry.timestamp);
+    const badge = _formatOwlBadge(entry.event);
+    const npcSpan = entry.npc_name
+        ? `<span class="owl-log-npc">${escapeHtml(entry.npc_name)}</span> — `
+        : '';
+    const detail = entry.detail || '';
+
+    row.innerHTML = `
+        <div class="owl-log-time">${timeStr}</div>
+        <div class="owl-log-badge ${entry.event}">${badge}</div>
+        <div class="owl-log-detail">${npcSpan}${escapeHtml(detail)}</div>
+    `;
+    row.dataset.timestamp = entry.timestamp;
+    return row;
+}
+
+function updateOwlPostLog(entries) {
+    const list = document.getElementById('owlPostLog');
+    if (!list) return;
+
+    const newIds = new Set(entries.map(e => e.id));
+    // Remove stale
+    for (const id of _owlLogIds) {
+        if (!newIds.has(id)) {
+            const el = document.getElementById(`owl-log-${id}`);
+            if (el) el.remove();
+            _owlLogIds.delete(id);
+        }
+    }
+    // Add new at top
+    const added = entries.filter(e => !_owlLogIds.has(e.id));
+    for (const entry of added.reverse()) {
+        list.insertBefore(renderOwlLogEntry(entry), list.firstChild);
+        _owlLogIds.add(entry.id);
+    }
+    // Empty state
+    const empty = list.querySelector('.owl-log-empty');
+    if (_owlLogIds.size > 0 && empty) empty.remove();
+    else if (_owlLogIds.size === 0 && !empty) {
+        list.innerHTML = '<div class="owl-log-empty">No activity yet</div>';
+    }
+}
+
+let _owlLogInFlight = false;
+
+function loadOwlPostLog() {
+    if (_owlLogInFlight) return;
+    if (!isPlayerContextReady()) {
+        setOwlPostNoPlayerState();
+        return;
+    }
+    _owlLogInFlight = true;
+    fetchWithTimeout('/owlpost/api/log?limit=200')
+        .then(r => r.json())
+        .then(entries => {
+            if (Array.isArray(entries)) updateOwlPostLog(entries);
+        })
+        .catch(() => { })
+        .finally(() => { _owlLogInFlight = false; });
+}
+
+async function clearOwlPostLog() {
+    if (!isPlayerContextReady()) {
+        setOwlPostNoPlayerState();
+        return;
+    }
+    if (!confirm('Clear owl post activity log?')) return;
+    try {
+        await fetch('/owlpost/api/log', { method: 'DELETE' });
+        _owlLogIds.clear();
+        const list = document.getElementById('owlPostLog');
+        if (list) list.innerHTML = '<div class="owl-log-empty">No activity yet</div>';
+        updateOwlPostPlayerState();
+        showToast('Log cleared', 'success');
+    } catch (e) {
+        showToast('Failed to clear log', 'error');
+    }
+}
+
+async function resetOwlBoardsWithConfirm() {
+    if (!isPlayerContextReady()) {
+        setOwlPostNoPlayerState();
+        return;
+    }
+    const message = 'Are you sure you want to reset all notice boards?\n\n' +
+        'This will delete every board post and thread. ' +
+        'Board definitions and unlocks are preserved.\n\n' +
+        'This action cannot be undone.';
+    if (!confirm(message)) return;
+    try {
+        await fetch('/owlpost/api/boards/reset', { method: 'DELETE' });
+        updateOwlPostPlayerState();
+        showToast('All board posts cleared', 'success');
+    } catch (e) {
+        showToast('Failed to reset boards', 'error');
+    }
+}
+
+async function resetOwlMailWithConfirm() {
+    if (!isPlayerContextReady()) {
+        setOwlPostNoPlayerState();
+        return;
+    }
+    const message = 'Are you sure you want to reset all owl mail?\n\n' +
+        'This will delete every letter, thread, meeting proposal, cached read-aloud audio file, ' +
+        'and mail generation state. Notice boards, settings, and custom characters are preserved.\n\n' +
+        'This action cannot be undone.';
+    if (!confirm(message)) return;
+    try {
+        const response = await fetch('/owlpost/api/mail/reset', { method: 'DELETE' });
+        if (!response.ok) throw new Error('Request failed');
+        updateOwlPostPlayerState();
+        showToast('All owl mail cleared', 'success');
+    } catch (e) {
+        showToast('Failed to reset owl mail', 'error');
+    }
+}
+
+function updateOwlLogTimes() {
+    const list = document.getElementById('owlPostLog');
+    if (!list) return;
+    list.querySelectorAll('[data-timestamp]').forEach(row => {
+        const ts = parseFloat(row.dataset.timestamp);
+        if (!isNaN(ts)) {
+            const el = row.querySelector('.owl-log-time');
+            if (el) el.textContent = formatRelativeTime(ts);
+        }
+    });
 }
 
 // ============================================
@@ -6436,13 +9840,28 @@ async function checkVrPluginStatus() {
         const pathEl = document.getElementById('vrPluginPath');
 
         if (badge) {
-            if (data.installed) {
+            if (data.installed && data.outdated) {
+                badge.innerHTML = '<span class="badge badge-warning">Update Available</span>';
+                if (installBtn) {
+                    installBtn.style.display = '';
+                    installBtn.textContent = 'Update Plugin';
+                }
+            } else if (data.installed) {
                 badge.innerHTML = '<span class="badge badge-success">Installed</span>';
                 if (installBtn) installBtn.style.display = 'none';
             } else {
                 badge.innerHTML = '<span class="badge badge-muted">Not Installed</span>';
-                if (installBtn) installBtn.style.display = data.source_available ? '' : 'none';
+                if (installBtn) {
+                    installBtn.style.display = '';
+                    installBtn.textContent = 'Install Plugin';
+                }
             }
+        }
+
+        // Update header VR badge color based on plugin install status
+        const vrBadge = document.getElementById('vrBadge');
+        if (vrBadge) {
+            vrBadge.style.color = data.installed ? '' : '#c0392b';
         }
 
         if (pathEl && data.target_dir) {
@@ -6459,7 +9878,7 @@ async function installVrPlugin() {
     const btn = document.getElementById('vrPluginInstallBtn');
     if (btn) {
         btn.disabled = true;
-        btn.textContent = 'Installing...';
+        btn.textContent = 'Downloading...';
     }
 
     try {
@@ -6487,6 +9906,9 @@ window.addEventListener('load', () => {
     loadSystemEvents();
     setInterval(loadSystemEvents, 5000);  // Poll every 5 seconds
     setInterval(updateAllEventTimes, 1000);  // Update relative times every second
+    loadOwlPostLog();
+    setInterval(loadOwlPostLog, 5000);
+    setInterval(updateOwlLogTimes, 30000);
     initScrollSpy();  // Initialize navigation scroll spy
     checkVrPluginStatus();
     setInterval(checkVrPluginStatus, 30000);  // Check every 30s

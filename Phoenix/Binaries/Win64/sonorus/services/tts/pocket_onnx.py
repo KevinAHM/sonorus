@@ -8,6 +8,8 @@ Uses pure ONNX inference without PyTorch dependencies.
 """
 import os
 import sys
+import functools
+import threading
 from typing import Dict, List, Optional, Callable
 
 # Add parent directory to path for imports
@@ -19,6 +21,15 @@ from utils.settings import load_settings
 
 # Sample rate (Pocket TTS native)
 SAMPLE_RATE = 24_000
+_synthesis_sequence_lock = threading.Lock()
+
+
+def _serialized_synthesis(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        with _synthesis_sequence_lock:
+            return func(*args, **kwargs)
+    return wrapper
 
 
 # ============================================
@@ -253,6 +264,7 @@ class PocketOnnxProvider(BaseTTSProvider):
             print(f"[PocketONNX] Failed to clear embedding cache: {e}")
             return False
 
+    @_serialized_synthesis
     def synthesize_stream(self, text: str, voice_id: str,
                           on_chunk: Callable[[bytes, Optional[Dict]], None],
                           speaker_id: Optional[str] = None) -> bool:
@@ -277,6 +289,7 @@ class PocketOnnxProvider(BaseTTSProvider):
         synthesizer = get_synthesizer()
         return synthesizer.synthesize(text, voice_id, on_chunk, temperature=temperature)
 
+    @_serialized_synthesis
     def synthesize_stream_sentences(self, sentences, voice_id: str,
                                      on_chunk: Callable[[bytes, Optional[Dict]], None],
                                      speaker_id: Optional[str] = None,
@@ -387,9 +400,13 @@ class PocketOnnxProvider(BaseTTSProvider):
                     silence_duration = random.uniform(0.25, 1.0)
                     silence_samples = int(silence_duration * SAMPLE_RATE)
                     silence_pcm = np.zeros(silence_samples, dtype=np.int16).tobytes()
+                    silence_start = total_bytes
                     on_chunk(silence_pcm, None)
                     total_bytes += len(silence_pcm)
                     cumulative_time += silence_duration
+                    print(f"[PocketONNXTiming] silence before_sentence={sentence_count + 1} "
+                          f"duration={silence_duration:.2f}s bytes={len(silence_pcm)} "
+                          f"start_bytes={silence_start} end_bytes={total_bytes}")
 
                 # Confirm the byte position where this sentence starts.
                 # Without this, boundary #1 remains unconfirmed for providers
@@ -398,13 +415,20 @@ class PocketOnnxProvider(BaseTTSProvider):
                 if sentence_idx > 0 and on_voice_switch:
                     try:
                         on_voice_switch(total_bytes, sentence_idx)
+                        print(f"[PocketONNXTiming] boundary_confirmed idx={sentence_idx} "
+                              f"start_bytes={total_bytes} "
+                              f"start_time={total_bytes / (SAMPLE_RATE * 2):.2f}s "
+                              f"source=provider_byte_position")
                     except Exception as e:
                         print(f"[PocketONNX] Boundary callback failed: {e}")
 
                 sentence_count += 1
                 voice_tag = f" [{per_voice_id}]" if per_voice_id != voice_id else ""
+                sentence_start_bytes = total_bytes
+                sentence_start_time = sentence_start_bytes / (SAMPLE_RATE * 2)
                 print(f"[PocketONNX] Streaming sentence {sentence_count}{voice_tag}: "
-                      f"{processed[:60]}{'...' if len(processed) > 60 else ''}")
+                      f"start_bytes={sentence_start_bytes} start_time={sentence_start_time:.2f}s "
+                      f"text=\"{processed[:100]}{'...' if len(processed) > 100 else ''}\"")
 
                 success, bytes_produced, cumulative_time = manager.synthesize_sentence(
                     text=processed,
@@ -416,6 +440,11 @@ class PocketOnnxProvider(BaseTTSProvider):
                     is_first_audio_chunk=is_first_audio,
                 )
                 total_bytes += bytes_produced
+                print(f"[PocketONNXTiming] sentence_done idx={sentence_count - 1} "
+                      f"bytes={bytes_produced} total_bytes={total_bytes} "
+                      f"duration={bytes_produced / (SAMPLE_RATE * 2):.2f}s "
+                      f"total_duration={total_bytes / (SAMPLE_RATE * 2):.2f}s "
+                      f"success={success}")
                 if bytes_produced > 0:
                     is_first_audio = False
 

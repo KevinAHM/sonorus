@@ -39,8 +39,11 @@ class VRManager:
         self.initialized = False
         self.hmd_yaw = 0.0        # degrees, head turn relative to controller (for Lua gaze)
         self.hmd_pitch = 0.0  # degrees, head pitch relative to controller (for Lua gaze)
-        self.cam_yaw = 0.0        # degrees, actual in-game camera yaw (for 3D audio)
-        self.cam_pitch = 0.0      # degrees, actual in-game camera pitch (for 3D audio)
+        self.cam_yaw = 0.0        # degrees, actual in-game camera yaw (world space, from stereo callback)
+        self.cam_pitch = 0.0      # degrees, actual in-game camera pitch (world space, from stereo callback)
+        self.cam_valid = False    # True once stereo callback has fired
+        self.head_yaw = 0.0       # degrees, absolute HMD yaw from tracking space (for audio listener)
+        self.head_pitch = 0.0     # degrees, absolute HMD pitch from tracking space (for audio listener)
         self.vr_spell_mode = False  # True when wand is in spell-casting pose
         self._backend = None
         self._lua_socket = None
@@ -101,21 +104,23 @@ class VRManager:
         if hasattr(self._backend, 'cam_valid') and self._backend.cam_valid:
             self.cam_yaw = self._backend.cam_yaw
             self.cam_pitch = self._backend.cam_pitch
+            self.cam_valid = True
+
+        # Game-world HMD direction — used by audio listener
+        # v4 plugin computes this from standing_origin + rotation_offset + HMD pose
+        # Falls back to tracking-space HMD direction on older plugins
+        # Stereo callback rotation already includes HMD head tracking —
+        # it's the full rendered view direction in game world space
+        self.head_yaw = self.cam_yaw
+        self.head_pitch = self.cam_pitch
+
+        self.hmd_yaw = hmd_pose.yaw
+        self.hmd_pitch = hmd_pose.pitch
 
         if ctrl_pose and ctrl_pose.valid:
-            # Relative offset: head direction minus wand direction
-            # This is drift-free (both in same tracking space)
-            rel_yaw = hmd_pose.yaw - ctrl_pose.yaw
-            # Normalize to [-180, 180]
-            self.hmd_yaw = ((rel_yaw + 180) % 360) - 180
-            self.hmd_pitch = hmd_pose.pitch - ctrl_pose.pitch
-            # Check spell-casting pose
             self._check_spell_pose(hmd_pose.position, ctrl_pose.position)
         else:
-            # Fallback: absolute HMD (will drift with stick turns)
-            self.hmd_yaw = hmd_pose.yaw
-            self.hmd_pitch = hmd_pose.pitch
-            self.vr_spell_mode = False  # Can't check pose without controller
+            self.vr_spell_mode = False
 
         # Mic gesture: hand over mouth + grip (v3 backend exposes grip states)
         self._update_mic_gesture(hmd_pose, ctrl_pose)
@@ -273,11 +278,12 @@ class VRManager:
                 lua_sock = self._lua_socket
                 if lua_sock:
                     try:
-                        lua_sock.send({
+                        msg = {
                             "type": "vr_offset",
-                            "yaw": round(self.hmd_yaw, 1),
-                            "pitch": round(self.hmd_pitch, 1),
-                        })
+                            "yaw": round(self.head_yaw, 1),
+                            "pitch": round(self.head_pitch, 1),
+                        }
+                        lua_sock.send(msg)
                     except Exception:
                         pass
 

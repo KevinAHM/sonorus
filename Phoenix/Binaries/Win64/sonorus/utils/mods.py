@@ -22,6 +22,12 @@ MOD_REGISTRY = {
         "folder": "FlooFlameCompanions",  # Relative to Phoenix/Mods/
         "icon": "users",
         "description": "Companion system mod - compatible with Sonorus NPC Actions"
+    },
+    "npc_schedule": {
+        "name": "NPC Schedule Enhanced",
+        "folder": "NPCScheduleEnhanced",  # Relative to Phoenix/Mods/
+        "icon": "calendar-clock",
+        "description": "Class schedule awareness for NPC conversations"
     }
 }
 

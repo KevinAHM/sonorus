@@ -4,6 +4,7 @@ Logs all LLM requests and responses to daily log files.
 """
 
 import os
+import json
 import time
 
 from .settings import SONORUS_DIR
@@ -25,7 +26,7 @@ def get_graphiti_log_path():
     return os.path.join(LOGS_DIR, f"graphiti_llm_{date_str}.txt")
 
 
-def log_llm(payload, response=None, error=None):
+def log_llm(payload, response=None, error=None, metadata=None):
     """Log LLM request/response to file"""
     try:
         with open(get_llm_log_path(), 'a', encoding='utf-8') as f:
@@ -40,7 +41,30 @@ def log_llm(payload, response=None, error=None):
 
             for msg in payload.get('messages', []):
                 f.write(f"--- {msg['role'].upper()} ---\n")
-                f.write(f"{msg['content']}\n\n")
+                content = msg.get('content', '')
+                # Handle multipart content (text + images)
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict):
+                            if part.get('type') == 'text':
+                                f.write(f"{part['text']}\n\n")
+                            elif part.get('type') == 'image_url':
+                                f.write("[image attached]\n\n")
+                        else:
+                            f.write(f"{part}\n\n")
+                else:
+                    f.write(f"{content}\n\n")
+
+            if metadata:
+                f.write("=== RESPONSE METADATA ===\n")
+                for key, value in metadata.items():
+                    if value is None:
+                        continue
+                    label = str(key).replace('_', ' ').title()
+                    if isinstance(value, (dict, list)):
+                        value = json.dumps(value, ensure_ascii=False)
+                    f.write(f"{label}: {value}\n")
+                f.write("\n")
 
             if response:
                 f.write("=== RESPONSE ===\n")

@@ -131,6 +131,11 @@ end
 --- @param data table|nil Optional data to pass to listeners
 --- @return number Number of listeners that were called
 function Events.emit(eventName, data)
+    if not _G.SonorusState.playerLoaded then
+        print("[Events] Player not loaded, skipping emit for " .. eventName)
+        return 0
+    end
+    
     local listeners = store.listeners[eventName]
     if not listeners or #listeners == 0 then
         return 0
@@ -183,10 +188,16 @@ end
 ---   - {stateName}:end when becoming false (skipped on first init from nil)
 --- Note: :start/:end are skipped on first initialization (nil -> value) to avoid
 ---       spurious events on mod load. Use :change if you need all transitions.
---- @param stateName string The state name (e.g., "combat", "broom")
+--- @param stateName string The state name (e.g., "combat", "mount")
 --- @param newValue any The new value
 --- @return boolean True if state changed
 function Events.setState(stateName, newValue)
+    -- Block state changes during loading screens to prevent phantom transitions
+    -- (e.g. GetIsOnAMountOrInTransition returning true mid-load → spurious dismount after)
+    if not _G.SonorusState or not _G.SonorusState.playerLoaded then
+        return false
+    end
+
     local oldValue = store.states[stateName]
 
     -- No change
@@ -209,7 +220,8 @@ function Events.setState(stateName, newValue)
     Events.emit(stateName .. ":change", eventData)
 
     -- For boolean states, emit start/end events
-    -- Skip if oldValue was nil (first initialization) to avoid spurious events
+    -- Skip if oldValue was nil (first initialization) to avoid spurious :start/:end events
+    -- nil → false is not a real "end", nil → true is not a real "start"
     if type(newValue) == "boolean" and oldValue ~= nil then
         if newValue then
             Events.emit(stateName .. ":start", eventData)

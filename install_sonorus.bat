@@ -266,7 +266,7 @@ echo.
 set "SRC=%~dp0Phoenix"
 set "DST=!GAME_PATH!\Phoenix"
 
-:: --- Detect legacy UE4SS files (uppercase = old version) ---
+:: --- Detect existing UE4SS files/folders so Sonorus installs cleanly ---
 set "BIN_DIR=Binaries\Win64"
 if !IS_XBOX! equ 1 set "BIN_DIR=Binaries\WinGDK"
 
@@ -276,9 +276,9 @@ set "HAS_UE4SS_DLL=0"
 set "HAS_UE4SS_INI=0"
 set "HAS_MODS=0"
 
-:: Case-sensitive checks: only match uppercase UE4SS (not lowercase ue4ss)
-dir /b "!DST!\!BIN_DIR!" 2>nul | findstr /x "UE4SS" >nul 2>&1
-if !errorlevel! equ 0 set "LEGACY_FOUND=1" & set "HAS_UE4SS_DIR=1"
+:: Back up either folder casing. The bundled Sonorus copy uses lowercase ue4ss,
+:: but users may already have an existing ue4ss/UE4SS install in place.
+if exist "!DST!\!BIN_DIR!\ue4ss" set "LEGACY_FOUND=1" & set "HAS_UE4SS_DIR=1"
 dir /b "!DST!\!BIN_DIR!" 2>nul | findstr /x "UE4SS.dll" >nul 2>&1
 if !errorlevel! equ 0 set "LEGACY_FOUND=1" & set "HAS_UE4SS_DLL=1"
 dir /b "!DST!\!BIN_DIR!" 2>nul | findstr /x "UE4SS-settings.ini" >nul 2>&1
@@ -289,7 +289,7 @@ if exist "!DST!\!BIN_DIR!\Mods" set "LEGACY_FOUND=1" & set "HAS_MODS=1"
 if !LEGACY_FOUND! equ 1 (
     echo  WARNING: Existing UE4SS installation detected:
     echo.
-    if !HAS_UE4SS_DIR! equ 1 echo    - UE4SS folder
+    if !HAS_UE4SS_DIR! equ 1 echo    - ue4ss/UE4SS folder
     if !HAS_UE4SS_DLL! equ 1 echo    - UE4SS.dll
     if !HAS_UE4SS_INI! equ 1 echo    - UE4SS-settings.ini
     if !HAS_MODS! equ 1     echo    - Mods folder
@@ -312,9 +312,9 @@ if !LEGACY_FOUND! equ 1 (
 
 :: --- Backup legacy UE4SS files ---
 if !HAS_UE4SS_DIR! equ 1 (
-    echo  Backing up UE4SS folder...
-    if exist "!DST!\!BIN_DIR!\UE4SS-Backup" rmdir /S /Q "!DST!\!BIN_DIR!\UE4SS-Backup"
-    ren "!DST!\!BIN_DIR!\UE4SS" "UE4SS-Backup"
+    echo  Backing up ue4ss folder...
+    if exist "!DST!\!BIN_DIR!\ue4ss-backup" rmdir /S /Q "!DST!\!BIN_DIR!\ue4ss-backup"
+    ren "!DST!\!BIN_DIR!\ue4ss" "ue4ss-backup"
 )
 if !HAS_UE4SS_DLL! equ 1 (
     echo  Backing up UE4SS.dll...
@@ -360,6 +360,10 @@ if !IS_XBOX! equ 1 set "CHECK_DIR=WinGDK"
 if not exist "!DST!\Binaries\!CHECK_DIR!\dwmapi.dll" goto :install_failed
 if not exist "!DST!\Binaries\!CHECK_DIR!\sonorus\server.py" goto :install_failed
 if not exist "!DST!\Binaries\!CHECK_DIR!\ue4ss\Mods\SonorusMod\Scripts\main.lua" goto :install_failed
+if not exist "!DST!\Content\Paks\LogicMods\SonorusMod.pak" goto :install_failed
+if not exist "!DST!\Content\Paks\LogicMods\SonorusMod.ucas" goto :install_failed
+if not exist "!DST!\Content\Paks\LogicMods\SonorusMod.utoc" goto :install_failed
+if not exist "!DST!\Content\Paks\LogicMods\SonorusMod\config.lua" goto :install_failed
 
 echo.
 echo  ===================================================

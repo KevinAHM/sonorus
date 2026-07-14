@@ -32,6 +32,7 @@ user32 = ctypes.windll.user32
 
 from constants import GAME_WINDOW_TITLE
 from utils.localization import get_display_name
+from utils.settings import is_llm_provider_feature_disabled, load_settings
 
 try:
     from vr import is_vr_active
@@ -160,47 +161,37 @@ def set_lua_socket(socket):
     global _lua_socket
     _lua_socket = socket
 
-# Vision prompt template
-VISION_PROMPT = """You are describing what is currently visible in this Hogwarts Legacy screenshot. Your description will be used by NPCs to understand what they can see and comment on. Be specific and vivid enough that someone could have a conversation about any element you mention.
+# Vision system prompts are split by camera perspective so first-person captures never
+# include player-character description instructions or output fields.
+VISION_SYSTEM_PROMPT_BASE = """You are describing what is currently visible in a Hogwarts Legacy screenshot. Your description will be used by characters to understand what they can see and comment on. Be specific and vivid enough that someone could have a conversation about any element you mention.
 
-## Context:
-- Location: {location}
-- Time: {time_of_day}
+The user message contains the screenshot image and per-capture context: location, time of day, perspective mode, and which characters are confirmed visible.
 
-{player_section}
-
-{visible_npcs_section}
-{nearby_landmarks_section}
 ## CORE INSTRUCTIONS:
 
-**Perspective:** {perspective}
+**Location accuracy:** Use the location name provided in the context EXACTLY. Do not add "classroom", "corridor", or other qualifiers unless you can clearly see that specific room type. "Defence Against the Dark Arts Tower" is the tower area, not necessarily the classroom. Describe what you SEE, not what you assume the space is.
 
-**Location accuracy:** Use the location name provided above EXACTLY. Do not add "classroom", "corridor", or other qualifiers unless you can clearly see that specific room type. "Defence Against the Dark Arts Tower" is the tower area, not necessarily the classroom. Describe what you SEE, not what you assume the space is.
+**Environment & Objects** (ESSENTIAL - be specific and descriptive):
+- **Magical elements FIRST** (this is a magical world - these are the most eye-catching): floating/enchanted objects, self-playing instruments, moving portraits, ghosts, magical creatures, spell effects, enchanted ceiling/sky, Floo Flames, flying books, animated suits of armor, glowing runes, candles floating without holders, stairs that move. If something supernatural is happening (e.g. violins playing themselves mid-air), it MUST be described prominently.
+- Spatial scale and overall layout
+- Architecture: materials, style, condition (weathered stone, polished wood, ornate carvings)
+- **Notable objects deserve rich detail**: If there's a fireplace, describe its style, carvings, what's on the mantle, the quality of the flames. If there's a painting, describe its subject and frame. If there's a desk, note what's on it.
+- Animals and creatures: owls, cats, dogs, spiders, hippogriffs, phoenixes, house-elves, or any other creatures visible in the scene. Describe what they're doing and where they are.
+- Decorative elements: tapestries (what they depict), suits of armor (style/condition), statues (who/what), candles/torches (lit/unlit), plants
+- Colors and color schemes - dominant hues, contrasts
+- Object states: doors open/closed, books open/stacked, cauldrons bubbling/empty
 
-**Description Priorities:**
+**Other Characters:**
+- ONLY describe what you can CLEARLY SEE - pose, gesture, position, what they're doing
+- DO NOT invent or assume actions unless unmistakably visible
+- Placement via scene fixtures (standing by the window, seated near the fire)
 
-{player_priority}
-2. **Environment & Objects** (ESSENTIAL - be specific and descriptive):
-   - **Magical elements FIRST** (this is a magical world - these are the most eye-catching): floating/enchanted objects, self-playing instruments, moving portraits, ghosts, magical creatures, spell effects, enchanted ceiling/sky, Floo Flames, flying books, animated suits of armor, glowing runes, candles floating without holders, stairs that move. If something supernatural is happening (e.g. violins playing themselves mid-air), it MUST be described prominently.
-   - Spatial scale and overall layout
-   - Architecture: materials, style, condition (weathered stone, polished wood, ornate carvings)
-   - **Notable objects deserve rich detail**: If there's a fireplace, describe its style, carvings, what's on the mantle, the quality of the flames. If there's a painting, describe its subject and frame. If there's a desk, note what's on it.
-   - Animals and creatures: owls, cats, dogs, spiders, hippogriffs, phoenixes, house-elves, or any other creatures visible in the scene. Describe what they're doing and where they are.
-   - Decorative elements: tapestries (what they depict), suits of armor (style/condition), statues (who/what), candles/torches (lit/unlit), plants
-   - Colors and color schemes - dominant hues, contrasts
-   - Object states: doors open/closed, books open/stacked, cauldrons bubbling/empty
+**Atmosphere**:
+- Lighting quality: warm firelight, cold moonlight, bright daylight, dim torchlight
+- Weather effects (if outdoors)
+- Overall mood and energy
 
-3. **Other Characters** (NPCs):
-   - ONLY describe what you can CLEARLY SEE - pose, gesture, position, what they're doing
-   - DO NOT invent or assume actions unless unmistakably visible
-   - Placement via scene fixtures (standing by the window, seated near the fire)
-
-4. **Atmosphere**:
-   - Lighting quality: warm firelight, cold moonlight, bright daylight, dim torchlight
-   - Weather effects (if outdoors)
-   - Overall mood and energy
-
-**CRITICAL - NPC Identification:**
+**CRITICAL - Character Identification:**
 - **"VISIBLE" list is authoritative**: Characters listed under "VISIBLE" ARE confirmed in the screenshot.
 - **Name tags for identification only**: Use floating name tags to identify WHO a character is, but don't describe the name tag itself in your output.
 - **Cross-reference**: If you see a character and "Sebastian Sallow" is in the VISIBLE list, that character is Sebastian - just describe them by name.
@@ -210,36 +201,125 @@ VISION_PROMPT = """You are describing what is currently visible in this Hogwarts
   - "A professor in dark robes"
 - **"NEARBY but not visible"**: These characters are NOT in the screenshot - don't describe them
 
-**Output Format:**
-
-**Scene:** [4-6 sentences. Describe the space and its contents with enough detail that someone could comment on specific elements. What would catch someone's eye? What makes this space distinctive? Include materials, colors, decorative details.]
-
-{player_output}**Notable details:** [2-3 specific elements worth mentioning. PRIORITIZE magical/supernatural/unusual things first (enchanted objects, self-playing instruments, floating items, magical creatures, moving paintings) over mundane architecture. Describe each with 1-2 sentences of vivid detail. These are things someone would point at and say "look at that!" or ask about.]
-
-**Visible characters:** [For each visible NPC (not the player), 1-2 sentences on what is clearly visible - their name (if name tag visible), pose, clothing, position, apparent activity. Skip if none visible besides the player.]
-
-**Atmosphere:** [1-2 sentences on lighting quality, mood, ambient details.]
-
 **Style Rules:**
 - Active, present tense; concrete, specific details
 - Describe objects as if you might discuss them - "an ornate silver candelabra" not just "a candelabra"
 - Include colors, materials, conditions, decorative features
 - ONLY describe what is CLEARLY visible - when in doubt, leave it out
+- **Partial view**: You see a limited field of view, not the whole room. Never describe the location as a whole - describe only what's in frame. Say "this part of the hall" not "the hall is"
 - **Ignore UI elements**: Don't mention name tags, interaction prompts ("F TALK"), health bars, minimaps, button hints, or any game interface elements - describe only the world and characters themselves
 
 **If Unable to Describe:**
 If the screenshot is a loading screen, too dark, blurry, obscured by UI/menus, shows too limited an area (e.g., staring at a wall/corner), or is otherwise impossible to describe meaningfully, respond with ONLY: `UNCLEAR: <brief reason>`"""
 
 
+VISION_SYSTEM_PROMPT_THIRD_PERSON = VISION_SYSTEM_PROMPT_BASE + """
+
+## THIRD-PERSON CAMERA:
+
+The camera follows the player character, who is visible in the screenshot. The user context includes the player character's name, house, and visually prominent attire so you can identify and describe that visible figure.
+
+**Description Priorities:**
+1. **The Player Character**: Describe where the player character is positioned in the scene, what they are visibly doing, their pose, and distinctive visible attire.
+2. **Environment & Objects**: Prioritize magical/supernatural/unusual elements, then architecture, furnishings, creatures, decorative elements, colors, and object states.
+3. **Other Characters**: Describe confirmed visible non-player characters and any clearly visible extra characters.
+4. **Atmosphere**: Describe lighting, weather if outdoors, and mood.
+
+**Output Format:**
+
+**Scene:** [4-6 sentences. Describe what is visible from this vantage point - you can only see part of the location, so ground your description in what's actually in frame (e.g. "This corner of the Great Hall..." not "The Great Hall is..."). What would catch someone's eye? Include materials, colors, decorative details.]
+
+**Player:** [1-2 sentences describing where the player character is positioned in the scene and what they appear to be doing. Reference their attire if distinctive.]
+
+**Notable details:** [2-3 specific elements worth mentioning. PRIORITIZE magical/supernatural/unusual things first (enchanted objects, self-playing instruments, floating items, magical creatures, moving paintings) over mundane architecture. Describe each with 1-2 sentences of vivid detail. These are things someone would point at and say "look at that!" or ask about.]
+
+**Visible characters:** [For each visible character other than the player, 1-2 sentences on what is clearly visible - their name, pose, clothing, position, apparent activity. Skip if none visible besides the player.]
+
+**Atmosphere:** [1-2 sentences on lighting quality, mood, ambient details.]"""
+
+
+VISION_SYSTEM_PROMPT_FIRST_PERSON = VISION_SYSTEM_PROMPT_BASE + """
+
+## FIRST-PERSON CAMERA:
+
+The screenshot is from the player's eyes. The player character is not visible. Do not describe the player's body, pose, clothes, identity, actions, or location as a visible figure. The user context intentionally omits player appearance because it cannot be seen from this perspective.
+
+**Description Priorities:**
+1. **Environment & Objects**: Prioritize magical/supernatural/unusual elements, then architecture, furnishings, creatures, decorative elements, colors, and object states.
+2. **Visible Characters**: Describe confirmed visible characters and any clearly visible extra characters.
+3. **Atmosphere**: Describe lighting, weather if outdoors, and mood.
+
+**Output Format:**
+
+**Scene:** [4-6 sentences. Describe what is visible from this first-person vantage point - you can only see part of the location, so ground your description in what's actually in frame (e.g. "This corner of the Great Hall..." not "The Great Hall is..."). What would catch someone's eye? Include materials, colors, decorative details.]
+
+**Notable details:** [2-3 specific elements worth mentioning. PRIORITIZE magical/supernatural/unusual things first (enchanted objects, self-playing instruments, floating items, magical creatures, moving paintings) over mundane architecture. Describe each with 1-2 sentences of vivid detail. These are things someone would point at and say "look at that!" or ask about.]
+
+**Visible characters:** [For each visible character, 1-2 sentences on what is clearly visible - their name, pose, clothing, position, apparent activity. Skip if no characters are visible.]
+
+**Atmosphere:** [1-2 sentences on lighting quality, mood, ambient details.]"""
+
+
+def _vision_system_prompt_for_perspective(perspective):
+    """Return the prompt variant for the current camera perspective."""
+    if perspective == "first-person":
+        return VISION_SYSTEM_PROMPT_FIRST_PERSON
+    return VISION_SYSTEM_PROMPT_THIRD_PERSON
+
+
+# Gear slots to include in vision context (visually prominent from third-person camera)
+_VISION_GEAR_SLOTS = {"HEAD", "OUTFIT", "NECK", "BACK"}
+
+
+def _filter_gear_for_vision(gear_text):
+    """Filter playerGear string for vision: only visible slots, appearance only, no stats/rarity."""
+    if not gear_text:
+        return ""
+    lines = gear_text.split("\n")
+    filtered = []
+    include_desc = False
+    for line in lines:
+        # Description lines start with "  - "
+        if line.startswith("  - "):
+            if include_desc:
+                filtered.append(line)
+            continue
+        # Slot lines look like "HEAD: Item Name ..." — check if it's a vision-relevant slot
+        include_desc = False
+        colon_idx = line.find(":")
+        if colon_idx == -1:
+            continue
+        slot = line[:colon_idx].strip()
+        if slot not in _VISION_GEAR_SLOTS:
+            continue
+        rest = line[colon_idx + 1:].strip()
+        # Skip hidden/invisible items
+        if "Hidden" in rest or "invisible" in rest.lower():
+            continue
+        # Strip transmog stats parenthetical: "(transmogged, stats from ...)"
+        paren_idx = rest.find(" (transmogged,")
+        if paren_idx != -1:
+            rest = rest[:paren_idx]
+        # Strip rarity tags like " [Legendary]" (rfind to match last occurrence)
+        bracket_idx = rest.rfind(" [")
+        if bracket_idx != -1:
+            rest = rest[:bracket_idx]
+        filtered.append(f"{slot}: {rest.strip()}")
+        include_desc = True
+    return "\n".join(filtered)
+
+
 def get_vision_settings():
     """Get vision agent settings with defaults"""
-    from utils.settings import load_settings
     settings = load_settings()
     vision = settings.get('agents', {}).get('vision', {})
+    provider_disabled = is_llm_provider_feature_disabled('vision', settings)
 
     return {
-        'enabled': vision.get('enabled', True),
+        'enabled': vision.get('enabled', True) and not provider_disabled,
         'cooldown_seconds': vision.get('cooldown_seconds', 5),
+        'wait_timeout_seconds': vision.get('wait_timeout_seconds', 5),
+        'wait_for_capture': vision.get('wait_for_capture', True),
         'llm': vision.get('llm', {})
     }
 
@@ -396,6 +476,10 @@ class VisionAgent:
         self._capture_in_progress = False
         self._capture_complete = threading.Event()
         self._capture_complete.set()  # Initially not capturing
+
+        # Partial streaming description (updated live during vision LLM streaming)
+        self._partial_description = ""
+        self._partial_lock = threading.Lock()
 
         # Activity state tracking (for Lua - foreground status only, idle handled by Lua)
         self._last_sent_foreground = None
@@ -580,11 +664,11 @@ class VisionAgent:
 
             # game_context already read above for pause check
 
-            # Build prompt
-            prompt = self._build_prompt(current_pos, game_context)
+            # Build context for user message
+            user_context, perspective = self._build_context(current_pos, game_context)
 
             # Call vision LLM
-            description = self._call_vision_llm(screenshot_b64, prompt, settings['llm'])
+            description = self._call_vision_llm(screenshot_b64, user_context, settings['llm'], perspective)
             if not description:
                 print("[VisionAgent] Vision LLM call failed")
                 return
@@ -654,8 +738,8 @@ class VisionAgent:
             print(f"[VisionAgent] Screenshot error: {e}")
             return None
 
-    def _build_prompt(self, position, game_context):
-        """Build the vision prompt with context"""
+    def _build_context(self, position, game_context):
+        """Build the dynamic per-capture context for the user message."""
         # Extract context - prioritize specific zone location from HUD
         zone_location = game_context.get('zoneLocation', '')
         broad_location = position.get('location', game_context.get('location', 'Unknown'))
@@ -672,24 +756,42 @@ class VisionAgent:
         else:
             time_of_day = "Night"
 
-        # Player section - name, house, and gear
-        player_name = game_context.get('playerName', 'the player')
-        player_house = game_context.get('playerHouse', '')
-        player_gear = game_context.get('playerGear', '')
+        # VR mode - adjust perspective (cached boolean, no OpenVR ping)
+        t_vr = time.perf_counter()
+        vr_mode = is_vr_active()
+        vr_ms = (time.perf_counter() - t_vr) * 1000
+        print(f"[VisionAgent] VR mode: {vr_mode} ({vr_ms:.3f}ms)")
 
-        player_lines = [f"## Player Character: {player_name}"]
-        if player_house:
-            player_lines.append(f"- House: {player_house}")
-        if player_gear:
-            player_lines.append(f"- Current attire: {player_gear}")
-        # Add status info if relevant
-        if game_context.get('hoodUp'):
-            player_lines.append("- Hood is up")
-        if game_context.get('inStealth'):
-            player_lines.append("- Disillusionment charm active (semi-transparent/shimmering)")
-        if game_context.get('isOnBroom'):
-            player_lines.append("- Flying on a broom")
-        player_section = "\n".join(player_lines)
+        perspective = "first-person" if vr_mode else "third-person"
+
+        player_section = ""
+        if perspective == "third-person":
+            # Player section - name, house, and filtered gear
+            player_name = game_context.get('playerName', 'the player')
+            player_house = game_context.get('playerHouse', '')
+            player_gear = _filter_gear_for_vision(game_context.get('playerGear', ''))
+
+            player_lines = [f"## Player Character: {player_name}"]
+            if player_house:
+                player_lines.append(f"- House: {player_house}")
+            if player_gear:
+                player_lines.append(f"- Current attire: {player_gear}")
+            # Add status info if relevant
+            if game_context.get('hoodUp'):
+                player_lines.append("- Hood is up")
+            if game_context.get('inStealth'):
+                player_lines.append("- Disillusionment charm active (semi-transparent/shimmering)")
+            if game_context.get('isOnMount'):
+                mount_type = game_context.get('mountType', 'broom')
+                if mount_type == 'broom':
+                    player_lines.append("- Flying on a broom")
+                elif mount_type == 'hippogriff':
+                    player_lines.append("- Riding a hippogriff")
+                elif mount_type == 'graphorn':
+                    player_lines.append("- Riding a graphorn")
+                else:
+                    player_lines.append(f"- Riding a {mount_type}")
+            player_section = "\n".join(player_lines)
 
         # Visible NPCs section - line trace confirmed visible (not occluded)
         visible = game_context.get('visibleNpcs', [])
@@ -729,64 +831,78 @@ class VisionAgent:
                     lm_lines.append(f"- {lm['name']}: {lm['distance']} {lm['direction']}")
                 else:
                     lm_lines.append(f"- {lm['name']}: {lm['distance']}")
-            nearby_landmarks_section = "\n".join(lm_lines) + "\n"
+            nearby_landmarks_section = "\n".join(lm_lines)
         else:
-            nearby_landmarks_section = "\n"
+            nearby_landmarks_section = ""
 
-        # VR mode - adjust perspective (cached boolean, no OpenVR ping)
-        t_vr = time.perf_counter()
-        vr_mode = is_vr_active()
-        vr_ms = (time.perf_counter() - t_vr) * 1000
-        print(f"[VisionAgent] VR mode: {vr_mode} ({vr_ms:.3f}ms)")
+        # Assemble user context
+        sections = [
+            f"## Context:\n- Location: {location}\n- Time: {time_of_day}\n- Perspective: {perspective}",
+        ]
+        if player_section:
+            sections.append(player_section)
+        sections.append(visible_npcs_section)
+        if nearby_landmarks_section:
+            sections.append(nearby_landmarks_section)
 
-        if vr_mode:
-            perspective = "First-person view through the player's eyes. The player character is NOT visible in this screenshot."
-            player_priority = "1. **First-person view**: You are seeing through the player's eyes. The player character is NOT visible. Do not describe or mention seeing the player in the scene.\n"
-            player_output = ""
-        else:
-            perspective = "Third-person view following the player character."
-            player_priority = f"""1. **The Player Character** (IMPORTANT):
-   - The player character is the figure the camera follows (typically center or slightly off-center)
-   - Use the player info above to identify them - describe what they're doing, their pose, position in the scene
-   - Example: "{player_name} stands near the entrance, their robes visible beneath a dark cloak"
-"""
-            player_output = f"**Player:** [1-2 sentences describing where {player_name} is positioned in the scene and what they appear to be doing. Reference their attire if distinctive.]\n\n"
+        return "\n\n".join(sections), perspective
 
-        # Format prompt
-        prompt = VISION_PROMPT.format(
-            location=location,
-            time_of_day=time_of_day,
-            player_name=player_name,
-            player_section=player_section,
-            visible_npcs_section=visible_npcs_section,
-            nearby_landmarks_section=nearby_landmarks_section,
-            perspective=perspective,
-            player_priority=player_priority,
-            player_output=player_output,
-        )
-
-        return prompt
-
-    def _call_vision_llm(self, image_b64, prompt, llm_settings):
-        """Call vision LLM with screenshot via shared llm module"""
+    def _call_vision_llm(self, image_b64, user_context, llm_settings, perspective):
+        """Call vision LLM with streaming, updating _partial_description as chunks arrive."""
         model = llm_settings.get('model', 'google/gemini-2.5-flash-lite:nitro')
         temperature = llm_settings.get('temperature', 0.7)
         max_tokens = llm_settings.get('max_tokens', 500)
 
-        print(f"[VisionAgent] Calling {model}...")
+        print(f"[VisionAgent] Calling {model} (streaming)...")
 
-        result = llm.chat_with_vision(
-            prompt=prompt,
-            image_b64=image_b64,
-            model=model,
-            temperature=temperature,
-            max_tokens=max_tokens
-        )
+        # Clear partial before starting
+        with self._partial_lock:
+            self._partial_description = ""
 
-        if result:
-            print(f"[VisionAgent] Got response: {len(result)} chars")
+        # Perspective-specific system prompt + dynamic user context with image
+        system_prompt = _vision_system_prompt_for_perspective(perspective)
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": user_context},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
+                ]
+            }
+        ]
 
-        return result
+        try:
+            accumulated = []
+            for chunk in llm.chat_stream(messages, model=model, temperature=temperature,
+                                          max_tokens=max_tokens, context="vision",
+                                          kv_cache_prefix=[messages[0]],
+                                          kv_cache_context="vision"):
+                accumulated.append(chunk)
+                with self._partial_lock:
+                    self._partial_description = "".join(accumulated)
+
+            result = "".join(accumulated)
+            if result:
+                print(f"[VisionAgent] Got response: {len(result)} chars")
+
+            # Clear partial now that we have the full result
+            with self._partial_lock:
+                self._partial_description = ""
+
+            return result
+        except Exception as e:
+            print(f"[VisionAgent] Vision streaming error: {e}")
+            # Return whatever we accumulated
+            with self._partial_lock:
+                partial = self._partial_description
+                self._partial_description = ""
+            return partial if partial else None
+
+    def get_partial_description(self):
+        """Get the in-progress streaming description (empty string if not streaming)."""
+        with self._partial_lock:
+            return self._partial_description
 
     def _save_context(self, description, position, game_context):
         """Save vision context for Lua to read"""

@@ -13,6 +13,7 @@ from constants import (
     COMMITMENT_WAIT_TIME_MIN,
     COMMITMENT_MAX_CONTEXT_HISTORY,
     LOCATION_ACTIVITIES,
+    is_excluded_npc,
 )
 from . import commitments_db
 from .llm_utils import parse_commitment_actions
@@ -23,12 +24,83 @@ from .dialogue import prettify_voice_name
 # Helpers
 # ============================================
 
-# Build display name -> (location_id, entry) lookup
+# Spot labels for pending commitments (commitment_id -> label)
+# Ephemeral: lost on server restart, which is fine (falls back to random spot)
+_commitment_spot_labels = {}
+
+
+def _display_with_label(display, spot_label):
+    """Return 'Display (label)' if spot_label is non-empty, else just 'Display'."""
+    if spot_label:
+        return f"{display} ({spot_label})"
+    return display
+
+# Build display name -> (location_id, entry) lookup and location_id -> entry lookup
 _DISPLAY_NAME_MAP = {}
+_LOCATION_BY_ID = {}
 for _loc_id, _entry in LOCATION_ACTIVITIES.items():
     _DISPLAY_NAME_MAP[_entry["display"].lower()] = (_loc_id, _entry)
+    _LOCATION_BY_ID[_loc_id] = _entry
+
+
+def _invalidate_registry_display_cache():
+    """Clear cached display map. Called when language changes."""
+    if hasattr(_get_registry_display_map, '_cache'):
+        del _get_registry_display_map._cache
+
+
+def _get_registry_display_map():
+    """Build mod_key -> display_name map from registry + localization.
+    Cached after first call. Invalidated by _invalidate_registry_display_cache()."""
+    if hasattr(_get_registry_display_map, '_cache'):
+        return _get_registry_display_map._cache
+    try:
+        from .settings import SONORUS_DIR
+        from .localization import load_localization
+        import json, os
+        reg_path = os.path.join(SONORUS_DIR, "data", "location_registry.json")
+        with open(reg_path, 'r', encoding='utf-8') as f:
+            registry = json.load(f)
+        loc = load_localization()
+        result = {}
+        for mod_key, entry in registry.items():
+            loc_id = entry.get("localized_id")
+            if loc_id and loc_id in loc:
+                result[mod_key] = loc[loc_id]
+        _get_registry_display_map._cache = result
+        return result
+    except Exception as e:
+        print(f"[Commitments] Warning: could not load registry display map: {e}")
+        return {}
+
+# Expand with teleport-only locations from commitment_spots.json
+# These locations have authored spots but no scheduler activity
+def _expand_with_teleport_locations():
+    try:
+        from .settings import load_commitment_spots
+        spots = load_commitment_spots()
+        # Get display names from registry + localization
+        display_map = _get_registry_display_map()
+        for loc_id in spots:
+            if loc_id in LOCATION_ACTIVITIES:
+                continue  # Already has a scheduler activity
+            display = display_map.get(loc_id, loc_id)
+            entry = {"activity": "", "display": display, "type": "Teleport"}
+            _DISPLAY_NAME_MAP[display.lower()] = (loc_id, entry)
+            _LOCATION_BY_ID[loc_id] = entry
+    except Exception as e:
+        print(f"[Commitments] Warning: could not load teleport locations: {e}")
+
+_expand_with_teleport_locations()
 
 _DISPLAY_NAMES = list(_DISPLAY_NAME_MAP.keys())
+
+
+def reload_teleport_locations():
+    """Reload teleport-only locations after spots file changes."""
+    global _DISPLAY_NAMES
+    _expand_with_teleport_locations()
+    _DISPLAY_NAMES = list(_DISPLAY_NAME_MAP.keys())
 
 
 def _fuzzy_match_location(text):
@@ -44,12 +116,161 @@ def _fuzzy_match_location(text):
     if text_lower in _DISPLAY_NAME_MAP:
         return _DISPLAY_NAME_MAP[text_lower]
 
-    # Fuzzy match
-    matches = difflib.get_close_matches(text_lower, _DISPLAY_NAMES, n=1, cutoff=0.6)
+    # Fuzzy match – cutoff 0.8 to avoid wild mismatches (e.g. "Library" → "Owlery")
+    matches = difflib.get_close_matches(text_lower, _DISPLAY_NAMES, n=1, cutoff=0.8)
     if matches:
+        print(f"[Commitments] Fuzzy location match: '{text}' → '{matches[0]}'")
         return _DISPLAY_NAME_MAP[matches[0]]
 
     return None, None
+
+
+def _build_location_list():
+    """Build a flat numbered list of available locations with spot labels.
+    Returns (list_text, index_map) where index_map maps number -> (location_id, label_or_none).
+    Number 0 = no match."""
+    from .settings import load_commitment_spots
+
+    spots = load_commitment_spots()
+    display_map = _get_registry_display_map()
+
+    # Also include LOCATION_ACTIVITIES locations (schedule-based)
+    all_location_ids = set(spots.keys()) | set(LOCATION_ACTIVITIES.keys())
+
+    # Group by area for readability
+    hogsmeade = []
+    hogwarts = []
+    other = []
+
+    for loc_id in sorted(all_location_ids):
+        display = None
+        if loc_id in LOCATION_ACTIVITIES:
+            display = LOCATION_ACTIVITIES[loc_id]["display"]
+        elif loc_id in display_map:
+            display = display_map[loc_id]
+        else:
+            display = loc_id
+
+        # Collect unique labels for this location
+        labels = set()
+        if loc_id in spots:
+            for spot in spots[loc_id]:
+                label = spot.get("label", "")
+                if label:
+                    labels.add(label)
+
+        entry = (loc_id, display, sorted(labels))
+        if loc_id.startswith("HM_"):
+            hogsmeade.append(entry)
+        else:
+            # Default: Hogwarts (mod keys have no prefix for Hogwarts locations)
+            # Hamlets/regions would go here too, but none are in commitment spots
+            hogwarts.append(entry)
+
+    # Build flat numbered list
+    lines = []
+    index_map = {}  # number -> (location_id, label_or_none)
+    num = 1
+
+    for area_name, entries in [("Hogwarts", hogwarts), ("Hogsmeade", hogsmeade), ("Other", other)]:
+        if not entries:
+            continue
+        lines.append(f"{area_name}:")
+        for loc_id, display, labels in entries:
+            # Generic entry (any spot at this location)
+            lines.append(f"  {num}. {display}")
+            index_map[num] = (loc_id, None)
+            num += 1
+            # Specific labeled entries
+            for label in labels:
+                lines.append(f"  {num}. {display} ({label})")
+                index_map[num] = (loc_id, label)
+                num += 1
+
+    lines.append(f"  0. No match")
+    return "\n".join(lines), index_map
+
+
+def resolve_commitment_location(raw_location, conversation_context="", source="conversation"):
+    """Use an LLM to resolve a vague location mention to a specific spot.
+
+    Args:
+        raw_location: The location string from the commitment action (e.g. "upper North Hall")
+        conversation_context: Recent dialogue or letter exchange for context
+        source: "conversation" or "owl_mail"
+
+    Returns:
+        (location_id, label_or_none, display_name) or (None, None, None) on failure
+    """
+    import llm
+    from .settings import load_settings
+
+    location_list, index_map = _build_location_list()
+    if not index_map:
+        print("[LocationResolver] No locations available")
+        return None, None, None
+
+    settings = load_settings()
+    model = settings.get('commitment', {}).get('location_resolver_model',
+                'mistralai/mistral-small-3.2-24b-instruct:nitro')
+
+    system = (
+        "You resolve location mentions to numbered entries from a list. "
+        "Reply with ONLY a number. Nothing else."
+    )
+
+    prompt = (
+        f"The speaker mentioned: \"{raw_location}\"\n\n"
+    )
+    if conversation_context:
+        prompt += f"Context:\n{conversation_context}\n\n"
+    prompt += (
+        f"Which location best matches? Reply with the number only.\n"
+        f"If the mention is specific (e.g. 'upper part of the North Hall'), prefer the specific labeled entry.\n"
+        f"If no location matches, reply 0.\n\n"
+        f"{location_list}"
+    )
+
+    try:
+        result = llm.chat(
+            [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+            model=model, temperature=0.1, max_tokens=8,
+            context="location_resolver",
+        )
+        if not result:
+            print("[LocationResolver] No response from LLM")
+            return None, None, None
+
+        # Parse number from response
+        match = re.search(r'\d+', result.strip())
+        if not match:
+            print(f"[LocationResolver] Could not parse number from: {result}")
+            return None, None, None
+
+        num = int(match.group())
+        if num == 0:
+            print(f"[LocationResolver] LLM returned 0 (no match) for '{raw_location}'")
+            return None, None, None
+
+        if num not in index_map:
+            print(f"[LocationResolver] Number {num} out of range for '{raw_location}'")
+            return None, None, None
+
+        loc_id, label = index_map[num]
+
+        # Get display name and activity_id
+        loc_entry = _LOCATION_BY_ID.get(loc_id)
+        display = loc_entry["display"] if loc_entry else loc_id
+        activity_id = loc_entry.get("activity", "") if loc_entry else ""
+
+        label_str = f" ({label})" if label else ""
+        print(f"[LocationResolver] '{raw_location}' -> #{num} {display}{label_str} (id={loc_id})")
+
+        return loc_id, label, display
+
+    except Exception as e:
+        print(f"[LocationResolver] Error: {e}")
+        return None, None, None
 
 
 def _parse_commitment_datetime(text):
@@ -223,10 +444,19 @@ def validate_meet_action(action, npc_id, game_context):
     parsed_data includes: location_id, location_display, activity_id, game_time_start,
                          game_time_end, override_apply_time
     """
-    # Fuzzy match location
-    location_id, loc_entry = _fuzzy_match_location(action.get("location"))
+    # Resolve location via LLM (falls back to fuzzy match)
+    raw_location = action.get("location", "")
+    conversation_context = action.get("_conversation_context", "")
+    loc_id, spot_label, display = resolve_commitment_location(raw_location, conversation_context)
+    if loc_id:
+        loc_entry = _LOCATION_BY_ID.get(loc_id, {"activity": "", "display": display, "type": "Teleport"})
+        location_id = loc_id
+    else:
+        # Fallback to fuzzy string match
+        location_id, loc_entry = _fuzzy_match_location(raw_location)
+        spot_label = None
     if not location_id:
-        return False, f"Location '{action.get('location')}' not found in available locations", None
+        return False, f"Location '{raw_location}' not found in available locations", None
 
     # Parse datetime
     game_time_start = _parse_commitment_datetime(action.get("datetime"))
@@ -245,11 +475,12 @@ def validate_meet_action(action, npc_id, game_context):
 
     return True, None, {
         "location_id": location_id,
-        "location_display": loc_entry["display"],
+        "location_display": _display_with_label(loc_entry["display"], spot_label),
         "activity_id": loc_entry["activity"],
         "game_time_start": game_time_start,
         "game_time_end": game_time_end,
         "override_apply_time": override_apply_time,
+        "spot_label": spot_label,
     }
 
 
@@ -311,6 +542,9 @@ def _process_meet_action(action, speaker_id, player_name, game_context, lua_sock
         override_apply_time=parsed["override_apply_time"],
         is_companion=is_companion,
     )
+
+    if commitment_id and parsed.get("spot_label"):
+        _commitment_spot_labels[commitment_id] = parsed["spot_label"]
 
     if commitment_id:
         results.append(commitment_id)
@@ -450,7 +684,8 @@ def check_commitment_timers(game_context, lua_socket):
                 print(f"[Commitments] Activating: {c['id']} ({c['npc_id']} -> {c['location_display']})")
                 commitments_db.update_status(c["id"], "active")
                 if lua_socket:
-                    lua_socket.send_activate_commitment(c["npc_id"], c["activity_id"], c["location_id"])
+                    spot_label = _commitment_spot_labels.pop(c["id"], None)
+                    lua_socket.send_activate_commitment(c["npc_id"], c["activity_id"], c["location_id"], spot_label)
     except Exception as e:
         print(f"[Commitments] Error checking pending: {e}")
 
@@ -559,7 +794,19 @@ def _inject_commitment_event(commitment, event_type, player_name=None, current_g
         else:
             text = f"Commitment event: {event_type} at {location}"
 
+        # Cancellation events must never inherit the meeting's future start time.
+        # They should be stamped with "now", and if a caller forgets to pass the
+        # current game time we prefer to skip the history row rather than create
+        # another misleading future-dated entry.
+        if event_type in ("npc_cancelled", "player_cancelled") and not current_game_time:
+            print(
+                f"[Commitments] Skipping {event_type} history event for {npc_id}: "
+                f"missing current game time (meeting starts {commitment.get('game_time_start', '')})"
+            )
+            return
+
         # Use current game time if available, fall back to commitment start time
+        # for outcome events that naturally happen at/after the scheduled time.
         time_source = current_game_time or commitment.get("game_time_start", "")
         game_date, game_time = _split_game_datetime_for_history(time_source)
         entry = {
@@ -569,6 +816,7 @@ def _inject_commitment_event(commitment, event_type, player_name=None, current_g
             "speaker": "",
             "voiceName": npc_id,
             "target": "",
+            "targetId": None,
             "text": text,
             "isPlayer": False,
             "isAIResponse": False,
@@ -576,7 +824,9 @@ def _inject_commitment_event(commitment, event_type, player_name=None, current_g
             "location": location,
         }
         append_entry(entry)
-        print(f"[Commitments] Injected {event_type} event for {npc_id}: {text}")
+        print(
+            f"[Commitments] Injected {event_type} event for {npc_id} at {time_source}: {text}"
+        )
     except Exception as e:
         print(f"[Commitments] Error injecting event: {e}")
 
@@ -585,23 +835,24 @@ def _inject_commitment_event(commitment, event_type, player_name=None, current_g
 # Prompt Building
 # ============================================
 
-def create_commitment_from_ui(npc_id, location_id, game_time_start, game_context, lua_socket, player_name):
+def create_commitment_from_ui(npc_id, location_id, game_time_start, game_context, lua_socket, player_name, spot_label=None):
     """Create a commitment from the UI (not from LLM action tags).
 
     Args:
         npc_id: NPC voice name (e.g. "SebastianSallow")
-        location_id: Exact location key from LOCATION_ACTIVITIES (e.g. "HM_ThreeBroomsticks")
+        location_id: Exact location key (e.g. "HM_ThreeBroomsticks", "HM_PostOffice")
         game_time_start: Time string in 'YYYY/MM/DD HH:MM' format
         game_context: Current game context dict
         lua_socket: Socket for sending Lua commands
         player_name: Player character name
+        spot_label: Optional spot label for preferred placement (e.g. "Beasts Class")
 
     Returns (success, error_msg, commitment_dict)
     """
-    # Look up location
-    if location_id not in LOCATION_ACTIVITIES:
+    # Look up location (includes both scheduler activities and teleport-only spots)
+    loc_entry = _LOCATION_BY_ID.get(location_id)
+    if not loc_entry:
         return False, f"Unknown location: {location_id}", None
-    loc_entry = LOCATION_ACTIVITIES[location_id]
 
     # Compute derived times
     game_time_end = _add_game_minutes(game_time_start, COMMITMENT_WAIT_TIME_MIN)
@@ -618,11 +869,12 @@ def create_commitment_from_ui(npc_id, location_id, game_time_start, game_context
     is_companion = bool(companion_id and companion_id.lower() == npc_id.lower())
 
     # Create in DB
+    display = _display_with_label(loc_entry["display"], spot_label)
     commitment_id = commitments_db.create_commitment(
         npc_id=npc_id,
         target_id="player",
         location_id=location_id,
-        location_display=loc_entry["display"],
+        location_display=display,
         activity_id=loc_entry["activity"],
         game_time_start=game_time_start,
         game_time_end=game_time_end,
@@ -632,21 +884,26 @@ def create_commitment_from_ui(npc_id, location_id, game_time_start, game_context
     if not commitment_id:
         return False, "Failed to create commitment in database", None
 
+    # Store spot label for deferred activation
+    if spot_label:
+        _commitment_spot_labels[commitment_id] = spot_label
+
     # If override time has already passed, immediately activate
     current_time_str = _get_current_game_time_str(game_context) if game_context else None
     if current_time_str and current_time_str >= override_apply_time:
         commitments_db.update_status(commitment_id, "active")
         if lua_socket:
-            lua_socket.send_activate_commitment(npc_id, loc_entry["activity"], location_id)
+            lua_socket.send_activate_commitment(npc_id, loc_entry["activity"], location_id, spot_label)
         print(f"[Commitments] UI commitment immediately activated: {commitment_id}")
 
     # Inject dialogue history event
     npc_display = prettify_voice_name(npc_id)
     time_display = _format_time_display(game_time_start)
-    event_text = f"{player_name or 'The player'} arranged to meet {npc_display} at {loc_entry['display']} at {time_display}."
+    event_text = f"{player_name or 'The player'} arranged to meet {npc_display} at {display} at {time_display}."
     try:
         from .dialogue_db import append_entry
-        game_date, game_time = _split_game_datetime_for_history(game_time_start)
+        history_time_source = current_time_str or game_time_start
+        game_date, game_time = _split_game_datetime_for_history(history_time_source)
         entry = {
             "timestamp": int(_time.time()),
             "gameTime": game_time,
@@ -654,19 +911,24 @@ def create_commitment_from_ui(npc_id, location_id, game_time_start, game_context
             "speaker": "",
             "voiceName": npc_id,
             "target": "",
+            "targetId": None,
             "text": event_text,
             "isPlayer": False,
             "isAIResponse": False,
             "type": "commitment",
-            "location": loc_entry["display"],
+            "location": display,
         }
         append_entry(entry)
+        print(
+            f"[Commitments] Injected UI commitment creation event at current game time "
+            f"{history_time_source} (meeting starts {game_time_start})"
+        )
     except Exception as e:
         print(f"[Commitments] Error injecting UI commitment event: {e}")
 
     # Send notification
     _notify(lua_socket, commitment_id, "created",
-            f"Meeting {npc_display} at {loc_entry['display']} - {time_display}")
+            f"Meeting {npc_display} at {display} - {time_display}")
 
     # Suppress imminent reminders
     if current_time_str:
@@ -679,24 +941,16 @@ def create_commitment_from_ui(npc_id, location_id, game_time_start, game_context
     return True, None, commitment
 
 
-def build_commitment_action_instructions(player_name, is_current_companion=False):
+def build_commitment_action_instructions(player_name, is_current_companion=False, npc_id=None):
     """Build action instruction strings for the LLM prompt.
     Returns a list of strings to append to action_parts.
+    When npc_id is provided, only includes cancel instruction if the NPC has cancellable commitments.
+    Returns empty list for excluded NPCs (portraits, ghosts, dead, etc.).
     """
+    if npc_id and is_excluded_npc(npc_id):
+        return []
+
     parts = []
-
-    # Location list grouped by area
-    _COMMON_ROOM_IDS = {"HOG_GryffindorTower", "HOG_HufflepuffBasement", "HOG_Ravenclaw_CommonRoom", "HOG_Slytherin_CommonRoom"}
-    hogsmeade_locs = [e["display"] for lid, e in LOCATION_ACTIVITIES.items() if lid.startswith("HM_")]
-    common_room_locs = [e["display"] for lid, e in LOCATION_ACTIVITIES.items() if lid in _COMMON_ROOM_IDS]
-    hogwarts_locs = [e["display"] for lid, e in LOCATION_ACTIVITIES.items()
-                     if lid.startswith("HOG_") and lid not in _COMMON_ROOM_IDS]
-
-    locations_text = (
-        f"Hogsmeade: {', '.join(hogsmeade_locs)}\n"
-        f"Hogwarts: {', '.join(hogwarts_locs)}\n"
-        f"Common Rooms: {', '.join(common_room_locs)}"
-    )
 
     parts.append(
         f'- `[Action: Meet "Name" at "Location" on "M/D/YYYY H:MM AM/PM"]` — '
@@ -705,20 +959,62 @@ def build_commitment_action_instructions(player_name, is_current_companion=False
         f'Casual mentions of places do NOT count — there must be a clear, mutual agreement to meet. '
         f'{"Since you are already traveling with " + player_name + ", do NOT use this for immediate trips — only for future plans. " if is_current_companion else "For immediate trips, use the current date/time. "}'
         f'Use "{player_name}" as the name when meeting them. '
-        f'Do NOT commit and ask for agreement in the same response — wait for them to agree first.\n'
-        f'  Available locations:\n  {locations_text}'
+        f'Do NOT commit and ask for agreement in the same response — wait for them to agree first. '
+        f'Location can be any named place in Hogwarts or Hogsmeade.'
     )
-    parts.append(
-        '- `[Action: CancelCommitment ID]` — Cancel a previously made commitment by its ID (shown in your commitment context).'
-    )
+    # Only show cancel action when this NPC actually has cancellable commitments
+    has_cancellable = True  # default if no npc_id provided
+    if npc_id:
+        active = commitments_db.get_commitments_for_npc(npc_id, include_resolved=False)
+        has_cancellable = any(c["status"] in ("pending", "active", "arrived") for c in active)
+    if has_cancellable:
+        parts.append(
+            '- `[Action: CancelCommitment ID]` — Cancel a previously made commitment by its ID (shown in your commitment context). '
+            'ONLY use to back out of a meeting that you no longer want to attend. Do NOT use when a meeting is happening or completed — completion is tracked automatically.'
+        )
 
     return parts
 
 
+def build_owl_mail_commitment_instructions(player_name, npc_id=None):
+    """Build commitment action instructions for owl mail letter generation.
+
+    Simpler than the live-chat version: no companion logic, no turn-taking
+    rules. The NPC just proposes a meeting in its letter.
+    Returns a fully formatted markdown block ready to inject into the prompt,
+    or empty string for excluded NPCs.
+    """
+    if npc_id and is_excluded_npc(npc_id):
+        return ""
+    has_cancellable = False
+    if npc_id:
+        active = commitments_db.get_commitments_for_npc(npc_id, include_resolved=False)
+        has_cancellable = any(c["status"] in ("pending", "active", "arrived") for c in active)
+
+    cancel_line = (
+        '\n- `[Action: CancelCommitment ID]` — Cancel a previously made commitment by its ID (shown in your commitment context). '
+        'ONLY use to back out of a meeting that you no longer want to attend. Do NOT use when a meeting is happening or completed — completion is tracked automatically.'
+        if has_cancellable else ''
+    )
+
+    return (
+        f"**Actions:** You may OPTIONALLY include an action tag in your letter using `[Action: X]` format. "
+        f"The vast majority of letters should have NO action tag.\n"
+        f'- `[Action: Meet "{player_name}" at "Location" on "M/D/YYYY H:MM AM/PM"]` — '
+        f'Propose meeting {player_name} at a location. '
+        f'Use this when suggesting a meeting with {player_name} or accepting a meeting proposed by {player_name}. '
+        f'Casual mentions of places do NOT count — there must be a clear intent to meet. '
+        f'Location can be any named place in Hogwarts or Hogsmeade.'
+        f'{cancel_line}'
+    )
+
+
 def build_commitment_context(npc_id, player_name=None):
     """Build commitment context string for the NPC's prompt.
-    Returns formatted string or empty string if no commitments.
+    Returns formatted string or empty string if no commitments or excluded NPC.
     """
+    if npc_id and is_excluded_npc(npc_id):
+        return ""
     all_commitments = commitments_db.get_commitments_for_npc(npc_id, include_resolved=True)
     if not all_commitments:
         return ""

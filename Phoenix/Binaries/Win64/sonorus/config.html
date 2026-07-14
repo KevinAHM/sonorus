@@ -5,20 +5,24 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sonorus - Wizard's Grimoire</title>
+    <script>if (new URLSearchParams(location.search).has('overlay')) document.title += ' (Overlay)'</script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="stylesheet" href="css/main.css">
     <link rel="stylesheet" href="css/reasoning-toggle.css">
+    <link rel="stylesheet" href="css/provider-routing.css">
     <link rel="stylesheet" href="css/flatpickr.min.css">
+    <link rel="stylesheet" href="css/awesomplete.base.css">
     <link
         href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=Crimson+Text:ital,wght@0,400;0,600;1,400&display=swap"
         rel="stylesheet">
     <script src="js/confetti.min.js"></script>
-    <script src="js/vis-network.min.js"></script>
     <script src="js/graph.js"></script>
     <script src="js/reasoning-toggle.js"></script>
+    <script src="js/provider-routing.js"></script>
     <script src="js/lucide.min.js"></script>
     <script src="js/flatpickr.js"></script>
+    <script src="js/awesomplete.min.js"></script>
 </head>
 
 <body>
@@ -34,6 +38,8 @@
                                 data-lucide="sparkles"></i></span>Setup</a></li>
                 <li><a href="#chapterEvents"><span class="nav-icon"><i data-lucide="scroll"></i></span>Events</a></li>
                 <li><a href="#chapterServer"><span class="nav-icon"><i data-lucide="settings"></i></span>Server</a></li>
+                <li id="navVR" style="display: none;"><a href="#chapterVR"><span class="nav-icon"><i
+                                data-lucide="glasses"></i></span>VR</a></li>
                 <li><a href="#chapterTTS"><span class="nav-icon"><i data-lucide="volume-2"></i></span>Voice</a></li>
                 <li><a href="#chapterSTT"><span class="nav-icon"><i data-lucide="mic"></i></span>Speech</a></li>
                 <li><a href="#chapterLLMProvider"><span class="nav-icon"><i data-lucide="brain"></i></span>LLM</a></li>
@@ -48,10 +54,31 @@
                 </li>
                 <li><a href="#chapterCommitments"><span class="nav-icon"><i
                                 data-lucide="calendar-clock"></i></span>Commitments</a></li>
+                <li><a href="#chapterOwlPost"><span class="nav-icon"><i data-lucide="feather"></i></span>Owl Post</a>
+                </li>
                 <li><a href="#chapterMemory"><span class="nav-icon"><i data-lucide="brain"></i></span>Memory</a></li>
                 <li><a href="#chapterGameMods"><span class="nav-icon"><i data-lucide="gamepad-2"></i></span>Game
                         Mods</a></li>
             </ul>
+            <div class="nav-search" id="configSearchPanel">
+                <div class="nav-search-title">Find on Page</div>
+                <div class="nav-search-input-wrap">
+                    <input type="text" id="configSearchInput" class="nav-search-input" placeholder="Search"
+                        aria-label="Search configuration page">
+                    <button type="button" id="configSearchClear" class="nav-search-clear" aria-label="Clear search">
+                        <i data-lucide="x"></i>
+                    </button>
+                </div>
+                <div class="nav-search-controls">
+                    <button type="button" id="configSearchPrev" class="nav-search-btn" aria-label="Previous match">
+                        <i data-lucide="chevron-up"></i>
+                    </button>
+                    <div class="nav-search-status" id="configSearchStatus">0 matches</div>
+                    <button type="button" id="configSearchNext" class="nav-search-btn" aria-label="Next match">
+                        <i data-lucide="chevron-down"></i>
+                    </button>
+                </div>
+            </div>
         </div>
     </nav>
 
@@ -60,58 +87,78 @@
         <header class="grimoire-header">
             <h1 class="grimoire-title">Sonorus</h1>
             <p class="grimoire-subtitle">Configuration Grimoire <span id="versionBadge"
-                    style="font-size: 0.8em; opacity: 0.7;"></span></p>
+                    style="font-size: 0.8em; background: rgba(212, 196, 160, 0.7); padding: 2px 8px; border-radius: 10px; color: var(--ink-brown);">v0.0.0</span>
+            </p>
             <div class="server-status">
                 <span class="status-dot" id="serverStatus"></span>
                 <span id="serverStatusText">Connected to Server</span>
-                <span class="vr-badge" id="vrBadge" style="display: none;" title="">
+                <span class="vr-badge" id="vrBadge" style="display: none; cursor: pointer;" title=""
+                    onclick="scrollToSection('chapterVR')">
                     <i data-lucide="rectangle-goggles"></i>
                 </span>
             </div>
             <div class="celestial-clock" id="gameTimeDisplay" style="display: none;">
-                <div class="clock-frame">
-                    <div class="clock-ornament clock-ornament-tl"></div>
-                    <div class="clock-ornament clock-ornament-tr"></div>
-                    <div class="clock-ornament clock-ornament-bl"></div>
-                    <div class="clock-ornament clock-ornament-br"></div>
-
-                    <div class="clock-face">
-                        <div class="clock-marks">
-                            <span class="clock-mark clock-mark-12">XII</span>
-                            <span class="clock-mark clock-mark-3">III</span>
-                            <span class="clock-mark clock-mark-6">VI</span>
-                            <span class="clock-mark clock-mark-9">IX</span>
+                <div class="tempus-row">
+                    <!-- Companion Panel (left of clock) -->
+                    <div class="tempus-panel tempus-panel-left tempus-hidden" id="companionPanel">
+                        <div class="tempus-panel-inner">
+                            <div class="tempus-panel-label"><i data-lucide="shield"></i> Companion</div>
+                            <div class="tempus-panel-body" id="companionBody"></div>
                         </div>
+                    </div>
 
-                        <div class="clock-center">
-                            <div class="celestial-body" id="celestialBody">
-                                <span class="sun-icon"><i data-lucide="sun"></i></span>
-                                <span class="moon-icon"><i data-lucide="moon"></i></span>
+                    <div class="clock-frame">
+                        <div class="clock-ornament clock-ornament-tl"></div>
+                        <div class="clock-ornament clock-ornament-tr"></div>
+                        <div class="clock-ornament clock-ornament-bl"></div>
+                        <div class="clock-ornament clock-ornament-br"></div>
+
+                        <div class="clock-face">
+                            <div class="clock-marks">
+                                <span class="clock-mark clock-mark-12">XII</span>
+                                <span class="clock-mark clock-mark-3">III</span>
+                                <span class="clock-mark clock-mark-6">VI</span>
+                                <span class="clock-mark clock-mark-9">IX</span>
+                            </div>
+
+                            <div class="clock-center">
+                                <div class="celestial-body" id="celestialBody">
+                                    <span class="sun-icon"><i data-lucide="sun"></i></span>
+                                    <span class="moon-icon"><i data-lucide="moon"></i></span>
+                                </div>
+                            </div>
+
+                            <div class="clock-hands">
+                                <div class="hour-hand" id="hourHand"></div>
+                                <div class="minute-hand" id="minuteHand"></div>
+                            </div>
+
+                            <!-- Loading/No Data State -->
+                            <div class="clock-no-data" id="clockNoData">
+                                <span class="clock-waiting-icon"><i data-lucide="loader"></i></span>
                             </div>
                         </div>
 
-                        <div class="clock-hands">
-                            <div class="hour-hand" id="hourHand"></div>
-                            <div class="minute-hand" id="minuteHand"></div>
+                        <div class="clock-info">
+                            <div class="clock-time" id="gameTimeText">Awaiting Game Data</div>
+                            <div class="clock-date" id="gameDateText"></div>
                         </div>
 
-                        <!-- Loading/No Data State -->
-                        <div class="clock-no-data" id="clockNoData">
-                            <span class="clock-waiting-icon"><i data-lucide="loader"></i></span>
+                        <!-- Time Flow Indicator (clickable to reveal controls) -->
+                        <div class="time-flow-toggle" id="timeFlowToggle" onclick="toggleTimeDilationPanel()"
+                            title="Click to adjust time flow">
+                            <span class="time-flow-icon"><i data-lucide="hourglass"></i></span>
+                            <span class="time-flow-rate" id="timeFlowRate">×3</span>
+                            <span class="time-flow-label">Tempus</span>
                         </div>
                     </div>
 
-                    <div class="clock-info">
-                        <div class="clock-time" id="gameTimeText">Awaiting Game Data</div>
-                        <div class="clock-date" id="gameDateText"></div>
-                    </div>
-
-                    <!-- Time Flow Indicator (clickable to reveal controls) -->
-                    <div class="time-flow-toggle" id="timeFlowToggle" onclick="toggleTimeDilationPanel()"
-                        title="Click to adjust time flow">
-                        <span class="time-flow-icon"><i data-lucide="hourglass"></i></span>
-                        <span class="time-flow-rate" id="timeFlowRate">×3</span>
-                        <span class="time-flow-label">Tempus</span>
+                    <!-- Followers Panel (right of clock) -->
+                    <div class="tempus-panel tempus-panel-right tempus-hidden" id="followersPanel">
+                        <div class="tempus-panel-inner">
+                            <div class="tempus-panel-label"><i data-lucide="footprints"></i> Followers</div>
+                            <div class="tempus-panel-body" id="followersBody"></div>
+                        </div>
                     </div>
                 </div>
 
@@ -185,12 +232,12 @@
                         <option value="DE_DE">German</option>
                         <option value="PT_BR">Portuguese (Brazilian)</option>
                         <option value="JA_JP">Japanese</option>
-                        <option value="AR_AE">Arabic</option>
-                        <option value="PL_PL">Polish</option>
-                        <option value="RU_RU">Russian</option>
-                        <option value="KO_KR">Korean</option>
-                        <option value="ZH_CN">Simplified Chinese</option>
-                        <option value="ZH_TW">Traditional Chinese</option>
+                        <option value="AR_AE">Arabic (English voices)</option>
+                        <option value="PL_PL">Polish (English voices)</option>
+                        <option value="RU_RU">Russian (English voices)</option>
+                        <option value="KO_KR">Korean (English voices)</option>
+                        <option value="ZH_CN">Simplified Chinese (English voices)</option>
+                        <option value="ZH_TW">Traditional Chinese (English voices)</option>
                     </select>
                 </div>
 
@@ -225,6 +272,10 @@
                                 <span id="setupStep1BtnText">Extract Localization</span>
                             </button>
                         </div>
+                        <div class="setup-error setup-step-error" id="setupStep1Error" style="display: none;">
+                            <div class="setup-error-title">Error</div>
+                            <div class="setup-error-message" id="setupStep1ErrorMessage"></div>
+                        </div>
                     </div>
 
                     <!-- Step 2: Extract Voice References -->
@@ -247,6 +298,10 @@
                             <button class="btn btn-primary" id="setupStep2Btn" onclick="startVoiceExtraction()">
                                 <span id="setupStep2BtnText">Extract Voices</span>
                             </button>
+                        </div>
+                        <div class="setup-error setup-step-error" id="setupStep2Error" style="display: none;">
+                            <div class="setup-error-title">Error</div>
+                            <div class="setup-error-message" id="setupStep2ErrorMessage"></div>
                         </div>
                     </div>
                 </div><!-- End setupIntro -->
@@ -280,6 +335,10 @@
                             <span id="setupStep3BtnText">Test Voice</span>
                         </button>
                     </div>
+                    <div class="setup-error setup-step-error" id="setupStep3Error" style="display: none;">
+                        <div class="setup-error-title">Error</div>
+                        <div class="setup-error-message" id="setupStep3ErrorMessage"></div>
+                    </div>
                 </div>
 
                 <!-- Step 4: Test LLM Configuration -->
@@ -308,12 +367,10 @@
                             <span id="setupStep4BtnText">Test Models</span>
                         </button>
                     </div>
-                </div>
-
-                <!-- Error Display -->
-                <div class="setup-error" id="setupError" style="display: none;">
-                    <div class="setup-error-title">Error</div>
-                    <div class="setup-error-message" id="setupErrorMessage"></div>
+                    <div class="setup-error setup-step-error" id="setupStep4Error" style="display: none;">
+                        <div class="setup-error-title">Error</div>
+                        <div class="setup-error-message" id="setupStep4ErrorMessage"></div>
+                    </div>
                 </div>
             </div>
         </section>
@@ -328,22 +385,62 @@
                 <span class="chapter-toggle"><i data-lucide="chevron-down"></i></span>
             </div>
             <div class="chapter-content">
-                <div class="events-list-wrapper">
-                    <div id="eventsList" class="events-list">
-                        <div class="events-empty">No events logged yet</div>
+                <div class="tabs" id="eventsTabs">
+                    <button class="tab active" onclick="switchTab(event, 'eventsLogTab')">Log</button>
+                    <button class="tab" onclick="switchTab(event, 'eventsCostTab')">Cost</button>
+                </div>
+
+                <div class="tab-content active" id="eventsLogTab">
+                    <div class="events-list-wrapper">
+                        <div id="eventsList" class="events-list">
+                            <div class="events-empty">No events logged yet</div>
+                        </div>
+                    </div>
+                    <div
+                        style="margin-top: var(--space-md); display: flex; gap: var(--space-sm); align-items: center; flex-wrap: wrap;">
+                        <button id="clearEventsBtn" class="btn btn-secondary" onclick="clearEvents()">Clear
+                            Events</button>
+                        <button class="btn btn-secondary" id="deleteLogsBtn" onclick="deleteLogsWithConfirm()">Delete
+                            Logs</button>
+                        <button class="btn btn-secondary" id="copyLogsBtn" onclick="copyLogsToClipboard()">
+                            <i data-lucide="clipboard-copy"></i> Copy Logs
+                        </button>
+                        <span class="field-hint" style="margin: 0;">For troubleshooting, DM logs to dev on <a
+                                href="https://discord.gg/FGqvRbbSXx" target="_blank"
+                                style="color: var(--gold-primary);">Discord</a></span>
                     </div>
                 </div>
-                <div
-                    style="margin-top: var(--space-md); display: flex; gap: var(--space-sm); align-items: center; flex-wrap: wrap;">
-                    <button id="clearEventsBtn" class="btn btn-secondary" onclick="clearEvents()">Clear Events</button>
-                    <button class="btn btn-secondary" id="deleteLogsBtn" onclick="deleteLogsWithConfirm()">Delete
-                        Logs</button>
-                    <button class="btn btn-secondary" id="copyLogsBtn" onclick="copyLogsToClipboard()">
-                        <i data-lucide="clipboard-copy"></i> Copy Logs
-                    </button>
-                    <span class="field-hint" style="margin: 0;">For troubleshooting, DM logs to dev on <a
-                            href="https://discord.gg/FGqvRbbSXx" target="_blank"
-                            style="color: var(--gold-primary);">Discord</a></span>
+
+                <div class="tab-content" id="eventsCostTab">
+                    <div class="event-cost-controls">
+                        <div class="field-group" style="margin-bottom: 0;">
+                            <label class="field-label" for="eventCostTimeframe">Timeframe</label>
+                            <select id="eventCostTimeframe" onchange="loadSystemEventCosts()">
+                                <option value="today" selected>Today</option>
+                                <option value="yesterday">Yesterday</option>
+                                <option value="all">All Time</option>
+                            </select>
+                        </div>
+                        <p class="field-hint event-cost-summary" id="eventCostSummary">Loading cost totals...</p>
+                    </div>
+
+                    <div class="event-cost-table-wrapper">
+                        <table class="history-table event-cost-table">
+                            <thead>
+                                <tr>
+                                    <th>Feature</th>
+                                    <th>Module</th>
+                                    <th>Calls</th>
+                                    <th>Cost</th>
+                                </tr>
+                            </thead>
+                            <tbody id="eventCostTableBody">
+                                <tr>
+                                    <td colspan="4" class="event-cost-empty">Loading cost totals...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
         </section>
@@ -409,6 +506,92 @@
             </div>
         </section>
 
+        <!-- Virtual Reality Section (auto-shown when VR headset detected) -->
+        <section class="chapter" id="chapterVR" style="display: none;">
+            <div class="chapter-header" onclick="toggleChapter('chapterVR')">
+                <h2 class="chapter-title">
+                    <span class="chapter-icon"><i data-lucide="glasses"></i></span>
+                    Virtual Reality
+                </h2>
+                <span class="chapter-toggle"><i data-lucide="chevron-down"></i></span>
+            </div>
+            <div class="chapter-content">
+                <div class="toggle-wrapper">
+                    <span class="toggle-label">VR Head Tracking</span>
+                    <label class="toggle">
+                        <input type="checkbox" id="audioVrTracking" checked
+                            onchange="updateSetting('audio.vr_tracking', this.checked)">
+                        <span class="toggle-track">
+                            <span class="toggle-thumb"></span>
+                        </span>
+                    </label>
+                </div>
+                <p class="field-hint">Track VR headset rotation for 3D audio spatialization and spell casting pose
+                    detection.</p>
+
+                <div id="vrPluginStatus"
+                    style="margin-top: var(--space-sm); padding: var(--space-sm) var(--space-md); background: var(--parchment-mid); border: 1px solid var(--leather-border); border-radius: var(--border-radius);">
+                    <div
+                        style="display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-xs);">
+                        <span style="font-weight: 600; font-size: 0.85rem;">
+                            <i data-lucide="plug" style="width: 14px; height: 14px; vertical-align: middle;"></i>
+                            Sonorus UEVR Plugin
+                            <span id="vrPluginBadge" style="margin-left: var(--space-xs);"><span
+                                    class="badge badge-muted">Checking...</span></span>
+                        </span>
+                        <button class="btn btn-primary btn-sm" id="vrPluginInstallBtn" style="display: none;"
+                            onclick="installVrPlugin()">
+                            Install Plugin
+                        </button>
+                    </div>
+                    <p class="field-hint" style="margin: 0;">
+                        Requires the Sonorus UEVR plugin installed in your Hogwarts Legacy UEVR profile.
+                        Will also install HMD audio fix if your profile doesn't already have one.
+                        New to Hogwarts Legacy in VR? See the <a
+                            href="https://github.com/DarkSigmaDevelopment/Hogwarts-Legacy-VR-how-to" target="_blank"
+                            rel="noopener">VR setup guide</a>.
+                    </p>
+                    <p class="field-hint" id="vrPluginPath"
+                        style="margin: var(--space-xs) 0 0 0; font-size: 0.7rem; opacity: 0.6; word-break: break-all;">
+                    </p>
+                </div>
+
+                <div class="toggle-wrapper" style="margin-top: var(--space-md);">
+                    <span class="toggle-label">Apply VR Preset</span>
+                    <label class="toggle">
+                        <input type="checkbox" id="vrPresetEnabled" checked
+                            onchange="updateSetting('vr.preset_enabled', this.checked)">
+                        <span class="toggle-track">
+                            <span class="toggle-thumb"></span>
+                        </span>
+                    </label>
+                </div>
+                <p class="field-hint">Automatically optimizes settings for VR when a headset is detected:</p>
+                <ul class="field-hint"
+                    style="margin: var(--space-xs) 0 0 var(--space-md); padding: 0; list-style: disc;">
+                    <li>Enables Crosshair Targeting (skip target selection LLM)</li>
+                    <li>Disables Wait For Capture (Vision agent)</li>
+                    <li>Disables Voice Player Messages</li>
+                    <li>Disables Companion Move Commands</li>
+                    <li>Enables Cast Spells With Voice</li>
+                    <li>Enables Open Mic (turn timeout set to 2s)</li>
+                </ul>
+
+                <div
+                    style="margin-top: var(--space-md); padding: var(--space-sm) var(--space-md); background: var(--parchment-mid); border: 1px solid var(--leather-border); border-radius: var(--border-radius);">
+                    <p class="field-hint" style="margin: 0; font-weight: 600; margin-bottom: var(--space-xs);">
+                        <i data-lucide="info" style="width: 14px; height: 14px; vertical-align: middle;"></i>
+                        VR Tips
+                    </p>
+                    <ul class="field-hint" style="margin: 0 0 0 var(--space-md); padding: 0; list-style: disc;">
+                        <li>Toggle open mic by holding your hand near your mouth and <b>pressing grip</b>.</li>
+                        <li>Stop a conversation by holding your hand near your mouth and <b>holding grip</b>.</li>
+                        <li>Cast spells by extending your wand outwards with open mic on and saying the spell name.</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
         <!-- TTS Provider Section -->
         <section class="chapter" id="chapterTTS">
             <div class="chapter-header" onclick="toggleChapter('chapterTTS')">
@@ -454,6 +637,62 @@
                     <p class="field-hint"></p>
                 </div>
 
+                <!-- OmniVoice Setup Panel -->
+                <div id="omnivoiceSetup" style="display: none;">
+                    <div id="omnivoiceGpuInfo" class="field-group">
+                        <p class="field-hint" id="omnivoiceGpuName" style="margin-bottom: var(--space-sm);"></p>
+                    </div>
+                    <div id="omnivoiceGpuPicker" class="field-group" style="display: none;">
+                        <label class="field-label">OmniVoice GPU</label>
+                        <p class="field-hint">Choose which GPU loads the local voice model. Auto picks the GPU with the most free VRAM.</p>
+                        <select id="omnivoiceGpuSelect" onchange="updateOmniVoiceGpu(this.value)"></select>
+                    </div>
+                    <!-- Step 1: Install deps (shown when torch not installed) -->
+                    <div id="omnivoiceInstallSection" style="display: none;">
+                        <button class="btn btn-primary" id="omnivoiceInstallBtn" onclick="installOmniVoiceDeps()">
+                            Install OmniVoice Dependencies
+                        </button>
+                        <p class="field-hint" id="omnivoiceInstallHint" style="margin-top: var(--space-xs);">Requires ~4GB disk space. Downloads PyTorch and model dependencies.</p>
+                    </div>
+                    <!-- Step 2: Voice setup (shown when deps installed but voices need processing) -->
+                    <div id="omnivoiceVoiceSetup" style="display: none;">
+                        <label class="field-label">Voice Setup Required</label>
+                        <p class="field-hint" id="omnivoiceVoiceCount" style="margin-bottom: var(--space-sm);"></p>
+                        <div id="omnivoiceSetupProgress" style="display: none; margin-bottom: var(--space-sm);">
+                            <div class="voice-progress-row">
+                                <div class="voice-progress-bar">
+                                    <div class="voice-progress-fill reference" id="omnivoiceProgressFill" style="width: 0%"></div>
+                                </div>
+                                <span class="voice-progress-count" id="omnivoiceProgressCount">0/0</span>
+                            </div>
+                            <p class="field-hint" id="omnivoiceProgressStatus" style="margin-top: var(--space-xs);"></p>
+                        </div>
+                        <div id="omnivoiceSttWarning" style="color: var(--warning); margin-bottom: var(--space-sm); display: none;">
+                            An STT service must be configured to transcribe voice references. Configure one in the Speech-to-Text section.
+                        </div>
+                        <button class="btn btn-primary" id="omnivoicePretokenizeBtn" onclick="pretokenizeOmniVoice()" style="display: none;">
+                            Process Voice References
+                        </button>
+                    </div>
+                    <!-- Resource meters (shown when deps installed) -->
+                    <div id="omnivoiceVramIndicator" class="vram-indicator" style="display: none;">
+                        <label class="field-label">GPU VRAM</label>
+                        <div class="vram-bar-container">
+                            <div class="vram-bar"><div class="vram-fill"></div></div>
+                            <span class="vram-value">-- / -- GB</span>
+                        </div>
+                        <p class="field-hint"></p>
+                    </div>
+                    <div id="omnivoiceRamIndicator" class="vram-indicator" style="display: none;">
+                        <label class="field-label">System RAM</label>
+                        <div class="vram-bar-container">
+                            <div class="vram-bar"><div class="vram-fill"></div></div>
+                            <span class="vram-value">-- / -- GB</span>
+                        </div>
+                        <p class="field-hint"></p>
+                    </div>
+                </div>
+
                 <!-- Player Voice Section (disabled when TTS is disabled) -->
                 <div id="playerVoiceSection">
                     <div class="divider"><i data-lucide="star"></i> Player Voice <i data-lucide="star"></i></div>
@@ -471,8 +710,9 @@
                     <p class="field-hint" style="margin-top: var(--space-xs);">When enabled, your messages will be
                         spoken aloud with TTS and lip sync on your character.</p>
 
-                    <div id="playerVoiceSubSettings">
-                        <div class="toggle-wrapper" style="margin-top: var(--space-sm);">
+                    <div id="playerVoiceSubSettings"
+                        style="border-left: 2px solid var(--gold-dark); margin-left: var(--space-sm); padding-left: var(--space-md); margin-top: var(--space-md); padding-bottom: var(--space-sm);">
+                        <div class="toggle-wrapper" style="padding-top: 0;">
                             <span class="toggle-label">Spatialize Player Voice</span>
                             <label class="toggle">
                                 <input type="checkbox" id="playerVoiceSpatial"
@@ -482,24 +722,21 @@
                                 </span>
                             </label>
                         </div>
-                        <p class="field-hint" style="margin-top: var(--space-xs);">Apply 3D spatial audio to the
+                        <p class="field-hint">Apply 3D spatial audio to the
                             player's
                             voice (HRTF, reverb, position tracking). Disable if using a VR mod or if you prefer centered
                             stereo.</p>
 
-                        <div class="field-group" id="playerVoiceSettings" style="margin-top: var(--space-md);">
+                        <div class="field-group" id="playerVoiceSettings">
                             <label class="field-label">Player Voice Override</label>
-                            <p class="field-hint">Optional override for player voice. Leave empty to auto-detect from
-                                your
-                                character's gender (PlayerMale/PlayerFemale). To use your own voice, place a 5-15 second
-                                WAV clip named <code>YourVoiceId_reference_15s.wav</code> in the
-                                <code>voice_references</code> folder.
+                            <p class="field-hint" id="playerVoiceReferenceHint">Optional override for player voice.
+                                Leave empty to auto-detect from your character's gender (PlayerMale/PlayerFemale).
                             </p>
                             <input type="text" id="playerVoiceName" placeholder="Auto-detect from game"
                                 onchange="updateSetting('conversation.player_voice_name', this.value)">
                         </div>
 
-                        <div class="field-group" style="margin-top: var(--space-md);">
+                        <div class="field-group" id="playerVoiceModelGroup">
                             <label class="field-label">Player TTS Model Override</label>
                             <p class="field-hint">If you prefer a specific TTS model for your voice, enter it here.
                                 Leave empty to use the default model from your TTS provider settings.</p>
@@ -678,7 +915,7 @@
 
                 <div class="divider"><i data-lucide="star"></i> Open Mic Mode <i data-lucide="star"></i></div>
 
-                <div class="field-group">
+                <div class="field-group" id="open_mic_toggle_group">
                     <label class="field-label">Enable Open Mic</label>
                     <p class="field-hint">Continuous listening with automatic turn detection. Hotkey becomes toggle
                         instead of hold-to-talk.</p>
@@ -745,9 +982,11 @@
                 <div class="field-group">
                     <label class="field-label">Provider</label>
                     <select id="llmProvider" onchange="switchLLMProvider(this.value)">
-                        <option value="gemini">Google Gemini</option>
+                        <option value="gemini">Google Gemini (Limited Free)</option>
                         <option value="openrouter">OpenRouter (Recommended)</option>
                         <option value="openai">OpenAI</option>
+                        <option value="ollama">Ollama Cloud (Free, Small Models)</option>
+                        <option value="llamacpp">llama.cpp</option>
                     </select>
                     <p class="field-hint" id="llmProviderHint" style="margin-top: 8px;"></p>
                 </div>
@@ -789,6 +1028,9 @@
                         describe the scene.
                         These descriptions enrich conversation context so NPCs can reference your surroundings.
                     </p>
+                    <p id="visionProviderWarning" class="field-hint"
+                        style="color: var(--danger); margin-bottom: var(--space-md); display: none; font-weight: 600; background: rgba(139, 0, 0, 0.1); padding: var(--space-sm); border-radius: 4px; border: 1px solid var(--danger);">
+                    </p>
                     <div id="agent_vision_settings">
                         <!-- Generated dynamically from AGENT_CONFIGS -->
                     </div>
@@ -809,7 +1051,7 @@
                         </p>
                         <div class="field-group">
                             <label class="toggle-label">
-                                <input type="checkbox" id="conv_target_use_crosshair"
+                                <input type="checkbox" id="conv_target_use_crosshair" checked
                                     onchange="updateSetting('conversation.target_selection_use_crosshair', this.checked)">
                                 <span>Use Crosshair Targeting</span>
                             </label>
@@ -831,7 +1073,7 @@
                             <input type="text" id="conv_interjection_model" placeholder="gemini-2.5-flash-lite"
                                 onchange="updateSetting('conversation.interjection_model', this.value)">
                         </div>
-                        <div class="field-group">
+                        <div class="field-group" id="convSpeakerMaxTokensGroup">
                             <label class="field-label">Speaker Selection Max Tokens</label>
                             <p class="field-hint">Max tokens for speaker selection. Needs enough for a dialogue line +
                                 target identification.</p>
@@ -857,11 +1099,48 @@
                             Passes text chat input through a small LLM to fix grammar and spelling before sending to
                             NPCs.
                         </p>
+                        <p id="inputCorrectionProviderWarning" class="field-hint"
+                            style="color: var(--danger); margin-bottom: var(--space-md); display: none; font-weight: 600; background: rgba(139, 0, 0, 0.1); padding: var(--space-sm); border-radius: 4px; border: 1px solid var(--danger);">
+                        </p>
                         <div class="field-group">
                             <label class="field-label">Input Correction Model</label>
                             <p class="field-hint">A tiny, fast model to clean up typos. Does not alter meaning.</p>
                             <input type="text" id="conv_input_correction_model" placeholder="gemini-2.5-flash-lite"
                                 onchange="updateSetting('conversation.input_correction_model', this.value)">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Background Agents (collapsed by default) -->
+                <div class="sub-panel collapsed">
+                    <div class="sub-panel-header" onclick="toggleSubPanel(this)">
+                        <span class="sub-panel-title">
+                            <span class="sub-panel-icon"><i data-lucide="sparkles"></i></span>
+                            Background Agents
+                        </span>
+                        <span class="sub-panel-toggle"><i data-lucide="chevron-down"></i></span>
+                    </div>
+                    <div class="sub-panel-content">
+                        <p class="field-hint" style="margin-bottom: var(--space-md);">
+                            Background agents make occasional behind-the-scenes decisions outside active conversations.
+                        </p>
+                        <div class="field-group">
+                            <label class="field-label">Companion Commentary Model</label>
+                            <p class="field-hint">Used by the event-driven commentary selector to decide whether your
+                                companion should make an unprompted remark after a notable gameplay event.</p>
+                            <input type="text" id="background_commentary_model" placeholder="gemini-2.5-flash-lite"
+                                onchange="updateSetting('conversation.commentary_model', this.value)">
+                        </div>
+                        <div class="field-group" id="backgroundCommentaryMaxTokensGroup">
+                            <label class="field-label">Companion Commentary Max Tokens</label>
+                            <p class="field-hint">High default (8192) accounts for reasoning tokens. Reduce if provider
+                                errors occur.</p>
+                            <div class="range-wrapper">
+                                <input type="range" id="background_commentary_max_tokens" min="128" max="16384"
+                                    step="128" value="8192"
+                                    oninput="updateRangeValue('background_commentary_max_tokens', this.value + ' tokens'); updateSetting('conversation.commentary_max_tokens', parseInt(this.value))">
+                                <span class="range-value" id="background_commentary_max_tokensValue">8192 tokens</span>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -900,6 +1179,7 @@
                             <button class="btn btn-secondary" style="margin-top: var(--space-sm);"
                                 onclick="resetInterjectionPromptMode()">Reset to Default</button>
                         </div>
+
                     </div>
                 </div>
             </div>
@@ -935,13 +1215,13 @@
                         </p>
                         <div class="field-group">
                             <label class="field-label">Chat Model</label>
-                            <input type="text" id="conv_chat_model" placeholder="gemini-3-flash"
+                            <input type="text" id="conv_chat_model" placeholder="gemini-3-flash-preview"
                                 onchange="updateSetting('conversation.chat_model', this.value); updateGemini3TempHint();"
                                 oninput="updateGemini3TempHint();">
                         </div>
                         <div class="field-group">
                             <label class="field-label">Temperature</label>
-                            <p class="field-hint">Higher = more creative but less predictable</p>
+                            <p class="field-hint">Higher = less predictable and coherent</p>
                             <div class="range-wrapper">
                                 <input type="range" id="conv_temperature" min="0" max="2" step="0.1" value="1.0"
                                     oninput="updateRangeValue('conv_temperature', this.value); updateSetting('conversation.temperature', parseFloat(this.value))">
@@ -953,7 +1233,7 @@
                                 best results.
                             </p>
                         </div>
-                        <div class="field-group">
+                        <div class="field-group" id="convMaxTokensGroup">
                             <label class="field-label">Max Response Length</label>
                             <p class="field-hint">High default (8192) accounts for reasoning tokens. Reduce if
                                 unsupported.</p>
@@ -978,7 +1258,8 @@
                     <div class="sub-panel-content">
                         <div class="field-group">
                             <label class="field-label">Max Conversation Turns</label>
-                            <p class="field-hint">Hard limit on NPC back-and-forth before pausing. Prevents runaway
+                            <p class="field-hint">Hard limit on NPC back-and-forth before pausing. Used by Default mode;
+                                Continuous is unbound. Prevents runaway
                                 conversations.</p>
                             <input type="number" id="conv_max_turns" min="1" max="20" value="6"
                                 onchange="updateSetting('conversation.max_turns', parseInt(this.value))">
@@ -999,20 +1280,6 @@
                         </p>
 
                         <div class="toggle-wrapper">
-                            <span class="toggle-label">Include Mission Info for Companions</span>
-                            <label class="toggle">
-                                <input type="checkbox" id="conv_mission_context"
-                                    onchange="updateSetting('conversation.mission_context', this.checked)">
-                                <span class="toggle-track">
-                                    <span class="toggle-thumb"></span>
-                                </span>
-                            </label>
-                        </div>
-                        <p class="field-hint">
-                            Companion knows your current quest objective and may reference it naturally.
-                        </p>
-
-                        <div class="toggle-wrapper">
                             <span class="toggle-label">Per-Sentence Subtitles</span>
                             <label class="toggle">
                                 <input type="checkbox" id="conv_sentence_subtitles"
@@ -1026,6 +1293,133 @@
                             Update subtitles sentence-by-sentence as the NPC speaks. When off, shows the full
                             response text at once.
                         </p>
+
+                        <div class="toggle-wrapper">
+                            <span class="toggle-label">First-Person Conversations</span>
+                            <label class="toggle">
+                                <input type="checkbox" id="conv_conversation_fpv"
+                                    onchange="updateSetting('conversation.conversation_fpv', this.checked); updateConversationFpvSubSettings(this.checked)">
+                                <span class="toggle-track">
+                                    <span class="toggle-thumb"></span>
+                                </span>
+                            </label>
+                        </div>
+                        <p class="field-hint" style="margin-bottom: var(--space-md);">
+                            Auto-enable first-person view when talking to NPCs. Restores third-person when conversation
+                            ends.
+                        </p>
+
+                        <div id="conversationFpvSubSettings"
+                            style="border-left: 2px solid var(--gold-dark); margin-left: var(--space-sm); padding-left: var(--space-md); margin-top: var(--space-md); padding-bottom: var(--space-sm); margin-bottom: var(--space-md);">
+                            <div class="field-group" style="margin-bottom: 0;">
+                                <label class="field-label">Fade Transition Duration</label>
+                                <p class="field-hint">Choose how quickly the first-person camera fade transition
+                                    happens.</p>
+                                <select id="conv_conversation_fpv_transition"
+                                    onchange="updateSetting('conversation.conversation_fpv_transition', this.value)">
+                                    <option value="normal">Normal</option>
+                                    <option value="fast">Fast</option>
+                                    <option value="off">Off</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="toggle-wrapper">
+                            <span class="toggle-label">Look at Speaker</span>
+                            <label class="toggle">
+                                <input type="checkbox" id="conv_conversation_look_at_speaker"
+                                    onchange="updateSetting('conversation.conversation_look_at_speaker', this.checked)">
+                                <span class="toggle-track">
+                                    <span class="toggle-thumb"></span>
+                                </span>
+                            </label>
+                        </div>
+                        <p class="field-hint" style="margin-bottom: var(--space-md);">
+                            Camera automatically looks at the speaking NPC during conversations.
+                        </p>
+
+                        <div class="toggle-wrapper">
+                            <span class="toggle-label">Follow-Up Nudge</span>
+                            <label class="toggle">
+                                <input type="checkbox" id="conv_followup_nudge"
+                                    onchange="updateSetting('conversation.followup_nudge', this.checked)">
+                                <span class="toggle-track">
+                                    <span class="toggle-thumb"></span>
+                                </span>
+                            </label>
+                        </div>
+                        <p class="field-hint" style="margin-bottom: var(--space-md);">
+                            If an NPC asks you a question and you don't respond, they follow up.
+                        </p>
+
+                        <div class="toggle-wrapper">
+                            <span class="toggle-label">Farewell Line</span>
+                            <label class="toggle">
+                                <input type="checkbox" id="conv_farewell_line"
+                                    onchange="updateSetting('conversation.farewell_line', this.checked)">
+                                <span class="toggle-track">
+                                    <span class="toggle-thumb"></span>
+                                </span>
+                            </label>
+                        </div>
+                        <p class="field-hint" style="margin-bottom: var(--space-md);">
+                            NPCs say goodbye before walking away after a conversation goes idle.
+                        </p>
+
+                        <div class="toggle-wrapper">
+                            <span class="toggle-label">Include Mission Info for Companions</span>
+                            <label class="toggle">
+                                <input type="checkbox" id="conv_mission_context"
+                                    onchange="updateSetting('conversation.mission_context', this.checked)">
+                                <span class="toggle-track">
+                                    <span class="toggle-thumb"></span>
+                                </span>
+                            </label>
+                        </div>
+                        <p class="field-hint" style="margin-bottom: var(--space-md);">
+                            Companion knows your current quest objective and may reference it naturally.
+                        </p>
+
+                        <div class="toggle-wrapper">
+                            <span class="toggle-label">Enable Companion Commentary</span>
+                            <label class="toggle">
+                                <input type="checkbox" id="conv_commentary_enabled"
+                                    onchange="updateSetting('commentary.enabled', this.checked); updateCommentaryControlsState()">
+                                <span class="toggle-track">
+                                    <span class="toggle-thumb"></span>
+                                </span>
+                            </label>
+                        </div>
+                        <p class="field-hint" style="margin-bottom: var(--space-md);">
+                            Allows your active companion to occasionally make unprompted remarks after notable events
+                            while Sonorus is idle.
+                        </p>
+
+                        <div id="conv_commentary_children"
+                            style="border-left: 2px solid var(--gold-dark); margin-left: var(--space-sm); padding-left: var(--space-md);">
+                            <div class="field-group" id="conv_commentary_cooldown_group">
+                                <label class="field-label">Comment Cooldown</label>
+                                <input type="range" id="conv_commentary_cooldown" min="15" max="300" step="5" value="60"
+                                    oninput="updateRangeValue('conv_commentary_cooldown', this.value + ' s'); updateSetting('commentary.global_cooldown_seconds', parseInt(this.value))"
+                                    onchange="updateSetting('commentary.global_cooldown_seconds', parseInt(this.value))">
+                                <span class="range-value" id="conv_commentary_cooldownValue">60 s</span>
+                                <p class="field-hint" style="margin-bottom: var(--space-md);">
+                                    Minimum real time between unsolicited companion comments.
+                                </p>
+                            </div>
+
+                            <div class="field-group" id="conv_commentary_window_group">
+                                <label class="field-label">Event Window Size</label>
+                                <input type="range" id="conv_commentary_window" min="1" max="10" step="1" value="4"
+                                    oninput="updateRangeValue('conv_commentary_window', this.value + ' s'); updateSetting('commentary.aggregation_window_seconds', parseInt(this.value))"
+                                    onchange="updateSetting('commentary.aggregation_window_seconds', parseInt(this.value))">
+                                <span class="range-value" id="conv_commentary_windowValue">4 s</span>
+                                <p class="field-hint" style="margin-bottom: var(--space-md);">
+                                    How long Sonorus waits to gather nearby event changes into a single commentary
+                                    decision.
+                                </p>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -1043,7 +1437,7 @@
                             <span class="toggle-label">Enable NPC Actions</span>
                             <label class="toggle">
                                 <input type="checkbox" id="conv_actions_enabled"
-                                    onchange="updateSetting('conversation.actions_enabled', this.checked)">
+                                    onchange="updateSetting('conversation.actions_enabled', this.checked); updateFollowersToggleState()">
                                 <span class="toggle-track">
                                     <span class="toggle-thumb"></span>
                                 </span>
@@ -1059,21 +1453,86 @@
                         </p>
                         <!-- Floo Flame Companions is now compatible with NPC Actions -->
 
-                        <div class="field-group">
-                            <label class="field-label">Block Repeated Companion Callouts</label>
-                            <select id="conv_companion_callout_block"
-                                onchange="updateSetting('conversation.companion_callout_block_minutes', parseInt(this.value))">
-                                <option value="0">Off (allow all)</option>
-                                <option value="60">Within 1 game hour</option>
-                                <option value="360">Within 6 game hours</option>
-                                <option value="1440">Within 1 game day (24 hours)</option>
-                                <option value="-1">Never repeat</option>
-                            </select>
-                            <p class="field-hint">
-                                Blocks repeated companion ambient lines like "Look at that!" within the selected time
-                                window.
+                        <div id="conv_followers_wrapper"
+                            style="border-left: 2px solid var(--gold-dark); margin-left: var(--space-sm); padding-left: var(--space-md);">
+                            <div class="toggle-wrapper" style="padding-top: 0;">
+                                <span class="toggle-label">Enable Followers</span>
+                                <label class="toggle">
+                                    <input type="checkbox" id="conv_followers_enabled"
+                                        onchange="updateSetting('conversation.followers_enabled', this.checked); updateFollowersToggleState()">
+                                    <span class="toggle-track">
+                                        <span class="toggle-thumb"></span>
+                                    </span>
+                                </label>
+                            </div>
+                            <p id="conv_followers_hint" class="field-hint" style="margin-bottom: var(--space-md);">
+                                Allow NPCs to follow you as a group. Ask an NPC to follow you to activate. Requires NPC
+                                Actions to be enabled.
                             </p>
                         </div>
+
+                        <div class="toggle-wrapper" id="conv_attention_meter_wrapper">
+                            <span class="toggle-label">Attention Meter</span>
+                            <label class="toggle">
+                                <input type="checkbox" id="conv_attention_meter_enabled"
+                                    onchange="updateSetting('conversation.attention_meter_enabled', this.checked); updateAttentionMeterToggleState()">
+                                <span class="toggle-track">
+                                    <span class="toggle-thumb"></span>
+                                </span>
+                            </label>
+                        </div>
+                        <p id="conv_attention_meter_hint" class="field-hint" style="margin-bottom: var(--space-md);">
+                            NPCs notice when you stand close and look at them. They'll continue a recent conversation or
+                            react to your approach.
+                        </p>
+
+                        <div id="conv_attention_cold_approach_wrapper"
+                            style="border-left: 2px solid var(--gold-dark); margin-left: var(--space-sm); padding-left: var(--space-md);">
+                            <div class="toggle-wrapper" style="padding-top: 0;">
+                                <span class="toggle-label">Cold Approach</span>
+                                <label class="toggle">
+                                    <input type="checkbox" id="conv_attention_cold_approach_enabled"
+                                        onchange="updateSetting('conversation.attention_cold_approach_enabled', this.checked)">
+                                    <span class="toggle-track">
+                                        <span class="toggle-thumb"></span>
+                                    </span>
+                                </label>
+                            </div>
+                            <p id="conv_attention_cold_approach_hint" class="field-hint"
+                                style="margin-bottom: var(--space-md);">
+                                NPCs react when you approach and stare at them without a prior conversation. Requires
+                                Attention Meter.
+                            </p>
+                        </div>
+
+                        <div class="toggle-wrapper">
+                            <span class="toggle-label">Auto-Mute Repeated Ambient Dialogue</span>
+                            <label class="toggle">
+                                <input type="checkbox" id="conv_auto_mute_ambient"
+                                    onchange="updateSetting('conversation.auto_mute_ambient', this.checked)">
+                                <span class="toggle-track">
+                                    <span class="toggle-thumb"></span>
+                                </span>
+                            </label>
+                        </div>
+                        <p class="field-hint" style="margin-bottom: var(--space-md);">
+                            Automatically mutes repeated NPC ambient callouts. New lines play once, then are blocked on
+                            repeat.
+                        </p>
+
+                        <div class="toggle-wrapper">
+                            <span class="toggle-label">NPC Gaze</span>
+                            <label class="toggle">
+                                <input type="checkbox" id="conv_gaze_enabled"
+                                    onchange="updateSetting('conversation.gaze_enabled', this.checked)">
+                                <span class="toggle-track">
+                                    <span class="toggle-thumb"></span>
+                                </span>
+                            </label>
+                        </div>
+                        <p class="field-hint" style="margin-bottom: var(--space-md);">
+                            NPCs turn their head and eyes toward you during conversations and ambient encounters.
+                        </p>
 
                         <div class="toggle-wrapper">
                             <span class="toggle-label">Companion Move Commands</span>
@@ -1086,7 +1545,7 @@
                             </label>
                         </div>
                         <p class="field-hint" style="margin-bottom: var(--space-md);">
-                            Tell your companion to move with voice commands like "go over there" or "get out of the
+                            Tell your companion to move with commands like "go over there" or "get out of the
                             way." Companion walks to where you're looking.
                         </p>
 
@@ -1104,6 +1563,21 @@
                         </div>
 
                         <div class="toggle-wrapper">
+                            <span class="toggle-label">Facial Emotes</span>
+                            <label class="toggle">
+                                <input type="checkbox" id="conv_emotes_enabled"
+                                    onchange="updateSetting('conversation.emotes_enabled', this.checked)">
+                                <span class="toggle-track">
+                                    <span class="toggle-thumb"></span>
+                                </span>
+                            </label>
+                        </div>
+                        <p class="field-hint" style="margin-bottom: var(--space-md);">
+                            NPCs express emotions during dialogue via facial animations. The LLM emits emotion
+                            tags like [happy], [sad], [angry] that drive facial expressions on the speaking character.
+                        </p>
+
+                        <div class="toggle-wrapper">
                             <span class="toggle-label">Inline Narration</span>
                             <label class="toggle">
                                 <input type="checkbox" id="conv_narration_enabled"
@@ -1115,10 +1589,9 @@
                         </div>
                         <p class="field-hint" style="margin-bottom: var(--space-md);">
                             Allow NPCs to include <em>*narration*</em> alongside "dialogue." Narration is spoken by a
-                            separate narrator voice. Requires Pocket TTS or Inworld. To use your own voice, place a 5-15
-                            second WAV clip named <code>Narrator_reference_15s.wav</code> in the
-                            <code>voice_references</code>
-                            folder.
+                            separate narrator voice. Off by default. Requires Pocket TTS or Inworld.
+                        </p>
+                        <p class="field-hint" id="narratorVoiceReferenceHint" style="margin-bottom: var(--space-md);">
                         </p>
                     </div>
                 </div>
@@ -1172,8 +1645,8 @@
                     <p class="field-hint">Hold this key while speaking to record your voice. Configure STT provider in
                         <a href="#chapterSTT" onclick="scrollToSection('chapterSTT')">Speech Recognition</a>.
                         In VR, you can toggle open mic by holding your hand near your mouth and <b>pressing grip</b>.
-                        See <a href="#vrPluginStatus" onclick="scrollToSection('chapterAudio')">UEVR plugin setup</a> in
-                        Audio settings.
+                        See <a href="#vrPluginStatus" onclick="scrollToSection('chapterVR')">UEVR plugin setup</a> in
+                        VR settings.
                     </p>
                     <select id="input_stt_hotkey" onchange="updateSTTHotkey(this.value)">
                         <option value="middle_mouse">Middle Mouse (Recommended)</option>
@@ -1197,8 +1670,8 @@
                     <p class="field-hint">Press to immediately interrupt all ongoing AI conversations and stop NPC
                         speech.
                         In VR, you can stop a conversation by holding your hand near your mouth and <b>holding grip</b>.
-                        See <a href="#vrPluginStatus" onclick="scrollToSection('chapterAudio')">UEVR plugin setup</a> in
-                        Audio settings.
+                        See <a href="#vrPluginStatus" onclick="scrollToSection('chapterVR')">UEVR plugin setup</a> in
+                        VR settings.
                     </p>
                     <select id="input_stop_hotkey" onchange="updateSetting('input.stop_hotkey', this.value)">
                         <option value="delete">Delete (Recommended)</option>
@@ -1238,6 +1711,61 @@
                         <option value="f11">F11</option>
                         <option value="f12">F12</option>
                     </select>
+                </div>
+
+                <div class="field-group">
+                    <label class="field-label">First-Person View Hotkey</label>
+                    <p class="field-hint">Toggle first-person camera. Disables third-person camera offset and hides
+                        player
+                        model. Automatically suspends during cutscenes.</p>
+                    <select id="input_fpv_hotkey" onchange="updateSetting('input.fpv_hotkey', this.value)">
+                        <option value="insert">Insert (Default)</option>
+                        <option value="end">End</option>
+                        <option value="home">Home</option>
+                        <option value="f1">F1</option>
+                        <option value="f2">F2</option>
+                        <option value="f3">F3</option>
+                        <option value="f4">F4</option>
+                        <option value="f5">F5</option>
+                        <option value="f6">F6</option>
+                        <option value="f7">F7</option>
+                        <option value="f8">F8</option>
+                        <option value="f9">F9</option>
+                        <option value="f10">F10</option>
+                        <option value="f11">F11</option>
+                        <option value="f12">F12</option>
+                    </select>
+                </div>
+
+                <div class="field-group">
+                    <label class="field-label">Owl Post Hotkey</label>
+                    <p class="field-hint">Toggle the Owl Post overlay in-game.</p>
+                    <select id="input_owlpost_hotkey" onchange="updateSetting('input.owlpost_hotkey', this.value)">
+                        <option value="backquote">~ Tilde (Default)</option>
+                        <option value="end">End</option>
+                        <option value="insert">Insert</option>
+                        <option value="home">Home</option>
+                        <option value="f1">F1</option>
+                        <option value="f2">F2</option>
+                        <option value="f3">F3</option>
+                        <option value="f4">F4</option>
+                        <option value="f5">F5</option>
+                        <option value="f6">F6</option>
+                        <option value="f7">F7</option>
+                        <option value="f8">F8</option>
+                        <option value="f9">F9</option>
+                        <option value="f10">F10</option>
+                        <option value="f11">F11</option>
+                        <option value="f12">F12</option>
+                    </select>
+                </div>
+
+                <div class="field-group">
+                    <label class="field-label">In-Game Overlays</label>
+                    <p class="field-hint"><strong>Hold Escape</strong> (0.5s) to open this <strong>Wizard's
+                            Grimoire</strong>
+                        settings page as an overlay. Press <strong>Escape</strong> to close it.</p>
+                    <p class="field-hint">Only one overlay can be open at a time.</p>
                 </div>
 
                 <div class="field-group">
@@ -1297,9 +1825,11 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
 
                 <div class="divider"><i data-lucide="star"></i></div>
 
-                <p class="field-hint" style="margin-bottom: var(--space-md);">Character profiles and settings. When
-                    Long-Term Memory is OFF, the Bio field is injected directly into prompts. When memory is ON, it
-                    becomes Editor's Guidance that influences auto-generated bios from the knowledge graph.</p>
+                <p class="field-hint" style="margin-bottom: var(--space-md);">Character profiles and settings. Bio is
+                    immutable lore and background text used directly in prompts. When long-term memory is effectively
+                    enabled for an NPC, Editor's Guidance appears as a separate short field for how the Generated Bio
+                    should interpret and preserve the character, and
+                    Generated Bio shows the memory-derived summary for that character.</p>
 
                 <!-- Character Search Filter -->
                 <div class="character-search-container">
@@ -1360,7 +1890,7 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                     </div>
                 </div>
 
-                <div class="field-group">
+                <div class="field-group" id="audioCameraOffsetGroup">
                     <label class="field-label">Camera Height Offset</label>
                     <p class="field-hint">Adjust the listener position relative to camera (-1m to +1m)</p>
                     <div class="range-wrapper">
@@ -1370,7 +1900,7 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                     </div>
                 </div>
 
-                <div class="field-group">
+                <div class="field-group" id="audioReverbGroup">
                     <div class="toggle-wrapper">
                         <span class="toggle-label">Reverb</span>
                         <label class="toggle">
@@ -1384,60 +1914,6 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                     <p class="field-hint">Apply environmental reverb effects to 3D audio</p>
                 </div>
 
-                <div class="field-group">
-                    <div class="toggle-wrapper">
-                        <span class="toggle-label">VR Head Tracking</span>
-                        <label class="toggle">
-                            <input type="checkbox" id="audioVrTracking" checked
-                                onchange="updateSetting('audio.vr_tracking', this.checked)">
-                            <span class="toggle-track">
-                                <span class="toggle-thumb"></span>
-                            </span>
-                        </label>
-                    </div>
-                    <p class="field-hint">Track VR headset rotation for 3D audio spatialization and spell casting pose
-                        detection.</p>
-
-                    <div id="vrPluginStatus"
-                        style="margin-top: var(--space-sm); padding: var(--space-sm) var(--space-md); background: var(--parchment-mid); border: 1px solid var(--leather-border); border-radius: var(--border-radius);">
-                        <div
-                            style="display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-xs);">
-                            <span style="font-weight: 600; font-size: 0.85rem;">
-                                <i data-lucide="plug" style="width: 14px; height: 14px; vertical-align: middle;"></i>
-                                Sonorus UEVR Plugin
-                                <span id="vrPluginBadge"><span class="badge badge-muted">Checking...</span></span>
-                            </span>
-                            <button class="btn btn-primary btn-sm" id="vrPluginInstallBtn" style="display: none;"
-                                onclick="installVrPlugin()">
-                                Install Plugin
-                            </button>
-                        </div>
-                        <p class="field-hint" style="margin: 0;">
-                            Requires the Sonorus UEVR plugin installed in your Hogwarts Legacy UEVR profile.
-                            For VR spell casting, extend your wand outwards with open mic on.
-                            New to Hogwarts Legacy in VR? See the <a
-                                href="https://github.com/DarkSigmaDevelopment/Hogwarts-Legacy-VR-how-to" target="_blank"
-                                rel="noopener">VR setup guide</a>.
-                        </p>
-                        <p class="field-hint" id="vrPluginPath"
-                            style="margin: var(--space-xs) 0 0 0; font-size: 0.7rem; opacity: 0.6; word-break: break-all;">
-                        </p>
-                    </div>
-                </div>
-
-                <div class="field-group">
-                    <div class="toggle-wrapper">
-                        <span class="toggle-label">Lipsync Fallback</span>
-                        <label class="toggle">
-                            <input type="checkbox" id="lipsyncFallback"
-                                onchange="updateSetting('lipsync.fallback', this.checked)">
-                            <span class="toggle-track">
-                                <span class="toggle-thumb"></span>
-                            </span>
-                        </label>
-                    </div>
-                    <p class="field-hint">Use direct morph targets if lipsync isn't working (bypasses Blueprint)</p>
-                </div>
             </div>
         </section>
 
@@ -1625,6 +2101,19 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                             <p class="field-hint" style="margin-bottom: var(--space-md);">Native game cutscenes and
                                 cinematics</p>
 
+                            <div class="toggle-wrapper">
+                                <span class="toggle-label">Archive TTS WAV Files</span>
+                                <label class="toggle">
+                                    <input type="checkbox" id="archiveTtsWavs" checked
+                                        onchange="updateSetting('tts.archive_enabled', this.checked)">
+                                    <span class="toggle-track">
+                                        <span class="toggle-thumb"></span>
+                                    </span>
+                                </label>
+                            </div>
+                            <p class="field-hint" style="margin-bottom: var(--space-md);">Save up to 100 recent spoken
+                                lines as WAV files in <code>sonorus/data/tts</code></p>
+
                             <div class="field-group">
                                 <label class="field-label">Deduplication Window</label>
                                 <p class="field-hint">Ignore duplicate lines within this time window</p>
@@ -1692,7 +2181,8 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
             <div class="chapter-content">
                 <p class="field-hint" style="margin-bottom: var(--space-md);">
                     NPC meeting commitments — scheduled meetings where NPCs travel to locations and wait for
-                    you. They remember if you miss a meeting.
+                    you. Ask an NPC to meet you somewhere to activate. They remember if you miss a meeting.
+                    Most spots are only suitable for 1–2 NPCs meeting you at the same time.
                 </p>
 
                 <!-- Meeting Locations Reference (collapsed by default) -->
@@ -1710,29 +2200,7 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                         </p>
                         <div style="columns: 2; column-gap: var(--space-lg); font-size: 0.85em;">
                             <div style="break-inside: avoid; margin-bottom: var(--space-sm);">
-                                <strong style="color: var(--ink-primary);">Hogsmeade</strong>
-                                <ul style="margin: 2px 0 0 var(--space-md); padding: 0; list-style: disc;">
-                                    <li>Three Broomsticks</li>
-                                    <li>Hog's Head</li>
-                                    <li>Hogsmeade Graveyard</li>
-                                    <li>The Old Fool</li>
-                                    <li>Twisted Alley</li>
-                                    <li>Hogsmeade Village Gates</li>
-                                    <li>Hogsmeade Water Mill</li>
-                                </ul>
-                            </div>
-                            <div style="break-inside: avoid; margin-bottom: var(--space-sm);">
-                                <strong style="color: var(--ink-primary);">Hogwarts — Great Hall &amp;
-                                    Courtyards</strong>
-                                <ul style="margin: 2px 0 0 var(--space-md); padding: 0; list-style: disc;">
-                                    <li>The Great Hall</li>
-                                    <li>Quad Courtyard</li>
-                                    <li>Transfiguration Courtyard</li>
-                                    <li>Viaduct Entrance</li>
-                                </ul>
-                            </div>
-                            <div style="break-inside: avoid; margin-bottom: var(--space-sm);">
-                                <strong style="color: var(--ink-primary);">Hogwarts — Common Rooms</strong>
+                                <strong style="color: var(--ink-primary);">Common Rooms</strong>
                                 <ul style="margin: 2px 0 0 var(--space-md); padding: 0; list-style: disc;">
                                     <li>Gryffindor Common Room</li>
                                     <li>Hufflepuff Common Room</li>
@@ -1741,18 +2209,83 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                                 </ul>
                             </div>
                             <div style="break-inside: avoid; margin-bottom: var(--space-sm);">
-                                <strong style="color: var(--ink-primary);">Hogwarts — Other</strong>
+                                <strong style="color: var(--ink-primary);">Hogsmeade</strong>
+                                <ul style="margin: 2px 0 0 var(--space-md); padding: 0; list-style: disc;">
+                                    <li>Bingle &amp; Blatch</li>
+                                    <li>Brood and Peck</li>
+                                    <li>Ceridwen's Cauldrons</li>
+                                    <li>Dervish and Banges</li>
+                                    <li>Dogweed and Deathcap</li>
+                                    <li>Flutes and Lutes</li>
+                                    <li>Gladrags Wizardwear</li>
+                                    <li>Hog's Head</li>
+                                    <li>Hogsmeade Graveyard</li>
+                                    <li>Hogsmeade Post Office</li>
+                                    <li>Hogsmeade Square</li>
+                                    <li>Hogsmeade Water Mill</li>
+                                    <li>Honeydukes</li>
+                                    <li>J. Pippin's Potions</li>
+                                    <li>Madam Snelling's Tress Emporium</li>
+                                    <li>Ollivanders</li>
+                                    <li>Rivers Edge</li>
+                                    <li>Scrivenshaft's Quill Shop</li>
+                                    <li>Spintwitches Sporting Needs</li>
+                                    <li>Steepley and Sons</li>
+                                    <li>The Magic Neep</li>
+                                    <li>The Old Fool</li>
+                                    <li>Three Broomsticks</li>
+                                    <li>Tomes and Scrolls</li>
+                                    <li>Twisted Alley</li>
+                                    <li>Zonko's Joke Shop</li>
+                                </ul>
+                            </div>
+                            <div style="break-inside: avoid; margin-bottom: var(--space-sm);">
+                                <strong style="color: var(--ink-primary);">Hogwarts</strong>
                                 <ul style="margin: 2px 0 0 var(--space-md); padding: 0; list-style: disc;">
                                     <li>Astronomy Tower</li>
-                                    <li>The Boathouse</li>
-                                    <li>Hospital Wing</li>
-                                    <li>The Owlery</li>
+                                    <li>Beasts Class</li>
+                                    <li>Bell Tower</li>
+                                    <li>Bell Tower Courtyard</li>
+                                    <li>Central Hall</li>
+                                    <li>Charms Class</li>
+                                    <li>Clock Tower</li>
+                                    <li>Clock Tower Courtyard</li>
+                                    <li>Defence Against the Dark Arts</li>
+                                    <li>Defence Against the Dark Arts Tower</li>
+                                    <li>Divination Class</li>
+                                    <li>Entrance Hall</li>
                                     <li>Faculty Tower</li>
-                                    <li>Stone Bridge</li>
+                                    <li>Flying Class Lawn</li>
+                                    <li>Grand Staircase</li>
+                                    <li>History of Magic</li>
+                                    <li>Hospital Wing</li>
+                                    <li>Kitchens</li>
+                                    <li>Library</li>
+                                    <li>Map Chamber</li>
+                                    <li>Music Class</li>
+                                    <li>North Hall</li>
+                                    <li>Owlery</li>
+                                    <li>Potions Class</li>
+                                    <li>Professor Fig's Classroom</li>
+                                    <li>Quad Courtyard</li>
+                                    <li>Quidditch Pitch</li>
+                                    <li>Ravenclaw Tower</li>
+                                    <li>Reception Hall</li>
+                                    <li>Room of Requirement</li>
+                                    <li>Slytherin Dungeon</li>
+                                    <li>Summoner's Court</li>
                                     <li>Suspension Bridge</li>
-                                    <li>Wooden Bridge</li>
+                                    <li>The Boathouse</li>
+                                    <li>The Great Hall</li>
                                     <li>The Greenhouses</li>
+                                    <li>The Owlery</li>
                                     <li>The Pond Dock</li>
+                                    <li>Transfiguration Class</li>
+                                    <li>Transfiguration Courtyard</li>
+                                    <li>Trophy Room</li>
+                                    <li>Undercroft</li>
+                                    <li>Viaduct Entrance</li>
+                                    <li>Wooden Bridge</li>
                                 </ul>
                             </div>
                         </div>
@@ -1760,7 +2293,7 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                 </div>
 
                 <div class="toggle-wrapper" style="margin-bottom: var(--space-md);">
-                    <span class="toggle-label">Enable Commitments (Experimental)</span>
+                    <span class="toggle-label">Enable Commitments</span>
                     <label class="toggle">
                         <input type="checkbox" id="commitmentsEnabled"
                             onchange="updateSetting('commitments.enabled', this.checked)">
@@ -1783,6 +2316,7 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                     <button class="tab active" onclick="switchTab(event, 'commitmentsRecent')">Recent</button>
                     <button class="tab" onclick="switchTab(event, 'commitmentsAll')">All</button>
                     <button class="tab" onclick="switchTab(event, 'commitmentsCreate')">Create</button>
+                    <button class="tab" onclick="switchTab(event, 'commitmentsSettings')">Settings</button>
                     <div class="edit-btn-container">
                         <button id="commitmentEditBtn" class="btn btn-secondary btn-sm"
                             onclick="toggleCommitmentEditMode()">Edit</button>
@@ -1866,6 +2400,18 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                     </div>
                 </div>
 
+                <!-- Tab: Settings -->
+                <div class="tab-content" id="commitmentsSettings">
+                    <div class="field-group">
+                        <label class="field-label">Location Resolver Model</label>
+                        <p class="field-hint">Resolves NPC location mentions to specific spots. Use a fast, cheap model.
+                        </p>
+                        <input type="text" id="commitment_location_resolver_model"
+                            placeholder="mistralai/mistral-small-3.2-24b-instruct:nitro"
+                            onchange="updateSetting('commitment.location_resolver_model', this.value)">
+                    </div>
+                </div>
+
                 <!-- Edit Mode Action Bar -->
                 <div id="commitmentEditBar" class="history-edit-bar">
                     <span class="selected-count"><span id="commitmentSelectedCount">0</span> selected</span>
@@ -1873,6 +2419,299 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                         <button class="btn btn-danger btn-sm" id="deleteSelectedCommitmentsBtn"
                             onclick="deleteSelectedCommitments()" disabled>Delete Selected</button>
                         <button class="btn btn-secondary btn-sm" onclick="toggleCommitmentEditMode()">Done</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Owl Post Section -->
+        <section class="chapter" id="chapterOwlPost">
+            <div class="chapter-header" onclick="toggleChapter('chapterOwlPost')">
+                <h2 class="chapter-title">
+                    <span class="chapter-icon"><i data-lucide="feather"></i></span>
+                    Owl Post
+                </h2>
+                <span class="chapter-toggle"><i data-lucide="chevron-down"></i></span>
+            </div>
+            <div class="chapter-content">
+                <p class="field-hint" style="margin-bottom: var(--space-md);">
+                    NPC letter writing and notice board system. NPCs send letters based on recent conversations
+                    and post on notice boards autonomously. Open Owl Post in-game with the hotkey shown in the
+                    <a href="#chapterInput" style="color: var(--gold-dark);">Input</a> section (default: <kbd>~</kbd>).
+                </p>
+
+                <div class="toggle-wrapper" style="margin-bottom: var(--space-md);">
+                    <span class="toggle-label">Enable Owl Post</span>
+                    <label class="toggle">
+                        <input type="checkbox" id="owlPostEnabled"
+                            onchange="updateSetting('owl_post.enabled', this.checked)">
+                        <span class="toggle-track">
+                            <span class="toggle-thumb"></span>
+                        </span>
+                    </label>
+                </div>
+                <p id="owlPostGeminiWarning" class="field-hint"
+                    style="color: var(--danger); margin-bottom: var(--space-md); display: none; font-weight: 600; background: rgba(139, 0, 0, 0.1); padding: var(--space-sm); border-radius: 4px; border: 1px solid var(--danger);">
+                    <i data-lucide="alert-triangle"></i> Owl Post is disabled for Gemini provider. Switch to
+                    OpenRouter or OpenAI to enable NPC letters and notice boards.
+                </p>
+
+                <div
+                    style="border-left: 2px solid var(--gold-dark); margin-left: var(--space-sm); padding-left: var(--space-md); margin-top: var(--space-sm); margin-bottom: var(--space-md);">
+                    <div class="toggle-wrapper" style="padding-top: 0;">
+                        <span class="toggle-label">Notice Boards</span>
+                        <label class="toggle">
+                            <input type="checkbox" id="owlPostBoardsEnabled"
+                                onchange="updateSetting('owl_post.boards_enabled', this.checked)">
+                            <span class="toggle-track">
+                                <span class="toggle-thumb"></span>
+                            </span>
+                        </label>
+                    </div>
+                    <p class="field-hint">NPC-generated notice board threads and replies. Disable to keep only
+                        owl mail.</p>
+                </div>
+
+                <!-- Models Sub-panel -->
+                <div class="sub-panel collapsed" style="margin-bottom: var(--space-md);">
+                    <div class="sub-panel-header" onclick="toggleSubPanel(this)">
+                        <span class="sub-panel-title">
+                            <span class="sub-panel-icon"><i data-lucide="cpu"></i></span>
+                            Models
+                        </span>
+                        <span class="sub-panel-toggle"><i data-lucide="chevron-down"></i></span>
+                    </div>
+                    <div class="sub-panel-content">
+                        <p class="field-hint" style="margin-bottom: var(--space-md);">
+                            LLM models for Owl Post. Leave blank to use defaults.
+                        </p>
+                        <div class="field-group">
+                            <label class="field-label">Orchestration Model</label>
+                            <p class="field-hint">Classifier — decides if/when NPCs should write. Lightweight.</p>
+                            <input type="text" id="owlPostOrchestratorModel" placeholder="(uses Interjection Model)"
+                                onchange="updateSetting('owl_post.orchestrator_model', this.value)">
+                        </div>
+                        <div class="field-group">
+                            <label class="field-label">Letter Model</label>
+                            <p class="field-hint">Generates the actual letter content NPCs send</p>
+                            <input type="text" id="owlPostMailModel" placeholder="(uses Chat Model)"
+                                onchange="updateSetting('owl_post.mail_model', this.value)">
+                        </div>
+                        <div class="field-group">
+                            <label class="field-label">Board Model</label>
+                            <p class="field-hint">Generates board threads and NPC replies to posts</p>
+                            <input type="text" id="owlPostBoardModel" placeholder="(uses Chat Model)"
+                                onchange="updateSetting('owl_post.board_model', this.value)">
+                        </div>
+                        <div class="field-group">
+                            <label class="field-label">Summarize Model</label>
+                            <p class="field-hint">Condenses letters for thread context. Lightweight.</p>
+                            <input type="text" id="owlPostSummarizeModel" placeholder="Set by provider preset"
+                                onchange="updateSetting('owl_post.summarize_model', this.value)">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Timing Sub-panel -->
+                <div class="sub-panel collapsed" style="margin-bottom: var(--space-md);">
+                    <div class="sub-panel-header" onclick="toggleSubPanel(this)">
+                        <span class="sub-panel-title">
+                            <span class="sub-panel-icon"><i data-lucide="timer"></i></span>
+                            Timing
+                        </span>
+                        <span class="sub-panel-toggle"><i data-lucide="chevron-down"></i></span>
+                    </div>
+                    <div class="sub-panel-content">
+                        <div class="field-group">
+                            <label class="field-label">Mail Check Interval</label>
+                            <p class="field-hint">How often the system checks if NPCs should write letters (seconds)</p>
+                            <div class="range-wrapper">
+                                <input type="range" id="owlPostMailInterval" min="60" max="600" step="30" value="180"
+                                    oninput="updateRangeValue('owlPostMailInterval', this.value + 's'); updateSetting('owl_post.mail_interval', parseInt(this.value))">
+                                <span class="range-value" id="owlPostMailIntervalValue">180s</span>
+                            </div>
+                        </div>
+                        <div class="field-group">
+                            <label class="field-label">Board Check Interval</label>
+                            <p class="field-hint">How often the system generates new board posts (seconds)</p>
+                            <div class="range-wrapper">
+                                <input type="range" id="owlPostBoardInterval" min="60" max="900" step="30" value="300"
+                                    oninput="updateRangeValue('owlPostBoardInterval', this.value + 's'); updateSetting('owl_post.board_interval', parseInt(this.value))">
+                                <span class="range-value" id="owlPostBoardIntervalValue">300s</span>
+                            </div>
+                        </div>
+                        <div class="field-group">
+                            <label class="field-label">Conversation Cooldown</label>
+                            <p class="field-hint">Seconds after an in-person conversation before an NPC can write a
+                                letter</p>
+                            <div class="range-wrapper">
+                                <input type="range" id="owlPostConvCooldown" min="60" max="900" step="30" value="300"
+                                    oninput="updateRangeValue('owlPostConvCooldown', this.value + 's'); updateSetting('owl_post.conversation_cooldown', parseInt(this.value))">
+                                <span class="range-value" id="owlPostConvCooldownValue">300s</span>
+                            </div>
+                        </div>
+
+                        <div class="field-group">
+                            <label class="field-label">Max Board Posts Per Day</label>
+                            <p class="field-hint">Maximum board threads generated per in-game day (0 = unlimited)</p>
+                            <div class="range-wrapper">
+                                <input type="range" id="owlPostMaxBoardPostsPerDay" min="0" max="20" step="1" value="0"
+                                    oninput="updateRangeValue('owlPostMaxBoardPostsPerDay', this.value == 0 ? 'Unlimited' : this.value); updateSetting('owl_post.max_board_posts_per_day', parseInt(this.value))">
+                                <span class="range-value" id="owlPostMaxBoardPostsPerDayValue">Unlimited</span>
+                            </div>
+                        </div>
+
+                        <div class="field-group">
+                            <label class="field-label">Owl Delivery Time</label>
+                            <p class="field-hint">In-game minutes for an owl to deliver a letter</p>
+                            <div class="range-wrapper">
+                                <input type="range" id="owlPostDeliveryMinutes" min="5" max="120" step="5" value="20"
+                                    oninput="updateRangeValue('owlPostDeliveryMinutes', this.value + ' min'); updateSetting('owl_post.delivery_minutes', parseInt(this.value))">
+                                <span class="range-value" id="owlPostDeliveryMinutesValue">20 min</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Prompts Sub-panel -->
+                <div class="sub-panel collapsed" style="margin-bottom: var(--space-md);">
+                    <div class="sub-panel-header" onclick="toggleSubPanel(this)">
+                        <span class="sub-panel-title">
+                            <span class="sub-panel-icon"><i data-lucide="scroll-text"></i></span>
+                            Prompts
+                        </span>
+                        <span class="sub-panel-toggle"><i data-lucide="chevron-down"></i></span>
+                    </div>
+                    <div class="sub-panel-content">
+                        <div class="field-group">
+                            <label class="field-label">Board Rules</label>
+                            <p class="field-hint">Rules applied to all board post and reply generation.
+                                Leave empty for no additional rules.</p>
+                            <textarea id="owlBoardRulesPrompt" rows="3"
+                                placeholder="Add rules in bullet points, one per line e.g.&#10;- No bullying&#10;- Keep posts family-friendly"
+                                onchange="updateSetting('prompts.owl_board_rules', this.value)"></textarea>
+                        </div>
+
+                        <div class="field-group">
+                            <label class="field-label">Mail Classifier</label>
+                            <p class="field-hint">Decides whether an NPC should write a letter to the player.
+                                Placeholders: {npc_name}, {player_name}</p>
+                            <textarea id="owlMailClassifierPrompt"
+                                onchange="updateSetting('prompts.owl_mail_classifier', this.value)"></textarea>
+                            <button class="btn btn-secondary" style="margin-top: var(--space-sm);"
+                                onclick="resetOwlPrompt('owl_mail_classifier', 'owlMailClassifierPrompt')">Reset to
+                                Default</button>
+                        </div>
+
+                        <div class="field-group">
+                            <label class="field-label">Letter Generation</label>
+                            <p class="field-hint">Instructions for how NPCs write letters. Context (conversation
+                                history, mail history, bios) is provided automatically.</p>
+                            <textarea id="owlMailLetterPrompt"
+                                onchange="updateSetting('prompts.owl_mail_letter', this.value)"></textarea>
+                            <button class="btn btn-secondary" style="margin-top: var(--space-sm);"
+                                onclick="resetOwlPrompt('owl_mail_letter', 'owlMailLetterPrompt')">Reset to
+                                Default</button>
+                        </div>
+
+                        <div class="field-group">
+                            <label class="field-label">Board Thread Generation</label>
+                            <p class="field-hint">Instructions for generating bulletin board threads. Format
+                                instructions and participant context are provided automatically.</p>
+                            <textarea id="owlBoardThreadPrompt"
+                                onchange="updateSetting('prompts.owl_board_thread', this.value)"></textarea>
+                            <button class="btn btn-secondary" style="margin-top: var(--space-sm);"
+                                onclick="resetOwlPrompt('owl_board_thread', 'owlBoardThreadPrompt')">Reset to
+                                Default</button>
+                        </div>
+
+                        <div class="field-group">
+                            <label class="field-label">Board Reply Generation</label>
+                            <p class="field-hint">Instructions for NPC replies to board threads (including after player
+                                posts).</p>
+                            <textarea id="owlBoardReplyPrompt"
+                                onchange="updateSetting('prompts.owl_board_reply', this.value)"></textarea>
+                            <button class="btn btn-secondary" style="margin-top: var(--space-sm);"
+                                onclick="resetOwlPrompt('owl_board_reply', 'owlBoardReplyPrompt')">Reset to
+                                Default</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Custom Characters Sub-panel -->
+                <div class="sub-panel collapsed" style="margin-bottom: var(--space-md);">
+                    <div class="sub-panel-header" onclick="toggleSubPanel(this)">
+                        <span class="sub-panel-title">
+                            <span class="sub-panel-icon"><i data-lucide="users"></i></span>
+                            Custom Characters
+                        </span>
+                        <span class="sub-panel-toggle"><i data-lucide="chevron-down"></i></span>
+                    </div>
+                    <div class="sub-panel-content">
+                        <p class="field-hint" style="margin-bottom: var(--space-md);">
+                            Mail-only characters who do not exist as in-game NPCs. They can receive player letters and
+                            reply through Owl Post, but they do not join notice boards or live conversations.
+                        </p>
+                        <div id="owlCustomCharacterList"></div>
+                        <div style="margin-top: var(--space-sm);">
+                            <button class="btn btn-secondary" onclick="addOwlCustomCharacter()">Add Custom
+                                Character</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Danger Zone Sub-panel -->
+                <div class="sub-panel warning collapsed" style="margin-bottom: var(--space-md);">
+                    <div class="sub-panel-header" onclick="toggleSubPanel(this)">
+                        <span class="sub-panel-title">
+                            <span class="sub-panel-icon"><i data-lucide="alert-triangle"></i></span>
+                            Danger Zone
+                        </span>
+                        <span class="sub-panel-toggle"><i data-lucide="chevron-down"></i></span>
+                    </div>
+                    <div class="sub-panel-content">
+                        <div class="field-group">
+                            <label class="field-label">Reset Owl Mail</label>
+                            <p class="field-hint">Delete all letters, threads, meeting proposals, cached read-aloud
+                                audio, and mail generation state. Notice boards, settings, and custom characters are
+                                preserved. Cannot be undone.</p>
+                            <p id="owlMailDangerStatus" class="field-hint"
+                                style="margin-bottom: 8px; font-weight: 600;"></p>
+                            <button class="btn btn-danger" id="resetOwlMailBtn" onclick="resetOwlMailWithConfirm()" disabled>Reset All
+                                Mail</button>
+                        </div>
+                        <div class="field-group">
+                            <label class="field-label">Reset Notice Boards</label>
+                            <p class="field-hint">Delete all board posts and threads. Board definitions and
+                                unlocks are preserved. Cannot be undone.</p>
+                            <p id="owlBoardsDangerStatus" class="field-hint"
+                                style="margin-bottom: 8px; font-weight: 600;"></p>
+                            <button class="btn btn-danger" id="resetOwlBoardsBtn" onclick="resetOwlBoardsWithConfirm()" disabled>Reset All
+                                Boards</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Activity Log Sub-panel -->
+                <div class="sub-panel collapsed" style="margin-bottom: var(--space-md);">
+                    <div class="sub-panel-header" onclick="toggleSubPanel(this)">
+                        <span class="sub-panel-title">
+                            <span class="sub-panel-icon"><i data-lucide="scroll-text"></i></span>
+                            Activity Log
+                        </span>
+                        <span class="sub-panel-toggle"><i data-lucide="chevron-down"></i></span>
+                    </div>
+                    <div class="sub-panel-content">
+                        <div class="owl-log-wrapper">
+                            <div id="owlPostLog" class="owl-log-list">
+                                <div class="owl-log-empty">No activity yet</div>
+                            </div>
+                        </div>
+                        <div style="margin-top: var(--space-sm);">
+                            <p id="owlLogStatus" class="field-hint"
+                                style="margin-bottom: 8px; font-weight: 600;"></p>
+                            <button class="btn btn-secondary" id="clearOwlLogBtn" onclick="clearOwlPostLog()" disabled>Clear Log</button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1889,7 +2728,7 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
             </div>
             <div class="chapter-content">
                 <p class="field-hint" style="margin-bottom: var(--space-md);">
-                    Enables NPCs to remember events from past conversations using a knowledge graph.
+                    Enables NPCs to remember events from past conversations using lightweight searchable facts.
                 </p>
 
                 <div class="toggle-wrapper" style="margin-bottom: var(--space-md);">
@@ -1904,23 +2743,22 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                 </div>
                 <p id="memoryGeminiWarning" class="field-hint"
                     style="color: var(--danger); margin-bottom: var(--space-md); display: none; font-weight: 600; background: rgba(139, 0, 0, 0.1); padding: var(--space-sm); border-radius: 4px; border: 1px solid var(--danger);">
-                    <i data-lucide="alert-triangle"></i> Long-term memory is disabled for Gemini due to embedding model
-                    incompatibility. Gemini uses different embedding models than OpenRouter/OpenAI, which would corrupt
-                    your knowledge graphs if you switch providers. Use OpenRouter or OpenAI for long-term memory.
+                    <i data-lucide="alert-triangle"></i> Long-term memory is disabled for this LLM provider. Use
+                    OpenRouter or OpenAI so memory can use OpenAI-compatible embeddings.
                 </p>
 
-                <!-- Graph Explorer -->
+                <!-- Memory Inspector -->
                 <div class="sub-panel">
                     <div class="sub-panel-header" onclick="toggleSubPanel(this)">
                         <span class="sub-panel-title">
-                            <span class="sub-panel-icon"><i data-lucide="eye"></i></span>
-                            Knowledge Graph Explorer
+                            <span class="sub-panel-icon"><i data-lucide="search"></i></span>
+                            Memory Inspector
                         </span>
                         <span class="sub-panel-toggle"><i data-lucide="chevron-down"></i></span>
                     </div>
                     <div class="sub-panel-content">
                         <p class="field-hint" style="margin-bottom: var(--space-md);">
-                            Visualize NPC memories. Nodes are entities, edges are relationships.
+                            Inspect the deduped facts an NPC remembers, grouped by category and searchable by meaning.
                         </p>
 
                         <div class="field-group">
@@ -1929,12 +2767,12 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                                 <select id="graphNpcSelect" style="flex: 1;" onchange="loadNpcGraph()">
                                     <option value="">-- Select an NPC --</option>
                                 </select>
-                                <button class="btn btn-secondary" onclick="refreshNpcList()" title="Refresh NPC list"><i
+                                <button class="btn btn-secondary" onclick="refreshMemoryInspector()" title="Refresh memory facts"><i
                                         data-lucide="refresh-cw"></i></button>
                             </div>
                         </div>
 
-                        <!-- Graph Stats -->
+                        <!-- Memory Stats -->
                         <div id="graphStats" style="display: none; margin-bottom: var(--space-md);">
                             <div style="display: flex; gap: var(--space-lg); flex-wrap: wrap; align-items: center;">
                                 <div
@@ -1942,17 +2780,21 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                                     <span
                                         style="display: block; font-size: 1.5em; font-weight: 600; color: var(--gold-dark);"
                                         id="graphNodeCount">0</span>
-                                    <span style="font-size: 0.8em; color: var(--text-secondary);">Entities</span>
+                                    <span style="font-size: 0.8em; color: var(--text-secondary);">Facts</span>
                                 </div>
                                 <div
                                     style="padding: var(--space-sm) var(--space-md); background: var(--parchment-mid); border: 1px solid var(--leather-border); border-radius: 4px; text-align: center;">
                                     <span
                                         style="display: block; font-size: 1.5em; font-weight: 600; color: var(--gold-dark);"
                                         id="graphEdgeCount">0</span>
-                                    <span style="font-size: 0.8em; color: var(--text-secondary);">Relationships</span>
+                                    <span style="font-size: 0.8em; color: var(--text-secondary);">Categories</span>
                                 </div>
-                                <button class="btn btn-danger" id="clearNpcGraphBtn" onclick="clearNpcGraph()"
+                                <button class="btn btn-secondary" id="recheckNpcGraphBtn" onclick="recheckNpcChapters()"
                                     style="margin-left: auto; padding: var(--space-xs) var(--space-md); font-size: 0.85em;">
+                                    Recheck Chapters
+                                </button>
+                                <button class="btn btn-danger" id="clearNpcGraphBtn" onclick="clearNpcGraph()"
+                                    style="padding: var(--space-xs) var(--space-md); font-size: 0.85em;">
                                     Clear Memories
                                 </button>
                             </div>
@@ -1972,58 +2814,23 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                             </div>
                         </div>
 
-                        <!-- Graph Container -->
+                        <!-- Fact Browser -->
                         <div id="graphContainer" style="display: none;">
                             <div id="graphCanvas"
-                                style="width: 100%; height: 500px; border: 2px solid var(--leather-border); border-radius: 4px; background: var(--parchment-light);">
+                                style="width: 100%; max-height: 520px; overflow-y: auto; border: 2px solid var(--leather-border); border-radius: 4px; background: var(--parchment-light); padding: var(--space-md);">
                             </div>
 
-                            <!-- Legend -->
+                            <!-- Category Filters -->
                             <div id="graphLegend"
-                                style="margin-top: var(--space-sm); display: flex; flex-wrap: wrap; gap: var(--space-md); font-size: 0.85em;">
-                                <div style="display: flex; align-items: center; gap: 4px;">
-                                    <span
-                                        style="width: 12px; height: 12px; border-radius: 50%; background: #4a6fa5;"></span>
-                                    <span>Character</span>
-                                </div>
-                                <div style="display: flex; align-items: center; gap: 4px;">
-                                    <span
-                                        style="width: 12px; height: 12px; border-radius: 50%; background: #4a7c4e;"></span>
-                                    <span>Location</span>
-                                </div>
-                                <div style="display: flex; align-items: center; gap: 4px;">
-                                    <span
-                                        style="width: 12px; height: 12px; border-radius: 50%; background: #a67c00;"></span>
-                                    <span>Quest</span>
-                                </div>
-                                <div style="display: flex; align-items: center; gap: 4px;">
-                                    <span
-                                        style="width: 12px; height: 12px; border-radius: 50%; background: #8b6914;"></span>
-                                    <span>Item</span>
-                                </div>
-                                <div style="display: flex; align-items: center; gap: 4px;">
-                                    <span
-                                        style="width: 12px; height: 12px; border-radius: 50%; background: #6a4c93;"></span>
-                                    <span>Faction</span>
-                                </div>
-                                <div style="display: flex; align-items: center; gap: 4px;">
-                                    <span
-                                        style="width: 12px; height: 12px; border-radius: 50%; background: #8b2500;"></span>
-                                    <span>Creature</span>
-                                </div>
-                                <div style="display: flex; align-items: center; gap: 4px;">
-                                    <span
-                                        style="width: 12px; height: 12px; border-radius: 50%; background: #666;"></span>
-                                    <span>Other</span>
-                                </div>
+                                style="margin-top: var(--space-sm); display: flex; flex-wrap: wrap; gap: var(--space-sm); font-size: 0.85em;">
                             </div>
                         </div>
 
-                        <!-- Edge Details Panel -->
+                        <!-- Fact Details Panel -->
                         <div id="edgeDetailsPanel"
                             style="display: none; margin-top: var(--space-md); padding: var(--space-md); background: var(--parchment-mid); border: 1px solid var(--leather-border); border-radius: 4px; max-height: 300px; overflow-y: auto;">
                             <h4 style="margin: 0 0 var(--space-sm) 0; font-size: 0.95em; color: var(--ink-brown);">
-                                <span id="edgeDetailTitle">Relationship Details</span>
+                                <span id="edgeDetailTitle">Fact Details</span>
                             </h4>
                             <p id="edgeDetailFact" style="margin: 0 0 var(--space-sm) 0; font-style: italic;"></p>
                             <div style="font-size: 0.85em; color: var(--text-secondary);">
@@ -2032,75 +2839,70 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                             </div>
                         </div>
 
-                        <!-- No Graph Message -->
+                        <!-- No Memory Message -->
                         <div id="noGraphMessage"
                             style="display: none; text-align: center; padding: var(--space-xl); color: var(--text-secondary);">
-                            <p>No graph data available for this NPC.</p>
+                            <p>No memory facts available for this NPC.</p>
                             <p style="font-size: 0.85em;">Start a conversation and enable memory indexing to build the
-                                knowledge graph.</p>
+                                NPC's long-term memory.</p>
                         </div>
 
                         <!-- Loading State -->
                         <div id="graphLoading" style="display: none; text-align: center; padding: var(--space-xl);">
-                            <p>Loading graph data...</p>
+                            <p>Loading memory facts...</p>
                         </div>
                     </div>
                 </div>
 
-                <!-- Graph Context Menu (outside sub-panel for positioning) -->
-                <div id="graphContextMenu" class="graph-context-menu">
-                    <div class="graph-context-item" id="ctxDeleteNode">
-                        <span class="graph-context-icon"><i data-lucide="x"></i></span>
-                        Delete Entity
-                    </div>
-                    <div class="graph-context-item" id="ctxDeleteEdge">
-                        <span class="graph-context-icon"><i data-lucide="x"></i></span>
-                        Delete Relationship
-                    </div>
-                </div>
-
                 <!-- Model Configuration -->
-                <div class="sub-panel">
+                <div class="sub-panel collapsed">
                     <div class="sub-panel-header" onclick="toggleSubPanel(this)">
                         <span class="sub-panel-title">
                             <span class="sub-panel-icon"><i data-lucide="brain"></i></span>
-                            Model Configuration
+                            Configuration
                         </span>
                         <span class="sub-panel-toggle"><i data-lucide="chevron-down"></i></span>
                     </div>
                     <div class="sub-panel-content">
                         <div class="field-group">
+                            <label class="field-label">Embedding Model</label>
+                            <p class="field-hint">Builds vector search indexes for memory recall.</p>
+                            <input type="text" id="embeddingModel" placeholder="text-embedding-3-small"
+                                onchange="updateSetting('memory.embedding_model', this.value); setTimeout(loadVectorMigrationStatus, 300)">
+                        </div>
+
+                        <div class="field-group">
                             <label class="field-label">Chapter Detection Model</label>
                             <p class="field-hint">Detects chapter boundaries in conversations</p>
-                            <input type="text" id="chapterModel" placeholder="gemini-2.5-flash-lite"
+                            <input type="text" id="chapterModel" placeholder="gpt-4.1-nano"
                                 onchange="updateSetting('memory.chapter_model', this.value)">
                         </div>
 
                         <div class="field-group">
                             <label class="field-label">Memory Prose Model</label>
                             <p class="field-hint">Generates natural prose summaries</p>
-                            <input type="text" id="proseModel" placeholder="gemini-2.5-flash-lite"
+                            <input type="text" id="proseModel" placeholder="gpt-4.1-nano"
                                 onchange="updateSetting('memory.prose_model', this.value)">
                         </div>
 
                         <div class="field-group">
-                            <label class="field-label">Graphiti Model (Main)</label>
-                            <p class="field-hint">Entity extraction and relationship building</p>
-                            <input type="text" id="graphitiModel" placeholder="gemini-2.5-flash-lite"
+                            <label class="field-label">Fact Extraction Model</label>
+                            <p class="field-hint">Extracts durable facts from chapter summaries</p>
+                            <input type="text" id="graphitiModel" placeholder="gpt-4.1-nano"
                                 onchange="updateSetting('memory.graphiti_model', this.value)">
                         </div>
 
                         <div class="field-group">
-                            <label class="field-label">Graphiti Model (Small)</label>
-                            <p class="field-hint">Simpler graph operations (deduplication, etc.)</p>
-                            <input type="text" id="graphitiSmallModel" placeholder="gemini-2.5-flash-lite"
+                            <label class="field-label">Fact Deduplication Model</label>
+                            <p class="field-hint">Lightweight model for fact merge and dedup decisions</p>
+                            <input type="text" id="graphitiSmallModel" placeholder="gpt-4.1-nano"
                                 onchange="updateSetting('memory.graphiti_small_model', this.value)">
                         </div>
 
                         <div class="field-group">
                             <label class="field-label">Reranker/Search Intent Model</label>
                             <p class="field-hint">Intent and reranking. Use a fast model - runs in chat flow.</p>
-                            <input type="text" id="rerankerModel" placeholder="gemini-2.5-flash-lite"
+                            <input type="text" id="rerankerModel" placeholder="gpt-4.1-nano"
                                 onchange="updateSetting('memory.reranker_model', this.value)">
                         </div>
 
@@ -2128,11 +2930,45 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                             <input type="number" id="chapterEntryThreshold" min="10" max="200" step="5" placeholder="30"
                                 onchange="updateSetting('memory.chapter_entry_threshold', parseInt(this.value) || 30)">
                         </div>
+
+                        <div class="field-group">
+                            <div class="toggle-wrapper">
+                                <span class="toggle-label">Include Cutscene In Memory</span>
+                                <label class="toggle">
+                                    <input type="checkbox" id="memoryIncludeCutscene"
+                                        onchange="updateSetting('memory.include_cutscene', this.checked)">
+                                    <span class="toggle-track">
+                                        <span class="toggle-thumb"></span>
+                                    </span>
+                                </label>
+                            </div>
+                            <p class="field-hint">
+                                Includes cutscene dialogue in chapter detection and long-term memory. This can add
+                                significant token use; disable it for leaner memory.
+                            </p>
+                        </div>
+
+                        <div class="field-group">
+                            <div class="toggle-wrapper">
+                                <span class="toggle-label">Whitelisted NPCs Only</span>
+                                <label class="toggle">
+                                    <input type="checkbox" id="memoryWhitelistedNpcsOnly"
+                                        onchange="updateSetting('memory.whitelisted_npcs_only', this.checked); refreshCharacterLongTermMemoryVisibility(this.checked)">
+                                    <span class="toggle-track">
+                                        <span class="toggle-thumb"></span>
+                                    </span>
+                                </label>
+                            </div>
+                            <p class="field-hint">
+                                Cost-saving mode: only designated NPCs will use long-term memory. Choose which NPCs are
+                                enabled in the Characters section.
+                            </p>
+                        </div>
                     </div>
                 </div>
 
                 <!-- Data Management -->
-                <div class="sub-panel">
+                <div class="sub-panel collapsed">
                     <div class="sub-panel-header" onclick="toggleSubPanel(this)">
                         <span class="sub-panel-title">
                             <span class="sub-panel-icon"><i data-lucide="save"></i></span>
@@ -2143,7 +2979,7 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                     <div class="sub-panel-content">
                         <div class="field-group">
                             <label class="field-label">Migrate Dialogue History</label>
-                            <p class="field-hint">Process existing dialogue into chapters and add to knowledge graph for
+                            <p class="field-hint">Process existing dialogue into chapters and add searchable facts for
                                 each NPC.</p>
                             <p class="field-hint" style="font-style: italic; margin-bottom: var(--space-sm);">
                                 Tip: You can migrate NPCs individually in the <a href="#chapterHistory"
@@ -2153,17 +2989,56 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                             <p id="migratePendingCount" class="field-hint"
                                 style="margin-bottom: 8px; font-weight: 600;"></p>
                             <div class="btn-group">
-                                <button class="btn btn-primary" id="migrateBtn" onclick="migrateMemories()">Migrate All
+                                <button class="btn btn-primary" id="migrateBtn" onclick="migrateMemories()" disabled>Migrate All
                                     NPCs</button>
                             </div>
                             <p id="migrateStatus" class="field-hint" style="margin-top: 8px; display: none;"></p>
                         </div>
 
                         <div class="field-group">
+                            <label class="field-label">Rebuild Memory Vectors</label>
+                            <p class="field-hint">Regenerate vector search indexes for memories created with a different
+                                embedding model. This may use embedding API quota.</p>
+                            <p id="vectorMigratePendingCount" class="field-hint"
+                                style="margin-bottom: 8px; font-weight: 600;"></p>
+                            <div class="btn-group">
+                                <button class="btn btn-primary" id="vectorMigrateBtn" disabled
+                                    onclick="migrateMemoryVectors()">Rebuild Vectors</button>
+                            </div>
+                            <p id="vectorMigrateStatus" class="field-hint" style="margin-top: 8px; display: none;"></p>
+                        </div>
+
+                        <div class="field-group">
                             <label class="field-label">Clear All Memories</label>
-                            <p class="field-hint">Delete all NPC memories from the knowledge graph. Cannot be undone.
+                            <p class="field-hint">Delete all NPC long-term memory facts. Cannot be undone.
                             </p>
-                            <button class="btn btn-danger" onclick="clearAllMemories()">Clear All Memories</button>
+                            <button class="btn btn-danger" id="clearAllMemoriesBtn" onclick="clearAllMemories()" disabled>Clear All Memories</button>
+                        </div>
+
+                        <div class="field-group">
+                            <label class="field-label">Reset Memory System</label>
+                            <p class="field-hint">Force-delete all memory database files. Use this when the
+                                database is corrupted and Clear/Restore fail. Does not create a backup first.
+                                Cannot be undone.</p>
+                            <button class="btn btn-danger" id="resetMemorySystemBtn" onclick="resetMemorySystem()" disabled>Reset Memory
+                                System</button>
+                        </div>
+
+                        <div class="field-group">
+                            <label class="field-label">Restore Memory Snapshot</label>
+                            <p class="field-hint">Restore a long-term memory snapshot from
+                                <code>data/graph_backups</code>. Only Cognis snapshots are shown; legacy Graphiti
+                                snapshots are ignored because they cannot be restored into the current memory backend.
+                            </p>
+                            <p id="graphBackupsStatus" class="field-hint"
+                                style="margin-bottom: 8px; font-weight: 600;"></p>
+                            <div class="btn-group">
+                                <button class="btn btn-secondary" id="refreshGraphBackupsBtn"
+                                    onclick="loadGraphBackups()" disabled>Refresh Backups</button>
+                            </div>
+                            <div id="graphBackupsList"
+                                style="display: flex; flex-direction: column; gap: 8px; max-height: 280px; overflow-y: auto;">
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -2182,7 +3057,7 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
             </div>
             <div class="chapter-content">
                 <p class="field-hint" style="margin-bottom: var(--space-md);">
-                    Integration with third-party game mods. Install mods from Nexus Mods or CurseForge to enable
+                    Integration with third-party game mods. Install mods from CurseForge to enable
                     features here.
                 </p>
 
@@ -2210,7 +3085,8 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                         <div id="housePointsNotInstalled" class="mod-not-installed">
                             <p class="field-hint" style="font-style: italic;">
                                 <i data-lucide="info" style="width: 16px; height: 16px; vertical-align: middle;"></i>
-                                Mod not detected. Install the House Points System mod from Nexus Mods to enable this
+                                Mod not detected. Install the House Points System mod from CurseForge to
+                                enable this
                                 feature.
                             </p>
                         </div>
@@ -2274,11 +3150,93 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                     </div>
                 </div>
 
+                <!-- NPC Schedule Enhanced Mod -->
+                <div class="sub-panel collapsed" id="modPanelNpcSchedule">
+                    <div class="sub-panel-header" onclick="toggleSubPanel(this)">
+                        <span class="sub-panel-title">
+                            <span class="sub-panel-icon"><i data-lucide="calendar-clock"></i></span>
+                            NPC Schedule Enhanced
+                            <span class="mod-status" id="modStatusNpcSchedule">
+                                <span class="badge badge-muted">Not Detected</span>
+                            </span>
+                        </span>
+                        <span class="sub-panel-toggle"><i data-lucide="chevron-down"></i></span>
+                    </div>
+                    <div class="sub-panel-content">
+                        <p class="field-hint" style="margin-bottom: var(--space-md);">
+                            Integrates with the NPC Schedule Enhanced mod.
+                            NPCs can reference class schedules and timetables in conversations.
+                        </p>
+
+                        <!-- Not installed message -->
+                        <div id="npcScheduleNotInstalled" class="mod-not-installed">
+                            <p class="field-hint" style="font-style: italic;">
+                                <i data-lucide="info" style="width: 16px; height: 16px; vertical-align: middle;"></i>
+                                Mod not detected. Install the NPC Schedule Enhanced mod from CurseForge to
+                                enable this feature.
+                            </p>
+                        </div>
+
+                        <!-- Settings (shown when installed) -->
+                        <div id="npcScheduleSettings" style="display: none;">
+                            <div class="toggle-wrapper" style="margin-bottom: var(--space-md);">
+                                <span class="toggle-label">NPCs Know Class Schedules</span>
+                                <label class="toggle">
+                                    <input type="checkbox" id="npcScheduleContextEnabled"
+                                        onchange="updateModSetting('npc_schedule', 'context_enabled', this.checked)">
+                                    <span class="toggle-track">
+                                        <span class="toggle-thumb"></span>
+                                    </span>
+                                </label>
+                            </div>
+                            <p class="field-hint" style="margin-bottom: var(--space-md);">
+                                When enabled, NPCs will be aware of class schedules and can reference them
+                                naturally in conversation.
+                            </p>
+
+                            <div class="toggle-wrapper" style="margin-bottom: var(--space-md);">
+                                <span class="toggle-label">Schedule Notifications</span>
+                                <label class="toggle">
+                                    <input type="checkbox" id="npcScheduleNotificationsEnabled"
+                                        onchange="updateModSetting('npc_schedule', 'notifications_enabled', this.checked)">
+                                    <span class="toggle-track">
+                                        <span class="toggle-thumb"></span>
+                                    </span>
+                                </label>
+                            </div>
+                            <p class="field-hint" style="margin-bottom: var(--space-md);">
+                                Show an in-game notification when a new class or meal period begins.
+                            </p>
+
+                            <!-- Live player schedule display -->
+                            <div id="npcScheduleLiveData" class="mod-live-data" style="display: none;">
+                                <div class="divider"><i data-lucide="book-open"></i> Your Timetable <i
+                                        data-lucide="book-open"></i></div>
+                                <div id="npcScheduleContent"
+                                    style="padding: var(--space-sm); opacity: 0.6; text-align: center;">
+                                    Awaiting game data...
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
             </div>
         </section>
 
         <!-- Action Bar -->
         <div class="action-bar">
+            <a class="btn btn-secondary" href="https://discord.gg/FGqvRbbSXx" target="_blank" rel="noopener"
+                style="margin-right: auto; text-decoration: none;">Help</a>
+            <div class="action-bar-toggle">
+                <span class="action-bar-toggle-label">Simple</span>
+                <label class="toggle">
+                    <input type="checkbox" id="simpleModeToggle" checked onchange="updateSimpleMode(this.checked)">
+                    <span class="toggle-track">
+                        <span class="toggle-thumb"></span>
+                    </span>
+                </label>
+            </div>
             <button class="btn btn-secondary" onclick="resetToDefaults()">Reset Defaults</button>
             <button class="btn btn-primary" onclick="saveSettings()">
                 <span id="saveText">Save Configuration</span>
@@ -2305,7 +3263,9 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
     <!-- Toast Container -->
     <div class="toast-container" id="toastContainer"></div>
     <script src="js/disclaimer.js"></script>
+    <script src="js/history-audio.js"></script>
     <script src="js/config.js"></script>
+    <script src="js/mod-package-conflicts.js"></script>
     <script src="js/game-mods.js"></script>
     <script src="js/mic-meter.js"></script>
 </body>

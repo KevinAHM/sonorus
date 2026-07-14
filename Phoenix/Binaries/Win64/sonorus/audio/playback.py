@@ -9,6 +9,7 @@ Handles:
 - Audio position sync for drift correction
 """
 import os
+import re
 import sys
 import time
 import threading
@@ -17,8 +18,10 @@ from typing import List, Dict, Optional, Callable
 # Add parent to path for utils imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from constants import EMOTE_TAGS, EMOTE_TAG_ALIASES
 from utils.settings import load_settings
 from utils.profiler import Profiler
+from utils.viseme_utils import build_narration_ranges, get_boundary_time, neutralize_narration_visemes
 
 # Get shared profiler instance for timing
 _profiler = Profiler.get("chat_flow")
@@ -46,14 +49,88 @@ def remove_unpaired_double_quotes(text: str) -> str:
     return text[:remove_idx] + text[remove_idx + 1:]
 
 
+# Emotion tags the LLM may emit for facial animation
+_EMOTE_PARSE_TAGS = tuple(EMOTE_TAGS) + tuple(EMOTE_TAG_ALIASES.keys())
+_LEADING_EMOTE_RE = re.compile(r'^\s*(?:"?\s*)?\[(' + '|'.join(_EMOTE_PARSE_TAGS) + r')\]', re.IGNORECASE)
+
+
+def extract_emote_tag(text: str) -> Optional[str]:
+    """Extract a leading [emotion] tag from sentence text. Returns tag name or None."""
+    if not text:
+        return None
+    m = _LEADING_EMOTE_RE.search(text)
+    if not m:
+        return None
+    tag = m.group(1).lower()
+    return EMOTE_TAG_ALIASES.get(tag, tag)
+
+
+def _fmt_seconds(value) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value):.2f}s"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def _one_line_text(text: str, limit: int = 120) -> str:
+    text = re.sub(r'\s+', ' ', text or '').strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit - 3] + "..."
+
+
+_BRACKET_TAG_RE = re.compile(r"\[[^\]]*\]")
+_SPEECH_TOKEN_RE = re.compile(r"[^\W_]+(?:['’-][^\W_]+)*", re.UNICODE)
+
+
+def _speech_tokens(text: str) -> List[str]:
+    cleaned = _BRACKET_TAG_RE.sub(" ", text or "")
+    return _SPEECH_TOKEN_RE.findall(cleaned)
+
+
+def _timed_speech_token_spans(alignment: Dict) -> List[Dict]:
+    words = alignment.get("words", []) or []
+    starts = alignment.get("wordStartTimeSeconds", []) or []
+    ends = alignment.get("wordEndTimeSeconds", []) or []
+    spans = []
+    for raw_idx, raw_word in enumerate(words):
+        if raw_idx >= len(starts):
+            break
+        parts = _speech_tokens(str(raw_word or ""))
+        if not parts:
+            continue
+        try:
+            start = float(starts[raw_idx])
+        except (TypeError, ValueError):
+            continue
+        try:
+            end = float(ends[raw_idx]) if raw_idx < len(ends) else start
+        except (TypeError, ValueError):
+            end = start
+        duration = max(0.0, end - start)
+        part_count = max(1, len(parts))
+        for part_idx, part in enumerate(parts):
+            spans.append({
+                "token": part,
+                "start": start + (duration * part_idx / part_count),
+                "end": start + (duration * (part_idx + 1) / part_count),
+                "raw_word": raw_word,
+                "raw_index": raw_idx,
+            })
+    return spans
+
+
 class TurnState:
     """State for a single conversation turn's playback."""
 
     def __init__(self, turn_id: str, speaker_id: str = None, use_3d: bool = True,
-                 reverb_auxbus: str = None, reverb_send: float = 1.0):
+                 reverb_auxbus: str = None, reverb_send: float = 1.0, centered: bool = False):
         self.turn_id = turn_id
         self.speaker_id = speaker_id         # Character ID for Lua
         self.use_3d = use_3d                 # False for player voice (centered stereo)
+        self.centered = centered             # True for FPV/VR player voice (3D reverb, fixed centered position)
         self.reverb_auxbus = reverb_auxbus   # Reverb preset name from game
         self.reverb_send = reverb_send       # Reverb wet/dry mix (0.0-1.0)
         self.viseme_buffer: List[Dict] = []  # Accumulated visemes
@@ -100,6 +177,18 @@ class TurnState:
                 new_from_source = self.viseme_source[buffer_len:]
                 self.viseme_buffer.extend(new_from_source)
 
+        narr_result = neutralize_narration_visemes(
+            self.viseme_buffer,
+            self.sentence_boundaries,
+            audio_duration=self.get_audio_duration(),
+            sample_rate=self._pcm_sample_rate,
+            channels=self._pcm_channels,
+        )
+        if narr_result['zeroed'] > 0 or narr_result['guards'] > 0:
+            print(f"[Narration] Zeroed {narr_result['zeroed']} visemes, "
+                  f"added {narr_result['guards']} guards "
+                  f"(ranges={[(f'{s:.2f}', f'{e:.2f}') for s, e in narr_result['ranges']]})")
+
         # Now return unsent visemes as before
         unsent = self.viseme_buffer[self.visemes_sent_idx:]
         self.visemes_sent_idx = len(self.viseme_buffer)
@@ -114,6 +203,18 @@ class TurnState:
             if source_len > buffer_len:
                 new_from_source = self.viseme_source[buffer_len:]
                 self.viseme_buffer.extend(new_from_source)
+
+        narr_result = neutralize_narration_visemes(
+            self.viseme_buffer,
+            self.sentence_boundaries,
+            audio_duration=self.get_audio_duration(),
+            sample_rate=self._pcm_sample_rate,
+            channels=self._pcm_channels,
+        )
+        if narr_result['zeroed'] > 0 or narr_result['guards'] > 0:
+            print(f"[Narration] Zeroed {narr_result['zeroed']} visemes, "
+                  f"added {narr_result['guards']} guards "
+                  f"(ranges={[(f'{s:.2f}', f'{e:.2f}') for s, e in narr_result['ranges']]})")
 
         self.visemes_sent_idx = len(self.viseme_buffer)
         return list(self.viseme_buffer)
@@ -257,20 +358,100 @@ class TurnState:
 
     def _get_boundary_time(self, boundary: Dict, idx: int) -> Optional[float]:
         """Return a reliable boundary start time, or None if not confirmed yet."""
-        channels = max(1, int(getattr(self, '_pcm_channels', 1) or 1))
-        bps = self._pcm_sample_rate * 2 * channels
-        sb = boundary.get('start_bytes')
-        if sb is not None and sb >= 0 and bps > 0:
-            return sb / bps
+        return get_boundary_time(
+            boundary,
+            idx,
+            sample_rate=self._pcm_sample_rate,
+            channels=self._pcm_channels,
+        )
 
-        st = boundary.get('start_time', 0.0)
-        if idx == 0:
-            return float(st)
+    @staticmethod
+    def _count_speech_words(text: str) -> int:
+        return len(_speech_tokens(text))
 
-        if boundary.get('start_time_confirmed'):
-            return float(st)
+    def _boundary_word_span(self, idx: int) -> Dict:
+        """Return the word timing span expected for a sentence boundary."""
+        word_index = 0
+        for prev in self.sentence_boundaries[:idx]:
+            word_index += self._count_speech_words(prev.get('text', ''))
 
-        return None
+        word_count = 0
+        if 0 <= idx < len(self.sentence_boundaries):
+            word_count = self._count_speech_words(self.sentence_boundaries[idx].get('text', ''))
+
+        token_spans = []
+        raw_words_available = 0
+        with self._vis_gen_lock:
+            alignments = list(self._word_alignments)
+        for alignment in alignments:
+            raw_words_available += len(alignment.get("words", []) or [])
+            token_spans.extend(_timed_speech_token_spans(alignment))
+
+        first_word_start = token_spans[word_index]["start"] if word_index < len(token_spans) else None
+        last_word_idx = word_index + max(0, word_count) - 1
+        last_word_end = token_spans[last_word_idx]["end"] if 0 <= last_word_idx < len(token_spans) else None
+        return {
+            "word_index": word_index,
+            "word_count": word_count,
+            "words_available": len(token_spans),
+            "raw_words_available": raw_words_available,
+            "first_word_start": first_word_start,
+            "last_word_end": last_word_end,
+        }
+
+    def get_boundary_debug(self, idx: int) -> Dict:
+        """Summarize the timing inputs used for a subtitle boundary."""
+        boundary = self.sentence_boundaries[idx]
+        resolved = self._get_boundary_time(boundary, idx)
+        if boundary.get("start_bytes") is not None and boundary.get("start_bytes") >= 0:
+            source = boundary.get("start_time_source") or "start_bytes"
+        elif idx == 0:
+            source = boundary.get("start_time_source") or "first_sentence"
+        elif boundary.get("start_time_confirmed"):
+            source = boundary.get("start_time_source") or "confirmed_start_time"
+        else:
+            source = boundary.get("start_time_source") or "provisional"
+
+        word_span = self._boundary_word_span(idx)
+        return {
+            "idx": idx,
+            "total": len(self.sentence_boundaries),
+            "resolved_start": resolved,
+            "source": source,
+            "start_time": boundary.get("start_time"),
+            "start_bytes": boundary.get("start_bytes"),
+            "confirmed": bool(boundary.get("start_time_confirmed")),
+            "is_narration": bool(boundary.get("is_narration", False)),
+            "word_index": word_span["word_index"],
+            "word_count": word_span["word_count"],
+            "words_available": word_span["words_available"],
+            "raw_words_available": word_span["raw_words_available"],
+            "first_word_start": word_span["first_word_start"],
+            "last_word_end": word_span["last_word_end"],
+            "text": boundary.get("text", ""),
+        }
+
+    def log_boundary_table(self, reason: str):
+        if not self.sentence_boundaries:
+            print(f"[SubtitleBoundaries] turn={self.turn_id} reason={reason} count=0")
+            return
+        print(f"[SubtitleBoundaries] turn={self.turn_id} reason={reason} "
+              f"count={len(self.sentence_boundaries)} sample_rate={self._pcm_sample_rate} "
+              f"channels={self._pcm_channels} audio_dur={self.get_audio_duration():.2f}s "
+              f"word_alignments={len(self._word_alignments)}")
+        for idx in range(len(self.sentence_boundaries)):
+            info = self.get_boundary_debug(idx)
+            print(
+                f"[SubtitleBoundary] turn={self.turn_id} idx={idx}/{info['total']} "
+                f"source={info['source']} resolved={_fmt_seconds(info['resolved_start'])} "
+                f"start_time={_fmt_seconds(info['start_time'])} start_bytes={info['start_bytes']} "
+                f"confirmed={info['confirmed']} first_word={_fmt_seconds(info['first_word_start'])} "
+                f"last_word={_fmt_seconds(info['last_word_end'])} "
+                f"word_index={info['word_index']} word_count={info['word_count']} "
+                f"speech_tokens_available={info['words_available']} "
+                f"raw_words_available={info['raw_words_available']} narration={info['is_narration']} "
+                f"text=\"{_one_line_text(info['text'])}\""
+            )
 
     # --- On-demand viseme generation ---
 
@@ -306,26 +487,12 @@ class TurnState:
         at voice boundaries (dialogue↔narration). These are reliable because
         the provider waits for all audio to flush before switching voices.
         """
-        if not self.sentence_boundaries:
-            return []
-
-        ranges = []
-        for i, b in enumerate(self.sentence_boundaries):
-            if not b.get('is_narration'):
-                continue
-            start = self._get_boundary_time(b, i)
-            if start is None:
-                continue  # No timing info available yet
-            # End is next boundary's start, or audio duration
-            if i + 1 < len(self.sentence_boundaries):
-                end = self._get_boundary_time(self.sentence_boundaries[i + 1], i + 1)
-                if end is None:
-                    end = audio_dur
-            else:
-                end = audio_dur
-            if end > start:
-                ranges.append((start, end))
-        return ranges
+        return build_narration_ranges(
+            self.sentence_boundaries,
+            audio_dur,
+            sample_rate=self._pcm_sample_rate,
+            channels=self._pcm_channels,
+        )
 
     def generate_pending_visemes(self):
         """
@@ -344,11 +511,15 @@ class TurnState:
             except ImportError:
                 return
 
+            import time as _time
+            _vg_start = _time.perf_counter()
+
             channels = max(1, int(getattr(self, '_pcm_channels', 1) or 1))
             bps = self._pcm_sample_rate * 2 * channels  # bytes per second
             audio_dur = self.get_audio_duration()
 
             # Pass 1: Amplitude for any new PCM beyond _vis_gen_time
+            _amp_ms = 0
             if audio_dur > self._vis_gen_time:
                 gen_from = self._vis_gen_time
                 start_byte = int(gen_from * bps) & ~1  # 2-byte align
@@ -356,9 +527,11 @@ class TurnState:
                 pcm_slice = bytes(self._raw_pcm[start_byte:end_byte])
 
                 if pcm_slice:
+                    _t0 = _time.perf_counter()
                     amp_visemes = lipsync.amplitude_visemes_for_audio(
                         pcm_slice, self._pcm_sample_rate
                     )
+                    _amp_ms = (_time.perf_counter() - _t0) * 1000
                     for v in amp_visemes:
                         v['t'] += gen_from
                     # _amplitude marker preserved from amplitude_visemes_for_audio
@@ -367,6 +540,9 @@ class TurnState:
                 self._vis_gen_time = audio_dur
 
             # Pass 2: Word visemes for any unprocessed word alignments
+            _word_count = 0
+            _word_ms = 0
+            _t0 = _time.perf_counter()
             while self._word_gen_idx < len(self._word_alignments):
                 wa = self._word_alignments[self._word_gen_idx]
                 self._word_gen_idx += 1
@@ -376,6 +552,7 @@ class TurnState:
                 wa_ends = wa.get("wordEndTimeSeconds", [])
                 if not wa_words:
                     continue
+                _word_count += len(wa_words)
 
                 # Time range this word alignment covers
                 first_start = wa_starts[0] if wa_starts else 0
@@ -407,27 +584,20 @@ class TurnState:
                 )
                 if word_visemes:
                     self.viseme_buffer.extend(word_visemes)
+            _word_ms = (_time.perf_counter() - _t0) * 1000
 
-            # Zero visemes during narration ranges (NPC holds neutral face)
-            # Only process visemes added since last zeroing pass
-            narr_ranges = self._build_narration_ranges(audio_dur)
-            if narr_ranges:
-                zeroed_count = 0
-                scan_start = self._narr_zero_idx
-                for v in self.viseme_buffer[scan_start:]:
-                    vt = v.get('t', 0)
-                    for nr_start, nr_end in narr_ranges:
-                        if nr_start <= vt <= nr_end:
-                            for key in list(v.keys()):
-                                if key not in ('t', '_amplitude'):
-                                    v[key] = 0.0
-                            zeroed_count += 1
-                            break
-                self._narr_zero_idx = len(self.viseme_buffer)
-                if zeroed_count > 0:
-                    total_scanned = len(self.viseme_buffer) - scan_start
-                    print(f"[Narration] Zeroed {zeroed_count}/{total_scanned} visemes "
-                          f"(ranges={[(f'{s:.2f}', f'{e:.2f}') for s, e in narr_ranges]})")
+            narr_result = neutralize_narration_visemes(
+                self.viseme_buffer,
+                self.sentence_boundaries,
+                audio_duration=audio_dur,
+                sample_rate=self._pcm_sample_rate,
+                channels=self._pcm_channels,
+            )
+            self._narr_zero_idx = len(self.viseme_buffer)
+            if narr_result['zeroed'] > 0 or narr_result['guards'] > 0:
+                print(f"[Narration] Zeroed {narr_result['zeroed']} visemes, "
+                      f"added {narr_result['guards']} guards "
+                      f"(ranges={[(f'{s:.2f}', f'{e:.2f}') for s, e in narr_result['ranges']]})")
 
             # Sort buffer by time after both passes.
             # Pass 1 (amplitude) and Pass 2 (word) append in generation order,
@@ -436,6 +606,10 @@ class TurnState:
             # a linear scan assuming sorted order, so unsorted frames cause word
             # visemes to be unreachable behind amplitude gap pairs.
             self.viseme_buffer.sort(key=lambda v: v.get('t', 0))
+
+            _total_ms = (_time.perf_counter() - _vg_start) * 1000
+            if _total_ms >= 5 or _word_count > 0:
+                print(f"[VisemeGen] total={_total_ms:.0f}ms (amp={_amp_ms:.0f}ms, words={_word_ms:.0f}ms/{_word_count} words, buf={len(self.viseme_buffer)} visemes)")
 
 class PlaybackCoordinator:
     """
@@ -532,8 +706,10 @@ class PlaybackCoordinator:
             return None
 
         turn = self.turns.get(self.current_turn_id)
-        if not turn or not turn.playback_started:
+        if not turn:
             return None
+        if not turn.playback_started:
+            return ""  # Turn exists but nothing was spoken yet
 
         # Use paused position if available (soft interrupt pauses audio on VAD,
         # but stop_conversation runs later after STT transcription — wall clock
@@ -551,10 +727,10 @@ class PlaybackCoordinator:
         return trimmed
 
     def create_turn(self, turn_id: str, speaker_id: str = None, use_3d: bool = True,
-                    reverb_auxbus: str = None, reverb_send: float = 1.0) -> TurnState:
+                    reverb_auxbus: str = None, reverb_send: float = 1.0, centered: bool = False) -> TurnState:
         """Create a new turn for pre-buffering."""
         turn = TurnState(turn_id, speaker_id, use_3d=use_3d,
-                         reverb_auxbus=reverb_auxbus, reverb_send=reverb_send)
+                         reverb_auxbus=reverb_auxbus, reverb_send=reverb_send, centered=centered)
         self.turns[turn_id] = turn
         # Cleanup old turns (keep last 5)
         if len(self.turns) > 5:
@@ -576,6 +752,77 @@ class PlaybackCoordinator:
     def set_audio_position_callback(self, callback: Callable[[], float]):
         """Set callback to get current audio playback position."""
         self._get_audio_position = callback
+
+    def _subtitle_timing_payload(self, turn: TurnState, idx: int, audio_pos: Optional[float]) -> Dict:
+        info = turn.get_boundary_debug(idx)
+        player = getattr(self, '_current_audio_player', None)
+        underrun = None
+        if player:
+            ut = getattr(player, '_underrun_time', None)
+            if ut is not None:
+                underrun = ut[0]
+
+        wall_elapsed = None
+        if turn.playback_started and turn.playback_start_time > 0:
+            wall_elapsed = time.time() - turn.playback_start_time
+
+        return {
+            "audio_pos": audio_pos,
+            "playback_wall": wall_elapsed,
+            "fed_audio_duration": turn.get_audio_duration(),
+            "underrun_time": underrun,
+            "boundary_start": info["resolved_start"],
+            "boundary_source": info["source"],
+            "boundary_start_time": info["start_time"],
+            "boundary_start_bytes": info["start_bytes"],
+            "boundary_confirmed": info["confirmed"],
+            "first_word_start": info["first_word_start"],
+            "last_word_end": info["last_word_end"],
+            "word_index": info["word_index"],
+            "word_count": info["word_count"],
+            "words_available": info["words_available"],
+            "raw_words_available": info["raw_words_available"],
+        }
+
+    def _send_subtitle_update(self, turn: TurnState, idx: int, audio_pos: Optional[float],
+                              reason: str):
+        boundary = turn.sentence_boundaries[idx]
+        is_narr = bool(boundary.get('is_narration', False))
+        timing = self._subtitle_timing_payload(turn, idx, audio_pos)
+
+        print(
+            f"[SubtitleDecision] turn={turn.turn_id} idx={idx}/{len(turn.sentence_boundaries)} "
+            f"reason={reason} audio_pos={_fmt_seconds(audio_pos)} "
+            f"playback_wall={_fmt_seconds(timing['playback_wall'])} "
+            f"fed_audio={_fmt_seconds(timing['fed_audio_duration'])} "
+            f"underrun={_fmt_seconds(timing['underrun_time'])} "
+            f"boundary={_fmt_seconds(timing['boundary_start'])} "
+            f"source={timing['boundary_source']} "
+            f"start_time={_fmt_seconds(timing['boundary_start_time'])} "
+            f"start_bytes={timing['boundary_start_bytes']} "
+            f"confirmed={timing['boundary_confirmed']} "
+            f"first_word={_fmt_seconds(timing['first_word_start'])} "
+            f"last_word={_fmt_seconds(timing['last_word_end'])} "
+            f"word_index={timing['word_index']} word_count={timing['word_count']} "
+            f"speech_tokens_available={timing['words_available']} "
+            f"raw_words_available={timing['raw_words_available']} narration={is_narr} "
+            f"text=\"{_one_line_text(boundary.get('text', ''))}\""
+        )
+
+        msg = {
+            "type": "subtitle_update",
+            "turn_id": turn.turn_id,
+            "text": remove_unpaired_double_quotes(boundary.get('text', '')),
+            "sentence_idx": idx,
+            "total_sentences": len(turn.sentence_boundaries),
+            "is_narration": is_narr,
+            "subtitle_reason": reason,
+        }
+        msg.update(timing)
+        self.lua_socket.send(msg)
+
+        emote = extract_emote_tag(boundary.get('text', ''))
+        self.lua_socket.send({"type": "emote", "name": emote, "turn_id": turn.turn_id})
 
     def play_turn(self, turn_id: str, audio_player, blocking: bool = True,
                   abort_check: Callable[[], bool] = None) -> bool:
@@ -616,13 +863,21 @@ class PlaybackCoordinator:
             return False
 
         self.current_turn_id = turn_id
+        self._current_audio_player = audio_player
 
         def do_playback():
             try:
+                import time as _time
                 # 1. Generate visemes on-demand from stored PCM + word timestamps
+                _t0 = _time.perf_counter()
                 turn.generate_pending_visemes()
+                _t1 = _time.perf_counter()
                 initial_visemes = turn.get_all_visemes()
-                print(f"[Coordinator] Starting turn {turn_id} with {len(initial_visemes)} initial visemes")
+                print(f"[Coordinator] Starting turn {turn_id} with {len(initial_visemes)} initial visemes (viseme_gen={(_t1-_t0)*1000:.0f}ms)")
+                turn.log_boundary_table("play_turn_start")
+
+                if turn.use_3d:
+                    _profiler.mark("viseme_gen_done")
 
                 # 2. Wait for previous turn's mouth animation to complete
                 # This prevents the new lipsync_start from interrupting the closing animation
@@ -637,13 +892,12 @@ class PlaybackCoordinator:
                     print(f"[Coordinator] Abort after turn wait: {turn_id}")
                     return False
 
-                # 3. Look up per-character lipsync scale and fallback setting
+                # 3. Look up per-character lipsync scale
                 settings = load_settings()
                 lipsync_settings = settings.get('lipsync', {})
                 npc_scales = lipsync_settings.get('npc_scales', {})
                 default_scale = lipsync_settings.get('default_scale', 1.0)
                 scale = npc_scales.get(turn.speaker_id, default_scale)
-                fallback = lipsync_settings.get('fallback', False)
 
                 # 4. Mark new turn starting and send lipsync_start
                 self.lua_socket.mark_turn_started()
@@ -653,7 +907,6 @@ class PlaybackCoordinator:
                     turn_id=turn_id,
                     visemes=self._format_visemes(initial_visemes),
                     scale=scale,
-                    fallback=fallback
                 )
                 if turn.use_3d:
                     _profiler.mark("lipsync_sent")
@@ -676,27 +929,19 @@ class PlaybackCoordinator:
                 # 4. Mark playback started (store in turn for sync loop access)
                 turn.playback_started = True
                 turn.playback_start_time = time.time()
+                turn._clock_corrected = False
                 playback_start_time = turn.playback_start_time
 
                 # Emit first sentence subtitle immediately to avoid client fallback
                 # flashing full text on first-turn cold starts (audio backend init).
                 if turn.sentence_boundaries and turn._sentence_subtitles and turn._last_subtitle_idx < 0:
-                    first = turn.sentence_boundaries[0]
-                    is_narr = bool(first.get('is_narration', False))
-                    bt = turn._get_boundary_time(first, 0)
-                    if bt is None:
-                        bt = float(first.get('start_time', 0.0) or 0.0)
-                    msg = {
-                        "type": "subtitle_update",
-                        "turn_id": turn.turn_id,
-                        "text": remove_unpaired_double_quotes(first.get('text', '')),
-                        "sentence_idx": 0,
-                        "total_sentences": len(turn.sentence_boundaries),
-                        "is_narration": is_narr,
-                    }
-                    self.lua_socket.send(msg)
+                    self._send_subtitle_update(
+                        turn,
+                        idx=0,
+                        audio_pos=0.0,
+                        reason="initial_immediate",
+                    )
                     turn._last_subtitle_idx = 0
-                    print(f"[Subtitle] idx=0 at audio_pos=0.00s (boundary_start={bt:.2f}s, narration={is_narr})")
 
                 # 5. Start sync loop (sends new visemes + audio position)
                 self._stop_sync.clear()
@@ -713,13 +958,33 @@ class PlaybackCoordinator:
                 if turn.use_3d:  # 3D audio = NPC, not player
                     _profiler.mark("npc_audio_start")
                     _profiler.print_time_to_audio()
+
+                def on_audio_start(actual_start_time):
+                    """Correct the turn's playback clock to when audio truly starts.
+
+                    playback_start_time is initially set before play_stream() is
+                    called, but the audio device/node setup inside play_stream
+                    can take hundreds of ms (especially the first call, which
+                    initialises libaudioverse).  The sync loop uses
+                    playback_start_time for subtitle progression and audio-
+                    position estimates, so the drift causes subtitles to advance
+                    early and the tail of speech to be cut off.
+                    """
+                    drift = actual_start_time - turn.playback_start_time
+                    turn.playback_start_time = actual_start_time
+                    turn._clock_corrected = True
+                    print(f"[Coordinator] Playback clock corrected: "
+                          f"drift={drift*1000:.0f}ms")
+
                 success = audio_player.play_stream(
                     turn.audio_stream,
+                    on_start=on_audio_start,
                     use_3d=turn.use_3d,
                     reverb_auxbus=turn.reverb_auxbus,
                     reverb_send=turn.reverb_send,
                     abort_check=abort_check,  # Pass epoch check to audio layer
                     sentence_boundaries=turn.sentence_boundaries,
+                    centered=turn.centered,
                 )
 
                 # 7. Stop sync loop
@@ -740,6 +1005,7 @@ class PlaybackCoordinator:
                 return False
             finally:
                 self.current_turn_id = None
+                self._current_audio_player = None
 
         if blocking:
             return do_playback()
@@ -811,29 +1077,19 @@ class PlaybackCoordinator:
                             break
                         if current_idx != turn._last_subtitle_idx and current_idx >= 0:
                             turn._last_subtitle_idx = current_idx
-                            boundary = turn.sentence_boundaries[current_idx]
-                            is_narr = boundary.get('is_narration', False)
-                            bt = turn._get_boundary_time(boundary, current_idx)
-                            if bt is None:
-                                bt = boundary.get('start_time', 0.0)
-                            print(f"[Subtitle] idx={current_idx} at audio_pos={audio_pos:.2f}s "
-                                  f"(boundary_start={bt:.2f}s, narration={is_narr})")
-                            msg = {
-                                "type": "subtitle_update",
-                                "turn_id": turn.turn_id,
-                                "text": remove_unpaired_double_quotes(boundary['text']),
-                                "sentence_idx": current_idx,
-                                "total_sentences": len(turn.sentence_boundaries),
-                                "is_narration": bool(is_narr),
-                            }
-                            self.lua_socket.send(msg)
+                            self._send_subtitle_update(
+                                turn,
+                                idx=current_idx,
+                                audio_pos=audio_pos,
+                                reason="boundary_time_le_audio_pos",
+                            )
 
                 last_sync_time = now
 
             time.sleep(0.02)  # 50Hz check rate
 
     def _get_audio_position_safe(self, turn: TurnState) -> Optional[float]:
-        """Get audio position - uses wall clock since playback start."""
+        """Get audio position, corrected for push_node buffer underruns."""
         # Return frozen position if paused
         if self._paused_at is not None:
             return self._paused_at
@@ -845,10 +1101,21 @@ class PlaybackCoordinator:
             except:
                 pass
 
-        # Primary: Use wall clock time since playback started
-        # This is accurate because playback_start_time is set right before audio.play()
+        # Primary: wall clock corrected for underruns
         if turn.playback_started and turn.playback_start_time > 0:
-            return time.time() - turn.playback_start_time
+            pos = time.time() - turn.playback_start_time
+            # Subtract underrun time from the audio player if available
+            player = getattr(self, '_current_audio_player', None)
+            if player:
+                ut = getattr(player, '_underrun_time', None)
+                if ut is not None:
+                    pos -= ut[0]
+            if not getattr(turn, '_clock_corrected', False) and pos > 1.0:
+                if not getattr(turn, '_clock_warn_logged', False):
+                    print(f"[Coordinator] WARNING: playback clock never corrected "
+                          f"by on_audio_start (pos={pos:.2f}s)")
+                    turn._clock_warn_logged = True
+            return max(0.0, pos)
 
         return None
 

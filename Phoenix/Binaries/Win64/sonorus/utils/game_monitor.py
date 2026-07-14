@@ -111,11 +111,38 @@ def start_game_monitor():
                 _game_monitor_running = False
 
                 # Gracefully shutdown memory processing before exit
+                # Wait up to 15 minutes for graphiti operations (add_episode can take 5-10 min)
                 try:
-                    from .memory_queue import graceful_shutdown
-                    graceful_shutdown(max_wait=300.0)  # 5 minutes
+                    from .memory_queue import graceful_shutdown, is_processing
+                    memory_shutdown_ok = graceful_shutdown(max_wait=900.0)  # 15 minutes
                 except Exception as e:
+                    memory_shutdown_ok = False
                     print(f"[GameMonitor] Error during graceful shutdown: {e}")
+
+                if not memory_shutdown_ok:
+                    # Check if still actively processing - if so, wait longer
+                    try:
+                        if is_processing():
+                            print("[GameMonitor] Graphiti still processing - waiting for completion before exit...")
+                            extra_wait = 0
+                            while is_processing() and extra_wait < 600:  # up to 10 more minutes
+                                time.sleep(2.0)
+                                extra_wait += 2
+                                if extra_wait % 30 == 0:
+                                    print(f"[GameMonitor] Still waiting for graphiti... ({extra_wait}s extra)")
+                            if not is_processing():
+                                print("[GameMonitor] Graphiti operations completed")
+                                # Close connections now that processing is done
+                                try:
+                                    graceful_shutdown(max_wait=30.0)
+                                except Exception:
+                                    pass
+                            else:
+                                print("[GameMonitor] Graphiti still running after extended wait - forcing exit")
+                        else:
+                            print("[GameMonitor] Memory shutdown incomplete but no active processing")
+                    except Exception as e:
+                        print(f"[GameMonitor] Error checking processing state: {e}")
 
                 # Delete lock files so Lua doesn't wait 60s thinking server is starting
                 script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

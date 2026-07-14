@@ -150,13 +150,13 @@ class AudioFeatures:
 
 
 # ---------------------------------------------------------------------------
-# VAD wrapper using sonorus's existing SileroVADAnalyzer (services/vad.py)
+# VAD wrapper using sonorus's VADAnalyzer (services/vad.py)
 # ---------------------------------------------------------------------------
 
 class VAD:
     def __init__(self):
-        from services.vad import SileroVADAnalyzer
-        self._analyzer = SileroVADAnalyzer(threshold=0.5)
+        from services.vad import VADAnalyzer
+        self._analyzer = VADAnalyzer(threshold=0.5)
         self.prediction_buffer: deque = deque(maxlen=125)
 
     def reset_states(self):

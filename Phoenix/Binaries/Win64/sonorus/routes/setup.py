@@ -13,11 +13,14 @@ import threading
 
 from flask import Blueprint, request, jsonify
 
+from utils.game_settings import get_game_settings_warnings
 from utils.settings import (
     SONORUS_DIR,
     DATA_DIR,
+    GEMINI_CHAT_DEFAULT_OR,
     load_settings,
     save_settings,
+    is_llm_provider_feature_disabled,
 )
 
 setup_bp = Blueprint('setup', __name__)
@@ -35,6 +38,95 @@ def set_lua_socket(lua_socket):
     """Set lua_socket reference for syncing settings to Lua after extraction."""
     global _lua_socket
     _lua_socket = lua_socket
+
+
+def _get_current_tts_provider(settings):
+    """Return the currently selected TTS provider."""
+    return settings.get('tts', {}).get('provider', 'inworld')
+
+
+def _get_current_llm_provider(settings):
+    """Return the currently selected LLM provider."""
+    return settings.get('llm', {}).get('provider', 'gemini')
+
+
+def _humanize_llm_test_error(error_msg, llm_provider):
+    """Translate setup LLM test errors into clearer user-facing messages."""
+    if not error_msg:
+        return 'No response received from model'
+
+    lower_error = error_msg.lower()
+
+    if llm_provider == 'openrouter':
+        if (
+            ('requires more credits' in lower_error and 'max_tokens' in lower_error)
+            or 'insufficient credits' in lower_error
+        ):
+            return 'OpenRouter balance too low, deposit $5 (minimum) into OpenRouter to continue'
+
+    if 'api_key' in lower_error or 'unauthorized' in lower_error or '401' in error_msg:
+        return "Invalid API key. Check your OpenRouter/OpenAI/Ollama/llama.cpp API key."
+    if 'not found' in lower_error or '404' in error_msg:
+        return "Model not available. Verify the model ID."
+    if 'insufficient' in lower_error or 'credits' in lower_error:
+        return "API account has insufficient credits."
+    if 'timeout' in lower_error:
+        return "Request timed out. Try again."
+
+    return error_msg
+
+
+def _get_default_embedding_model(llm_provider):
+    """Return the memory embedding default for the active LLM provider."""
+    if llm_provider == 'openrouter':
+        return 'openai/text-embedding-3-small'
+    if llm_provider == 'gemini':
+        return 'gemini-embedding-2'
+    return 'text-embedding-3-small'
+
+
+def _safe_positive_int(value):
+    try:
+        parsed = int(float(value))
+        return parsed if parsed > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _reasoning_request_is_off(reasoning_request):
+    """Return True when the request did not enable OpenRouter reasoning."""
+    if reasoning_request is None:
+        return True
+    if not isinstance(reasoning_request, dict):
+        return True
+    if reasoning_request.get('enabled') is False:
+        return True
+    if reasoning_request.get('max_tokens') == 0:
+        return True
+    if str(reasoning_request.get('effort', '')).lower() in ('minimal', 'none', 'off', 'disabled'):
+        return True
+    return False
+
+
+def _openrouter_reasoning_warning(llm_module):
+    """Build a warning if OpenRouter reports reasoning tokens despite reasoning being off."""
+    metadata = llm_module.get_last_response_metadata() if hasattr(llm_module, 'get_last_response_metadata') else {}
+    if metadata.get('warning'):
+        return metadata['warning']
+    if metadata.get('provider') != 'openrouter':
+        return None
+
+    reasoning_tokens = _safe_positive_int((metadata.get('usage') or {}).get('reasoning_tokens'))
+    if not reasoning_tokens:
+        return None
+
+    if not _reasoning_request_is_off(metadata.get('reasoning_requested')):
+        return None
+
+    return (
+        f"OpenRouter reported {reasoning_tokens} reasoning tokens even though Sonorus did not enable reasoning for this test. "
+        "This provider may ignore the reasoning toggle."
+    )
 
 
 def _run_setup_command(command, args=None):
@@ -96,29 +188,30 @@ def _run_setup_command(command, args=None):
             if not os.path.exists(script_path):
                 raise FileNotFoundError(f"Setup script not found: {script_path}")
 
-            # Check if language-specific voice manifest exists
-            if language == "EN_US":
-                manifest_path = os.path.join(DATA_DIR, "voice_manifest.json")
-            else:
-                lang_suffix = language.lower()
-                manifest_path = os.path.join(DATA_DIR, f"voice_manifest_{lang_suffix}.json")
+            # Undubbed languages use EN_US voice manifest and references
+            from constants import get_voice_language
+            voice_language = get_voice_language(language)
+
+            # Check if voice manifest exists (using voice language, not game language)
+            manifest_path, _ = _get_voice_paths(voice_language)
 
             if not os.path.exists(manifest_path):
                 manifest_name = os.path.basename(manifest_path)
-                if language == "EN_US":
+                if voice_language == "EN_US":
                     raise FileNotFoundError(f"Voice manifest not found. Ensure {manifest_name} exists in the data folder.")
                 else:
-                    # For non-English, suggest using voice manager to build manifest
+                    # For non-English dubbed languages, suggest using voice manager
                     raise FileNotFoundError(
-                        f"Voice manifest not found for {language}. "
+                        f"Voice manifest not found for {voice_language}. "
                         f"You need to build the voice manifest for this language first. "
                         f"Visit the Voice Manager at http://localhost:5000/voice-manager/ to extract and build {manifest_name}."
                     )
 
-            print(f"[Setup] Running: extract_voices.py --from-manifest --language {language}")
+            # Extract using voice language (undubbed languages extract EN_US audio)
+            print(f"[Setup] Running: extract_voices.py --from-manifest --language {voice_language}")
 
             result = subprocess.run(
-                [sys.executable, script_path, "--from-manifest", "--language", language],
+                [sys.executable, script_path, "--from-manifest", "--language", voice_language],
                 capture_output=True,
                 text=True,
                 cwd=SONORUS_DIR,
@@ -250,7 +343,13 @@ def _get_localization_paths(language):
 
 
 def _get_voice_paths(language):
-    """Get voice manifest and references directory for the given language."""
+    """Get voice manifest and references directory for the given language.
+
+    Undubbed languages automatically fall back to EN_US paths.
+    """
+    from constants import get_voice_language
+    language = get_voice_language(language)
+
     if language == "EN_US":
         return (
             os.path.join(DATA_DIR, "voice_manifest.json"),
@@ -262,6 +361,27 @@ def _get_voice_paths(language):
             os.path.join(DATA_DIR, f"voice_manifest_{lang_suffix}.json"),
             os.path.join(SONORUS_DIR, "voice_references", lang_suffix)
         )
+
+
+@setup_bp.route('/api/setup/open-voice-references', methods=['POST'])
+def setup_open_voice_references():
+    """Open the active voice references folder in Explorer."""
+    try:
+        data = request.get_json(silent=True) or {}
+        settings = load_settings()
+        language = str(data.get("language") or settings.get('setup', {}).get('language', 'EN_US'))
+        _, voice_refs_dir = _get_voice_paths(language)
+        voice_refs_dir = os.path.abspath(voice_refs_dir)
+
+        voice_root = os.path.abspath(os.path.join(SONORUS_DIR, "voice_references"))
+        if os.path.commonpath([voice_root, voice_refs_dir]) != voice_root:
+            return jsonify({"error": "Invalid voice references path"}), 400
+
+        os.makedirs(voice_refs_dir, exist_ok=True)
+        subprocess.Popen(["explorer", voice_refs_dir])
+        return jsonify({"ok": True, "path": voice_refs_dir})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 def _compute_setup_status(language=None, include_progress=False):
@@ -331,13 +451,17 @@ def _compute_setup_status(language=None, include_progress=False):
     voices_complete = voices_total > 0 and voices_referenced >= voices_total
 
     # TTS test (language-aware)
-    tts_tested = settings.get('setup', {}).get('tts_tested', False)
+    current_tts_provider = _get_current_tts_provider(settings)
+    tts_test_provider = settings.get('setup', {}).get('tts_test_provider')
+    tts_tested = settings.get('setup', {}).get('tts_tested', False) and tts_test_provider == current_tts_provider
     tts_test_language = settings.get('setup', {}).get('tts_test_language')
     # TTS is valid if tested AND (voices complete OR tested for this specific language)
     tts_valid = tts_tested and (voices_complete or tts_test_language == language)
 
     # LLM test
-    llm_tested = settings.get('setup', {}).get('llm_tested', False)
+    current_llm_provider = _get_current_llm_provider(settings)
+    llm_test_provider = settings.get('setup', {}).get('llm_test_provider')
+    llm_tested = settings.get('setup', {}).get('llm_tested', False) and llm_test_provider == current_llm_provider
 
     # Overall completion
     complete = (main_loc and subtitles) and voices_complete and tts_valid and llm_tested
@@ -351,12 +475,17 @@ def _compute_setup_status(language=None, include_progress=False):
     if not voices_complete:
         missing.append(f"voices for {language} ({voices_referenced}/{voices_total} extracted)")
     if not tts_valid:
-        if tts_tested and tts_test_language != language:
+        if settings.get('setup', {}).get('tts_tested', False) and tts_test_provider and tts_test_provider != current_tts_provider:
+            missing.append(f"TTS test (tested for {tts_test_provider}, need {current_tts_provider})")
+        elif tts_tested and tts_test_language != language:
             missing.append(f"TTS test (tested for {tts_test_language}, need {language})")
         else:
             missing.append("TTS test")
     if not llm_tested:
-        missing.append("LLM test")
+        if settings.get('setup', {}).get('llm_tested', False) and llm_test_provider and llm_test_provider != current_llm_provider:
+            missing.append(f"LLM test (tested for {llm_test_provider}, need {current_llm_provider})")
+        else:
+            missing.append("LLM test")
 
     result = {
         'complete': complete,
@@ -369,7 +498,11 @@ def _compute_setup_status(language=None, include_progress=False):
         'tts_tested': tts_tested,
         'tts_valid': tts_valid,
         'tts_test_language': tts_test_language,
+        'tts_test_provider': tts_test_provider,
+        'current_tts_provider': current_tts_provider,
         'llm_tested': llm_tested,
+        'llm_test_provider': llm_test_provider,
+        'current_llm_provider': current_llm_provider,
         'missing': missing,
     }
 
@@ -389,29 +522,7 @@ def is_setup_complete():
 
 def check_game_settings_warnings():
     """Check game settings for issues. Returns list of warning strings."""
-    warnings = []
-    try:
-        ini_path = os.path.join(
-            os.environ.get("LOCALAPPDATA", ""),
-            "Hogwarts Legacy", "Saved", "Config",
-            "WindowsNoEditor", "GameUserSettings.ini"
-        )
-        if os.path.isfile(ini_path):
-            with open(ini_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    stripped = line.strip()
-                    if stripped.lower().startswith("subtitlesenabled="):
-                        value = stripped.split("=", 1)[1].strip().lower()
-                        if value == "false":
-                            warnings.append(
-                                "Subtitles are currently DISABLED in Hogwarts Legacy. "
-                                "Sonorus requires subtitles to be ON to function correctly. "
-                                "Please enable subtitles in the game's Audio settings."
-                            )
-                        break
-    except Exception:
-        pass  # Don't break setup if we can't read game settings
-    return warnings
+    return get_game_settings_warnings()
 
 
 @setup_bp.route('/api/setup/status', methods=['GET'])
@@ -479,22 +590,33 @@ def get_setup_status():
     vision_config = settings.get('agents', {}).get('vision', {})
     vision_settings = vision_config.get('llm', {})
     memory_settings = settings.get('memory', {})
+    current_llm_provider = status['current_llm_provider']
     models = {
-        'chat': conv_settings.get('chat_model', 'google/gemini-3-flash-preview:nitro'),
+        'chat': conv_settings.get('chat_model', GEMINI_CHAT_DEFAULT_OR),
         'target': conv_settings.get('target_selection_model', 'meta-llama/llama-4-scout:nitro'),
-        'interject': conv_settings.get('interjection_model', 'x-ai/grok-4.1-fast')
+        'interject': conv_settings.get('interjection_model', 'google/gemini-3.1-flash-lite')
     }
-    if vision_config.get('enabled', True):
+    if vision_config.get('enabled', True) and not is_llm_provider_feature_disabled('vision', settings):
         models['vision'] = vision_settings.get('model', 'google/gemini-2.5-flash-lite:nitro')
     # Include input correction model if enabled
-    if conv_settings.get('input_correction_enabled') and conv_settings.get('input_correction_model'):
+    if (conv_settings.get('input_correction_enabled') and conv_settings.get('input_correction_model')
+            and not is_llm_provider_feature_disabled('input_correction', settings)):
         models['input_correction'] = conv_settings['input_correction_model']
-    # Include memory models if memory is enabled
-    if memory_settings.get('enabled'):
+    # Include memory models only when the active provider allows memory.
+    if memory_settings.get('enabled') and not is_llm_provider_feature_disabled('memory', settings):
+        models['embedding'] = memory_settings.get('embedding_model') or _get_default_embedding_model(current_llm_provider)
         for key, setting_key in [('chapter', 'chapter_model'), ('prose', 'prose_model'),
                                   ('graphiti', 'graphiti_model'), ('graphiti_small', 'graphiti_small_model'),
                                   ('reranker', 'reranker_model')]:
             model_id = memory_settings.get(setting_key)
+            if model_id:
+                models[key] = model_id
+    # Include owl post models if enabled
+    owl_settings = settings.get('owl_post', {})
+    if owl_settings.get('enabled', True) and not is_llm_provider_feature_disabled('owl_post', settings):
+        for key, setting_key in [('owl_classifier', 'orchestrator_model'), ('owl_mail', 'mail_model'),
+                                  ('owl_board', 'board_model'), ('owl_summarize', 'summarize_model')]:
+            model_id = owl_settings.get(setting_key)
             if model_id:
                 models[key] = model_id
 
@@ -522,11 +644,15 @@ def get_setup_status():
             },
             "tts": {
                 "status": tts_status,
-                "tested": status['tts_tested']
+                "tested": status['tts_tested'],
+                "tested_provider": status['tts_test_provider'],
+                "current_provider": status['current_tts_provider'],
             },
             "llm": {
                 "status": llm_status,
                 "tested": status['llm_tested'],
+                "tested_provider": status['llm_test_provider'],
+                "current_provider": status['current_llm_provider'],
                 "models": models
             }
         },
@@ -626,6 +752,22 @@ def setup_test_tts():
         if not tts.is_available():
             if provider in ('pocket', 'none'):
                 raise Exception(f"TTS provider '{provider}' failed to initialize.")
+            elif provider == 'inworld':
+                inworld = tts_settings.get('inworld', {})
+                missing = []
+                if not inworld.get('api_key'):
+                    missing.append('API key')
+                if missing:
+                    missing_text = ' and '.join(missing)
+                    raise Exception(f"TTS not configured. Please add your Inworld {missing_text} in the TTS settings.")
+                raise Exception("TTS not configured. Check your Inworld settings.")
+            elif provider == 'elevenlabs':
+                raise Exception("TTS not configured. Please add your ElevenLabs API key in the TTS settings.")
+            elif provider == 'omnivoice_api':
+                omni_api = tts_settings.get('omnivoice_api', {})
+                if not omni_api.get('api_url'):
+                    raise Exception("TTS not configured. Please add your OmniVoice API URL in the TTS settings.")
+                raise Exception("TTS not configured. Check your OmniVoice API settings.")
             else:
                 raise Exception(f"TTS not configured. Please add your {provider.title()} API key in the TTS settings.")
 
@@ -645,6 +787,7 @@ def setup_test_tts():
             settings['setup'] = {}
         settings['setup']['tts_tested'] = True
         settings['setup']['tts_test_language'] = settings.get('setup', {}).get('language', 'EN_US')
+        settings['setup']['tts_test_provider'] = provider
         save_settings(settings)
 
         return jsonify({
@@ -662,6 +805,13 @@ def setup_test_tts():
         elif 'connection' in error_msg.lower() or 'refused' in error_msg.lower():
             error_msg = "Cannot connect to TTS service. Check your internet connection."
         # Otherwise pass through the specific error from the TTS system
+
+        settings = load_settings()
+        if 'setup' not in settings:
+            settings['setup'] = {}
+        settings['setup']['tts_tested'] = False
+        settings['setup']['tts_test_provider'] = provider
+        save_settings(settings)
 
         _setup_error = error_msg
         return jsonify({
@@ -695,6 +845,7 @@ def setup_test_llm():
         import llm
 
         settings = load_settings()
+        llm_provider = _get_current_llm_provider(settings)
         conv_settings = settings.get('conversation', {})
         vision_config = settings.get('agents', {}).get('vision', {})
         vision_settings = vision_config.get('llm', {})
@@ -705,7 +856,7 @@ def setup_test_llm():
         model_uses = {}
         models_list = [
             # Core models (always tested)
-            (conv_settings.get('chat_model', 'google/gemini-3-flash-preview:nitro'), 'chat',
+            (conv_settings.get('chat_model', GEMINI_CHAT_DEFAULT_OR), 'chat',
              conv_settings.get('max_tokens', 8192)),
             (conv_settings.get('target_selection_model', 'gemini-2.5-flash-lite'), 'target',
              conv_settings.get('speaker_selection_max_tokens', 512)),
@@ -714,20 +865,23 @@ def setup_test_llm():
         ]
 
         # Vision model (only if vision is enabled)
-        if vision_config.get('enabled', True):
+        if vision_config.get('enabled', True) and not is_llm_provider_feature_disabled('vision', settings):
             models_list.append((
                 vision_settings.get('model', 'google/gemini-2.5-flash-lite:nitro'), 'vision',
                 vision_settings.get('max_tokens', 8192),
             ))
 
         # Input correction model (if enabled and configured)
-        if conv_settings.get('input_correction_enabled') and conv_settings.get('input_correction_model'):
+        if (conv_settings.get('input_correction_enabled') and conv_settings.get('input_correction_model')
+                and not is_llm_provider_feature_disabled('input_correction', settings)):
             models_list.append(
                 (conv_settings['input_correction_model'], 'input_correction', 1024)
             )
 
-        # Memory models (only if memory is enabled)
-        if memory_settings.get('enabled'):
+        # Memory models (only if memory is enabled and provider allows memory)
+        embedding_model = None
+        if memory_settings.get('enabled') and not is_llm_provider_feature_disabled('memory', settings):
+            embedding_model = memory_settings.get('embedding_model') or _get_default_embedding_model(llm_provider)
             memory_models = [
                 (memory_settings.get('chapter_model'), 'chapter'),
                 (memory_settings.get('prose_model'), 'prose'),
@@ -738,6 +892,19 @@ def setup_test_llm():
             for model_id, use in memory_models:
                 if model_id:
                     models_list.append((model_id, use, 4096))
+
+        # Owl Post models (only if owl post is enabled)
+        owl_settings = settings.get('owl_post', {})
+        if owl_settings.get('enabled', True) and not is_llm_provider_feature_disabled('owl_post', settings):
+            owl_models = [
+                (owl_settings.get('orchestrator_model'), 'owl_classifier'),
+                (owl_settings.get('mail_model'), 'owl_mail'),
+                (owl_settings.get('board_model'), 'owl_board'),
+                (owl_settings.get('summarize_model'), 'owl_summarize'),
+            ]
+            for model_id, use in owl_models:
+                if model_id:
+                    models_list.append((model_id, use, 8192))
 
         for model_id, use, max_tokens in models_list:
             if model_id not in model_uses:
@@ -761,23 +928,30 @@ def setup_test_llm():
                 response = llm.chat_simple(
                     test_prompt,
                     model=model_id,
-                    temperature=0.0,
+                    temperature=0.2,
                     max_tokens=max_tokens,
                     context="setup_test"
                 )
                 duration_ms = (time.time() - start_time) * 1000
 
                 if response:
-                    results[model_id] = {
+                    result = {
                         'success': True,
                         'used_for': uses,
                         'response_excerpt': response[:50],
                         'duration_ms': round(duration_ms)
                     }
+                    warning = _openrouter_reasoning_warning(llm)
+                    if warning:
+                        result['warning'] = warning
+                    results[model_id] = result
                 else:
                     all_success = False
                     # Get the actual error from llm module
-                    error_msg = llm.get_last_error() or 'No response received from model'
+                    error_msg = _humanize_llm_test_error(
+                        llm.get_last_error() or 'No response received from model',
+                        llm_provider
+                    )
                     results[model_id] = {
                         'success': False,
                         'used_for': uses,
@@ -785,20 +959,48 @@ def setup_test_llm():
                     }
             except Exception as e:
                 all_success = False
-                error_msg = str(e)
-                # Translate common errors
-                if 'api_key' in error_msg.lower() or 'unauthorized' in error_msg.lower() or '401' in error_msg:
-                    error_msg = "Invalid API key. Check your OpenRouter/OpenAI API key."
-                elif 'not found' in error_msg.lower() or '404' in error_msg:
-                    error_msg = f"Model '{model_id}' not available. Verify the model ID."
-                elif 'insufficient' in error_msg.lower() or 'credits' in error_msg.lower():
-                    error_msg = "API account has insufficient credits."
-                elif 'timeout' in error_msg.lower():
-                    error_msg = "Request timed out. Try again."
-
+                error_msg = _humanize_llm_test_error(str(e), llm_provider)
                 results[model_id] = {
                     'success': False,
                     'used_for': uses,
+                    'error': error_msg
+                }
+
+        if embedding_model:
+            result_key = f"{embedding_model} [embedding]"
+            try:
+                start_time = time.time()
+                embedding_result = llm.test_embedding(
+                    model=embedding_model,
+                    text="Sonorus setup embedding test"
+                )
+                duration_ms = (time.time() - start_time) * 1000
+
+                if embedding_result:
+                    dimensions = embedding_result.get('dimensions')
+                    results[result_key] = {
+                        'success': True,
+                        'used_for': ['embedding'],
+                        'response_excerpt': f"{dimensions} dimensions" if dimensions else "Embedding returned",
+                        'duration_ms': round(duration_ms)
+                    }
+                else:
+                    all_success = False
+                    error_msg = _humanize_llm_test_error(
+                        llm.get_last_error() or 'No embedding returned from model',
+                        llm_provider
+                    )
+                    results[result_key] = {
+                        'success': False,
+                        'used_for': ['embedding'],
+                        'error': error_msg
+                    }
+            except Exception as e:
+                all_success = False
+                error_msg = _humanize_llm_test_error(str(e), llm_provider)
+                results[result_key] = {
+                    'success': False,
+                    'used_for': ['embedding'],
                     'error': error_msg
                 }
 
@@ -808,21 +1010,42 @@ def setup_test_llm():
             if 'setup' not in settings:
                 settings['setup'] = {}
             settings['setup']['llm_tested'] = True
+            settings['setup']['llm_test_provider'] = llm_provider
+            save_settings(settings)
+        else:
+            settings = load_settings()
+            if 'setup' not in settings:
+                settings['setup'] = {}
+            settings['setup']['llm_tested'] = False
+            settings['setup']['llm_test_provider'] = llm_provider
             save_settings(settings)
 
         failed_count = sum(1 for r in results.values() if not r['success'])
         total_count = len(results)
+        unique_errors = {
+            r.get('error')
+            for r in results.values()
+            if not r.get('success') and r.get('error')
+        }
+        summary_error = next(iter(unique_errors)) if len(unique_errors) == 1 else f'{failed_count} of {total_count} models failed'
 
         if not all_success:
-            _setup_error = f'{failed_count} of {total_count} models failed'
+            _setup_error = summary_error
 
         return jsonify({
             'success': all_success,
             'results': results,
-            'error': f'{failed_count} of {total_count} models failed' if not all_success else None
+            'error': summary_error if not all_success else None
         })
 
     except Exception as e:
+        settings = load_settings()
+        if 'setup' not in settings:
+            settings['setup'] = {}
+        settings['setup']['llm_tested'] = False
+        settings['setup']['llm_test_provider'] = _get_current_llm_provider(settings)
+        save_settings(settings)
+
         _setup_error = str(e)
         return jsonify({
             'success': False,

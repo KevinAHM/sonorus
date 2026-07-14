@@ -10,7 +10,88 @@ import socket as sock_lib
 import struct
 import threading
 
+from . import mods
+from .dialogue_db import (
+    _format_game_date,
+    _format_game_time,
+    _game_datetime_to_minutes,
+    _minutes_to_game_datetime,
+    _parse_game_date,
+    _parse_game_time,
+    get_latest_recorded_game_time_candidates as get_latest_dialogue_game_time_candidates,
+    get_latest_recorded_game_minutes as get_latest_dialogue_game_minutes,
+)
+from .game_settings import get_game_subtitles_enabled
+from .owl_post_db import (
+    get_current_game_minutes,
+    get_latest_recorded_game_time_candidates as get_latest_owl_post_game_time_candidates,
+    get_latest_recorded_game_minutes as get_latest_owl_post_game_minutes,
+)
 from .text_utils import is_significant_npc
+
+
+TIME_SYNC_WARNING_THRESHOLD_MINUTES = 60
+
+
+def _format_game_minutes_for_log(total_minutes: int) -> str:
+    """Format absolute game minutes for readable server logs."""
+    if total_minutes <= 0:
+        return "unknown"
+    date_tuple, time_tuple = _minutes_to_game_datetime(total_minutes)
+    return f"{_format_game_date(*date_tuple)} {_format_game_time(*time_tuple)} ({total_minutes}m)"
+
+
+def _get_strict_current_game_minutes(game_context: dict) -> int:
+    """Return current game minutes only when both date and time are known."""
+    time_str = game_context.get('timeFormatted', '') or game_context.get('time', '')
+    time_tuple = _parse_game_time(time_str)
+    if time_tuple is None:
+        return 0
+
+    year = game_context.get('year')
+    month = game_context.get('month')
+    day = game_context.get('day')
+    if year is not None and month is not None and day is not None:
+        date_tuple = (int(year), int(month), int(day))
+    else:
+        date_str = game_context.get('dateFormatted') or game_context.get('gameDate')
+        date_tuple = _parse_game_date(date_str) if date_str else None
+
+    if date_tuple is None:
+        return 0
+
+    return _game_datetime_to_minutes(date_tuple, time_tuple)
+
+
+def _format_dialogue_candidate_for_log(candidate: dict) -> str:
+    """Format a dialogue-history candidate row for mismatch diagnostics."""
+    return (
+        f"id={candidate.get('id')} source={candidate.get('source')} "
+        f"time={candidate.get('gameDate')} {candidate.get('gameTime')} ({candidate.get('minutes')}m) "
+        f"type={candidate.get('type')} speaker={candidate.get('speaker') or '?'} "
+        f"voice={candidate.get('voiceName') or '?'} count={candidate.get('count')} "
+        f"line={candidate.get('lineID') or '-'} location={candidate.get('location') or '-'} "
+        f"text={repr(candidate.get('text') or '')}"
+    )
+
+
+def _format_owl_candidate_for_log(candidate: dict) -> str:
+    """Format an Owl Post candidate row for mismatch diagnostics."""
+    base = (
+        f"id={candidate.get('id')} source={candidate.get('source')} "
+        f"time={_format_game_minutes_for_log(int(candidate.get('minutes') or 0))} "
+        f"kind={candidate.get('kind')}"
+    )
+    if candidate.get("kind") == "mail":
+        return (
+            f"{base} sender={candidate.get('sender') or '?'} "
+            f"recipient={candidate.get('recipient') or '?'} subject={repr(candidate.get('subject') or '')}"
+        )
+    return (
+        f"{base} author={candidate.get('author') or '?'} board={candidate.get('boardId')} "
+        f"root={candidate.get('rootPostId')} title={repr(candidate.get('title') or '')}"
+    )
+
 
 class LuaSocketServer:
     """TCP server for bidirectional Lua communication."""
@@ -25,6 +106,10 @@ class LuaSocketServer:
         # Playback state tracking (for interjection loop)
         self.playback_active = False
         self.playback_event = threading.Event()
+        # Pipeline state tracking (full TTS lifecycle: synthesis → playback)
+        self.pipeline_active = False
+        self.pipeline_event = threading.Event()
+        self.pipeline_event.set()
         # Game context cache (received from Lua)
         self._game_context = {}
         self._context_lock = threading.Lock()
@@ -62,6 +147,10 @@ class LuaSocketServer:
         self._input_capture = None  # Will be set by server.py
         self._conv_state = None  # Will be set by server.py
         self._interrupt_callback = None  # Will be set by server.py (stop_conversation)
+        self._game_event_callback = None  # Will be set by server.py (event commentary)
+        self._pending_time_sync_check = False
+        self._last_player_context_mismatch = None
+        self._ambient_blocklist_current_minutes = None
 
     def set_input_capture(self, input_capture_module):
         """Set the input_capture module for force_close handling."""
@@ -74,6 +163,10 @@ class LuaSocketServer:
     def set_interrupt_callback(self, callback):
         """Set the callback for conversation interrupts (e.g., cinematic start)."""
         self._interrupt_callback = callback
+
+    def set_game_event_callback(self, callback):
+        """Set the callback for lightweight gameplay events."""
+        self._game_event_callback = callback
 
     def start(self):
         """Start socket server in background thread."""
@@ -109,7 +202,8 @@ class LuaSocketServer:
                 recv_thread.start()
                 # Send initial settings and data
                 self.send_tracking_settings()
-                self.send_significant_npcs()
+                # send_significant_npcs and resync_active_commitments deferred
+                # until player_handshake (they require per-player DBs)
                 # Wire up VR tracker to push offsets to Lua
                 try:
                     from vr import set_vr_lua_socket
@@ -136,6 +230,33 @@ class LuaSocketServer:
                 self.client = None
                 return False
 
+    # Cache: display name (lowered) -> canonical mod key
+    _location_reverse_map = None
+
+    def _resolve_location_id(self, display_name):
+        """Reverse-lookup a localized display name to a canonical mod key.
+        Uses location_registry.json + main_localization.json.
+        Falls back to the display name itself if no match found."""
+        if self._location_reverse_map is None:
+            try:
+                from .settings import SONORUS_DIR
+                from .localization import load_localization
+                import os
+                reg_path = os.path.join(SONORUS_DIR, "data", "location_registry.json")
+                with open(reg_path, 'r', encoding='utf-8') as f:
+                    registry = json.load(f)
+                loc = load_localization()
+                self.__class__._location_reverse_map = {}
+                for mod_key, entry in registry.items():
+                    loc_id = entry.get("localized_id")
+                    if loc_id and loc_id in loc:
+                        display = loc[loc_id]
+                        self.__class__._location_reverse_map[display.lower()] = mod_key
+            except Exception as e:
+                print(f"[Socket] Could not load location reverse map: {e}")
+                self.__class__._location_reverse_map = {}
+        return self._location_reverse_map.get(display_name.lower(), display_name)
+
     def send_tracking_settings(self):
         """Send dialogue tracking settings to Lua."""
         try:
@@ -153,14 +274,14 @@ class LuaSocketServer:
                 "mod_enabled": server.get('enabled', True),
                 "track_ambient": history.get('track_ambient', True),
                 "track_cutscene": history.get('track_cutscene', True),
-                # Companion callout blocking: 0 = disabled, -1 = never repeat, >0 = N game minutes
-                # Default: 1440 (24 hours = 1 game day)
-                "companion_callout_block_minutes": conversation.get('companion_callout_block_minutes', 1440),
+                "auto_mute_ambient": conversation.get('auto_mute_ambient', False),
                 "dev_mode": is_dev_mode(),
                 # Game language for localization file loading
                 "language": setup.get('language', 'EN_US'),
                 # Preview lock: lock NPC while typing/speaking (before sending message)
                 "preview_lock": input_settings.get('preview_lock', True),
+                # Game subtitle setting from Hogwarts Legacy GameUserSettings.ini
+                "subtitles_enabled": get_game_subtitles_enabled(),
                 # Time dilation settings (rates as realtime multipliers: 1.0 = realtime, 3.0 = 3x faster)
                 "time_dilation": {
                     "enabled": time_dilation.get('enabled', True),
@@ -173,6 +294,17 @@ class LuaSocketServer:
                 "tts_provider": settings.get('tts', {}).get('provider', ''),
                 # Companion follow distance in meters (converted to UU on Lua side)
                 "companion_follow_distance_m": conversation.get('companion_follow_distance_m', 2.0),
+                # NPC followers enabled (gated by actions_enabled on config page)
+                "followers_enabled": conversation.get('followers_enabled', True),
+                # Third-party mod integration flags
+                "floo_companions_installed": mods.is_mod_installed('floo_companions'),
+                "conversation_fpv": conversation.get('conversation_fpv', False),
+                "conversation_fpv_transition": conversation.get('conversation_fpv_transition', 'normal'),
+                "conversation_look_at_speaker": conversation.get('conversation_look_at_speaker', False),
+                # Attention meter settings
+                "attention_meter_enabled": conversation.get('attention_meter_enabled', True),
+                "attention_cold_approach_enabled": conversation.get('attention_cold_approach_enabled', True),
+                "gaze_enabled": conversation.get('gaze_enabled', False),
             })
         except Exception as e:
             print(f"[Socket] Error sending tracking settings: {e}")
@@ -182,6 +314,7 @@ class LuaSocketServer:
 
         Sends both voice names (internal IDs) and generated display names,
         since Lua only has access to display names from GetActorDisplayName().
+        Also sends the ambient dialogue blocklist.
         """
         try:
             from .text_utils import get_significant_npc_names, INSIGNIFICANT_PREFIXES
@@ -194,11 +327,257 @@ class LuaSocketServer:
             })
         except Exception as e:
             print(f"[Socket] Error sending significant NPCs: {e}")
+        # Send ambient blocklist alongside
+        self.send_ambient_blocklist()
 
-    def send_lipsync_start(self, speaker: str = None, start_time: float = None, turn_id: str = None, visemes: list = None, scale: float = None, fallback: bool = False):
+    # NPCs exempt from auto-mute: portraits and ghosts have limited/unique
+    # ambient lines and aren't the repetitive quest-callout type.
+    _AMBIENT_MUTE_EXEMPT = {
+        # Portraits
+        "fatlady", "marydunne", "lethiaburbley",
+        "sircadogan", "musicconductor", "sylviapembroke", "ogletheportrait",
+        # Ghosts & poltergeist
+        "nearlyheadlessnick", "fatfriar", "bloodybaron",
+        "extraghostcharacterm2", "cuthbertbinns", "peeves",
+        # Vendors
+        "augustushill", "gerboldollivander", "albieweekes", "parrypippin", "timothyteasdale",
+        "thomasbrown", "calliopsnelling", "sironaryan", "sirona", "thaddeustravers",
+        "vendorcauldronshop", "vendorjokeshop", "vendormusicshop",
+        "vendorquillshop", "vendorsecondhandshop1", "vendorteashop",
+        # Other
+        "jemimacollins"
+    }
+
+    def _build_ambient_blocklist(self, current_game_minutes: int) -> dict:
+        """Build per-NPC blocklist of heard ambient dialogue text hashes.
+
+        Returns: { "GarrethWeasley": [hash1, hash2, ...], ... }
+        Only includes significant NPCs with at least one ambient line.
+        Skips portrait/ghost NPCs listed in _AMBIENT_MUTE_EXEMPT.
+        Skips lines heard later than the currently loaded save's game date/time.
+        """
+        from .dialogue_db import get_connection
+        from .text_utils import get_significant_npc_names
+
+        if current_game_minutes <= 0:
+            return {}
+
+        voice_names, _ = get_significant_npc_names()
+        sig_set = {v.lower() for v in voice_names}
+
+        blocklist = {}
+        try:
+            with get_connection() as conn:
+                rows = conn.execute(
+                    "SELECT voice_name, line_id, game_date, game_time FROM dialogue_entries "
+                    "WHERE entry_type = 'chatter' AND text IS NOT NULL AND text != '' "
+                    "AND is_player = 0 AND is_ai_response = 0 "
+                    "AND line_id IS NOT NULL AND line_id != ''"
+                ).fetchall()
+            for row in rows:
+                vn = row['voice_name']
+                if not vn or vn.lower() not in sig_set:
+                    continue
+                if vn.lower() in self._AMBIENT_MUTE_EXEMPT:
+                    continue
+                game_date = _parse_game_date(row['game_date'] or "")
+                game_time = _parse_game_time(row['game_time'] or "")
+                if game_date is None or game_time is None:
+                    continue
+                heard_game_minutes = _game_datetime_to_minutes(game_date, game_time)
+                if heard_game_minutes > current_game_minutes:
+                    continue
+                line_id = row['line_id']
+                # Extract numeric suffix: "GarrethWeasley_10946" -> 10946
+                parts = line_id.rsplit('_', 1)
+                if len(parts) == 2 and parts[1].isdigit():
+                    num = int(parts[1])
+                else:
+                    continue
+                if vn not in blocklist:
+                    blocklist[vn] = set()
+                blocklist[vn].add(num)
+        except Exception as e:
+            print(f"[Socket] Error building ambient blocklist: {e}")
+
+        # Convert sets to sorted lists for JSON
+        return {vn: sorted(hashes) for vn, hashes in blocklist.items()}
+
+    def _maybe_resync_ambient_blocklist_for_time(self, game_context: dict):
+        """Refresh ambient mute data when loading or advancing to a new game minute."""
+        try:
+            from .settings import load_settings
+            settings = load_settings()
+            if not settings.get('conversation', {}).get('auto_mute_ambient', False):
+                return
+
+            current_game_minutes = _get_strict_current_game_minutes(game_context)
+            if current_game_minutes <= 0:
+                return
+            if current_game_minutes == self._ambient_blocklist_current_minutes:
+                return
+            self.send_ambient_blocklist()
+        except Exception as e:
+            print(f"[Socket] Error checking ambient blocklist game time: {e}")
+
+    def send_ambient_blocklist(self):
+        """Send ambient dialogue blocklist to Lua. Called on connect and after new lines.
+        Sends empty blocklist if auto_mute_ambient is disabled."""
+        try:
+            from .settings import load_settings
+            settings = load_settings()
+            enabled = settings.get('conversation', {}).get('auto_mute_ambient', False)
+
+            if not enabled:
+                # Disabled — send empty blocklist to clear any existing one on Lua side
+                self._ambient_blocklist_cache = {}
+                self.send({"type": "ambient_blocklist", "data": {}})
+                print("[Socket] Ambient blocklist disabled (auto_mute_ambient=false)")
+                return
+
+            with self._context_lock:
+                game_context = self._game_context.copy()
+            current_game_minutes = _get_strict_current_game_minutes(game_context)
+            self._ambient_blocklist_current_minutes = current_game_minutes
+
+            if current_game_minutes <= 0:
+                blocklist = {}
+                print("[Socket] Ambient blocklist waiting for current game time; sending empty blocklist")
+            else:
+                blocklist = self._build_ambient_blocklist(current_game_minutes)
+            self._ambient_blocklist_cache = blocklist
+            total = sum(len(v) for v in blocklist.values())
+            self.send({
+                "type": "ambient_blocklist",
+                "data": blocklist,
+            })
+            print(
+                f"[Socket] Sent ambient blocklist: {len(blocklist)} NPCs, {total} line IDs "
+                f"through {_format_game_minutes_for_log(current_game_minutes)}"
+            )
+        except Exception as e:
+            print(f"[Socket] Error sending ambient blocklist: {e}")
+
+    def resync_active_commitments(self):
+        """Re-send activate_commitment for all active commitments on reconnect."""
+        try:
+            from .commitments_db import get_active_commitments
+            active = get_active_commitments()
+            for c in active:
+                print(f"[Socket] Resync commitment: {c['npc_id']} -> {c['location_id']}")
+                self.send_activate_commitment(c["npc_id"], c["activity_id"], c["location_id"])
+            if active:
+                print(f"[Socket] Resynced {len(active)} active commitments")
+        except Exception as e:
+            print(f"[Socket] Error resyncing commitments: {e}")
+
+    def _send_deferred_connect_data(self):
+        """Send data that requires per-player DBs. Called after player_handshake."""
+        try:
+            self.send_significant_npcs()
+        except Exception as e:
+            print(f"[LuaSocket] Error sending significant NPCs: {e}")
+        try:
+            self.resync_active_commitments()
+        except Exception as e:
+            print(f"[LuaSocket] Error resyncing commitments: {e}")
+
+    def _maybe_warn_out_of_sync_game_time(self, game_context: dict):
+        """Notify once after handshake if stored data is far ahead of the loaded save."""
+        if True or not self._pending_time_sync_check:
+            return
+
+        current_game_minutes = get_current_game_minutes(game_context)
+        if current_game_minutes <= 0:
+            return
+
+        self._pending_time_sync_check = False
+        threshold_minutes = current_game_minutes + TIME_SYNC_WARNING_THRESHOLD_MINUTES
+        ahead_sources = []
+        mismatch_details = []
+
+        try:
+            owl_post_minutes = get_latest_owl_post_game_minutes()
+            if owl_post_minutes >= threshold_minutes:
+                ahead_sources.append("Owl Post")
+                mismatch_details.append(
+                    f"Owl Post latest={_format_game_minutes_for_log(owl_post_minutes)} "
+                    f"(+{owl_post_minutes - current_game_minutes}m)"
+                )
+                for candidate in get_latest_owl_post_game_time_candidates(limit=3, min_minutes=threshold_minutes):
+                    print(f"[LuaSocket] Owl Post mismatch candidate: {_format_owl_candidate_for_log(candidate)}")
+        except Exception as e:
+            print(f"[LuaSocket] Error checking Owl Post time sync: {e}")
+
+        try:
+            dialogue_minutes = get_latest_dialogue_game_minutes()
+            if dialogue_minutes >= threshold_minutes:
+                ahead_sources.append("dialogue history")
+                mismatch_details.append(
+                    f"dialogue history latest={_format_game_minutes_for_log(dialogue_minutes)} "
+                    f"(+{dialogue_minutes - current_game_minutes}m)"
+                )
+                for candidate in get_latest_dialogue_game_time_candidates(limit=3, min_minutes=threshold_minutes):
+                    print(f"[LuaSocket] Dialogue mismatch candidate: {_format_dialogue_candidate_for_log(candidate)}")
+        except Exception as e:
+            print(f"[LuaSocket] Error checking dialogue history time sync: {e}")
+
+        if not ahead_sources:
+            return
+
+        if len(ahead_sources) == 2:
+            sources_text = "Owl Post and dialogue history"
+            verb = "are"
+        else:
+            sources_text = ahead_sources[0]
+            verb = "is"
+
+        self.send_notification(
+            f"Sonorus: {sources_text} {verb} from a later in-game time than this save. "
+            f"You may have loaded an older save, so history may be out of sync."
+        )
+        print(
+            f"[LuaSocket] Time sync mismatch: current={_format_game_minutes_for_log(current_game_minutes)}; "
+            + "; ".join(mismatch_details)
+        )
+        print(f"[LuaSocket] Sent out-of-sync game time warning for {sources_text}")
+
+    def _maybe_warn_player_context_mismatch(self, game_context: dict):
+        """Warn once if Lua's live player name and Python's DB scope diverge."""
+        player_name = str(game_context.get("playerName") or "").strip()
+        if not player_name:
+            return
+        try:
+            from . import player_context
+            if not player_context.is_ready():
+                return
+            active_name = player_context.get_current_player_name()
+            live_name = player_context.normalize_player_name(player_name)
+            if not active_name or not live_name:
+                return
+            if active_name == live_name:
+                self._last_player_context_mismatch = None
+                return
+
+            mismatch_key = (active_name, live_name)
+            if mismatch_key == self._last_player_context_mismatch:
+                return
+            self._last_player_context_mismatch = mismatch_key
+            message = (
+                f"Player context mismatch: Python DB scope='{active_name}', "
+                f"Lua player='{player_name}' ({live_name})"
+            )
+            print(f"[LuaSocket] WARNING: {message}")
+            self.send_notification(f"Sonorus warning: {message}")
+        except Exception as e:
+            print(f"[LuaSocket] Error checking player context mismatch: {e}")
+
+    def send_lipsync_start(self, speaker: str = None, start_time: float = None, turn_id: str = None, visemes: list = None, scale: float = None):
         """Signal audio playback starting."""
         self.playback_active = True
         self.playback_event.clear()
+        self.pipeline_active = True
+        self.pipeline_event.clear()
         msg = {
             "type": "lipsync_start",
             "speaker": speaker or "",
@@ -209,18 +588,23 @@ class LuaSocketServer:
             msg["visemes"] = visemes
         if scale is not None:
             msg["scale"] = scale
-        msg["fallback"] = fallback
         self.send(msg)
 
     def send_lipsync_stop(self):
         """Signal audio playback ended."""
         self.playback_active = False
         self.playback_event.set()
+        self.pipeline_active = False
+        self.pipeline_event.set()
         self.send({"type": "lipsync_stop"})
 
     def wait_for_playback_stop(self, timeout: float = 60.0) -> bool:
         """Wait for playback to stop. Returns True if stopped, False on timeout."""
         return self.playback_event.wait(timeout=timeout)
+
+    def wait_for_pipeline_stop(self, timeout: float = 60.0) -> bool:
+        """Wait for full TTS pipeline (synthesis+playback) to stop. Returns True if stopped, False on timeout."""
+        return self.pipeline_event.wait(timeout=timeout)
 
     def send_visemes(self, frames: list):
         """Send batch of viseme frames."""
@@ -236,12 +620,38 @@ class LuaSocketServer:
             "item": item
         })
 
-    def send_conversation_state(self, state: str, interrupted: bool = False):
+    def send_conversation_state(self, state: str, interrupted: bool = False, end_behavior: str = None):
         """Push conversation state change to Lua."""
-        self.send({
+        payload = {
             "type": "conversation_state",
             "state": state,
             "interrupted": interrupted
+        }
+        if end_behavior:
+            payload["end_behavior"] = end_behavior
+        self.send(payload)
+
+    def send_conversation_finished(self, speaker_ids):
+        """Notify Lua that a conversation has fully ended (no follow-up pending)."""
+        self.send({
+            "type": "conversation_finished",
+            "speakers": list(speaker_ids) if speaker_ids else []
+        })
+
+    def send_linger_goodbye_claim(self, generation: int, speaker_ids):
+        """Claim a pending linger goodbye batch and keep only selected speakers frozen."""
+        return self.send({
+            "type": "linger_goodbye_claim",
+            "generation": generation,
+            "speaker_ids": list(speaker_ids) if speaker_ids else [],
+        })
+
+    def send_linger_goodbye_abort(self, generation: int, reason: str = "unknown"):
+        """Abort a pending linger goodbye batch and release any held speakers."""
+        return self.send({
+            "type": "linger_goodbye_abort",
+            "generation": generation,
+            "reason": reason,
         })
 
     def send_player_message(self, player_name: str, message: str):
@@ -270,18 +680,25 @@ class LuaSocketServer:
             "mode": mode
         })
 
+    def send_toggle_fpv(self):
+        """Send first-person view toggle to Lua."""
+        self.send({"type": "toggle_fpv"})
+
     def send_reload_history(self):
         """Tell Lua to reload dialogue history from disk."""
         self.send({"type": "reload_history"})
 
-    def send_activate_commitment(self, npc_id: str, activity_id: str, location_id: str):
+    def send_activate_commitment(self, npc_id: str, activity_id: str, location_id: str, spot_label: str = None):
         """Send schedule override activation to Lua."""
-        self.send({
+        msg = {
             "type": "activate_commitment",
             "npc_id": npc_id,
             "activity_id": activity_id,
             "location_id": location_id,
-        })
+        }
+        if spot_label:
+            msg["spot_label"] = spot_label
+        self.send(msg)
 
     def send_deactivate_commitment(self, npc_id: str, activity_id: str):
         """Send schedule override deactivation to Lua."""
@@ -290,6 +707,14 @@ class LuaSocketServer:
             "npc_id": npc_id,
             "activity_id": activity_id,
         })
+
+    def send_dismiss_companion(self):
+        """Tell Lua to dismiss the current companion."""
+        self.send({"type": "dismiss_companion"})
+
+    def send_dismiss_follower(self, voice_name: str):
+        """Tell Lua to remove an NPC follower."""
+        self.send({"type": "dismiss_follower", "voice_name": voice_name})
 
     def _receive_loop(self):
         """Receive messages from Lua client using length-prefixed framing."""
@@ -368,19 +793,59 @@ class LuaSocketServer:
 
     def _handle_message(self, msg):
         """Handle incoming message from Lua."""
+        if not isinstance(msg, dict):
+            print(f"[Socket] Ignoring non-dict message: {type(msg).__name__}")
+            return
         msg_type = msg.get("type")
+        if msg_type == "player_handshake":
+            player_name = msg.get("data", {}).get("playerName", "")
+            if player_name:
+                from . import player_context
+                print(f"[LuaSocket] Player handshake: '{player_name}'")
+                try:
+                    player_context.switch(player_name)
+                except Exception as e:
+                    print(f"[LuaSocket] Player switch failed: {e}")
+                self._pending_time_sync_check = True
+                self.send({"type": "player_ready"})
+                self._send_deferred_connect_data()
+            else:
+                print("[LuaSocket] Empty player_handshake, ignoring")
+                self._pending_time_sync_check = False
+                self.send({"type": "player_ready"})
+            return
         if msg_type == "game_context":
+            merged_context = None
             with self._context_lock:
-                self._game_context = msg.get("data", {})
+                data = msg.get("data", {})
+                if not isinstance(data, dict):
+                    print(f"[Socket] Ignoring non-dict game_context data: {type(data).__name__}")
+                    return
+                # Lua frequently sends partial context payloads (e.g. state-only or selective group refreshes).
+                # Merge into the cached snapshot rather than replacing it wholesale, or unrelated fields like
+                # companion state disappear and downstream gates make incorrect decisions.
+                if data.get("hasCompanion") is False:
+                    data["companionId"] = ""
+                    data["companionForcedWaiting"] = False
+                    data["companionIsSwimming"] = False
+                    data["companionIsOnBroom"] = False
+                merged = self._game_context.copy()
+                merged.update(data)
+                self._game_context = merged
+                merged_context = merged.copy()
                 # filter nearby npcs
                 nearby_npcs = self._game_context.get("nearbyNpcs", [])
                 if nearby_npcs:
                     nearby_npcs = [npc for npc in nearby_npcs if is_significant_npc(npc.get("id", "") or npc.get("name", ""))]
                     self._game_context["nearbyNpcs"] = nearby_npcs
+                    merged_context["nearbyNpcs"] = nearby_npcs
             # Signal any pending context refresh
             if self._context_refresh_pending:
                 self._context_refresh_pending = False
                 self._context_refresh_event.set()
+            self._maybe_warn_out_of_sync_game_time(merged_context or {})
+            self._maybe_warn_player_context_mismatch(merged_context or {})
+            self._maybe_resync_ambient_blocklist_for_time(merged_context or {})
             # Extract live mod data and pass to mods module
             mods_data = self._game_context.get("mods", {})
             if mods_data:
@@ -394,6 +859,18 @@ class LuaSocketServer:
                 except Exception as e:
                     print(f"[Socket] Error updating mod live data: {e}")
             print(f"[Socket] Game context received: {len(self._game_context)} fields")
+            # NPC Schedule: check for period transitions and notify player
+            try:
+                from . import mods
+                from .settings import load_settings as _load_settings
+                from .game_context import check_schedule_transition
+                _ns_settings = _load_settings().get('game_mods', {}).get('npc_schedule', {})
+                if _ns_settings.get('notifications_enabled', True) and mods.is_mod_installed('npc_schedule'):
+                    note = check_schedule_transition(self._game_context)
+                    if note:
+                        self.send_notification(note)
+            except Exception as e:
+                print(f"[Socket] Schedule notification error: {e}")
             # Check commitment timers (throttled internally to 5s)
             try:
                 from .commitments import check_commitment_timers
@@ -428,6 +905,15 @@ class LuaSocketServer:
                 audio_shutdown()
             except:
                 pass
+            try:
+                from .memory_queue import graceful_shutdown
+                memory_shutdown_ok = graceful_shutdown(max_wait=30.0)
+            except Exception as e:
+                memory_shutdown_ok = False
+                print(f"[Socket] Memory shutdown error: {e}")
+
+            if not memory_shutdown_ok:
+                print("[Socket] Memory shutdown incomplete - forcing exit as last resort")
             # Exit the process
             os._exit(0)
         elif msg_type == "speaker_ready":
@@ -444,6 +930,7 @@ class LuaSocketServer:
             actor_found = msg.get("actor_found", False)
             has_positions = msg.get("has_positions", False)
             is_player_speaker = msg.get("is_player_speaker", False)
+            first_person_active = msg.get("first_person_active", False)
 
             # Extract initial positions (for first speaker 3D audio)
             initial_positions = {
@@ -485,6 +972,7 @@ class LuaSocketServer:
                     "actor_found": actor_found,
                     "has_positions": has_positions,
                     "is_player_speaker": is_player_speaker,
+                    "first_person_active": first_person_active,
                     "positions": initial_positions if has_positions else {},
                     "reverb_auxbus": reverb_auxbus,
                     "reverb_send": reverb_send
@@ -542,6 +1030,27 @@ class LuaSocketServer:
                 except Exception as e:
                     print(f"[Socket] Interrupt callback error: {e}")
 
+        elif msg_type == "game_event":
+            event_name = msg.get("event")
+            data = msg.get("data", {})
+            if not isinstance(event_name, str) or not event_name:
+                print(f"[Socket] Ignoring malformed game_event name: {event_name!r}")
+                return
+            if isinstance(data, list) and len(data) == 0:
+                # Lua/JSON encodes empty tables as arrays, but event payloads expect an object.
+                data = {}
+            if not isinstance(data, dict):
+                print(f"[Socket] Ignoring malformed game_event payload for {event_name}: {type(data).__name__}")
+                data = {}
+            if self._game_event_callback:
+                try:
+                    self._game_event_callback({
+                        "event": event_name,
+                        "data": data
+                    })
+                except Exception as e:
+                    print(f"[Socket] Game event callback error ({event_name}): {e}")
+
         elif msg_type == "record_dialogue":
             # Lua sends dialogue entries for Python to persist
             entry = msg.get("entry")
@@ -581,6 +1090,32 @@ class LuaSocketServer:
             else:
                 print(f"[Socket] Commitment {action} FAILED: {npc_id} - {error}")
 
+        elif msg_type == "register_commitment_spot":
+            display_name = msg.get("location", "")
+            x = msg.get("x", 0)
+            y = msg.get("y", 0)
+            z = msg.get("z", 0)
+            yaw = msg.get("yaw", 0)
+            if display_name:
+                # Reverse-lookup: display name → internal location ID
+                # (display names are localized and change with language; IDs are stable)
+                from .settings import load_commitment_spots, save_commitment_spots, SONORUS_DIR
+                location = self._resolve_location_id(display_name)
+                spots = load_commitment_spots()
+                if location not in spots:
+                    spots[location] = []
+                spots[location].append({"x": round(x, 2), "y": round(y, 2), "z": round(z, 2), "yaw": round(yaw, 2)})
+                save_commitment_spots(spots)
+                print(f"[Socket] Registered commitment spot at {location} (from '{display_name}') ({x:.0f}, {y:.0f}, {z:.0f} yaw={yaw:.0f}) — {len(spots[location])} spots total")
+                # Reload Python location matching to include new spot locations
+                try:
+                    from .commitments import reload_teleport_locations
+                    reload_teleport_locations()
+                except Exception as e:
+                    print(f"[Socket] Could not reload teleport locations: {e}")
+            else:
+                print("[Socket] register_commitment_spot: missing location")
+
     def wait_for_turn_complete(self, timeout: float = 2.0) -> bool:
         """Wait for previous turn's mouth animation to complete.
         Returns True if complete, False on timeout."""
@@ -611,6 +1146,15 @@ class LuaSocketServer:
 
             # Append new entry (atomic SQLite insert)
             append_entry(entry)
+
+            # Update ambient blocklist if this is a new chatter line from a significant NPC
+            if (entry.get("type") == "chatter"
+                    and not entry.get("isPlayer")
+                    and not entry.get("isAIResponse")):
+                vn = entry.get("voiceName", "")
+                line_id = entry.get("lineID", "")
+                if vn and line_id and is_significant_npc(vn):
+                    self.send_ambient_blocklist()
         except Exception as e:
             print(f"[Socket] Error recording dialogue entry: {e}")
 
@@ -638,7 +1182,7 @@ class LuaSocketServer:
         with self._context_lock:
             return self._game_context.copy()
 
-    def request_context_refresh(self, groups: list = None, timeout: float = 2.0) -> dict:
+    def request_context_refresh(self, groups: list = None, timeout: float = 2.0, params: dict = None) -> dict:
         """
         Request game context from Lua with optional group filtering.
 
@@ -648,8 +1192,9 @@ class LuaSocketServer:
         Args:
             groups: List of context groups to request (e.g., ["state", "npcs"]).
                    If None or empty, requests all context (backwards compatible).
-                   Valid groups: position, state, time, player, gear, npcs, zone, mission, companion, mods
+                   Valid groups: position, state, time, player, gear, npcs, zone, mission, companion, mods, nearby_lean
             timeout: How long to wait for Lua response
+            params: Optional dict of per-group parameters (e.g., {"nearby_lean_distance": 10000})
 
         Returns:
             Context dict (may be partial if groups specified), or empty dict on timeout
@@ -663,6 +1208,8 @@ class LuaSocketServer:
             msg = {"type": "request_context"}
             if groups:
                 msg["groups"] = groups
+            if params:
+                msg["params"] = params
 
             # Send request to Lua
             success = self.send(msg)
@@ -874,7 +1421,8 @@ class LuaSocketServer:
             "success": True,
             "positions": result.get("positions", {}),  # Pass positions through!
             "reverb_auxbus": result.get("reverb_auxbus"),
-            "reverb_send": result.get("reverb_send", 1.0)
+            "reverb_send": result.get("reverb_send", 1.0),
+            "first_person_active": result.get("first_person_active", False),
         }
 
     def send_player_turn_start(self, player_name: str, text: str, timeout: float = 1.0) -> dict:
@@ -937,7 +1485,8 @@ class LuaSocketServer:
             "success": True,
             "positions": result.get("positions", {}),
             "reverb_auxbus": result.get("reverb_auxbus"),
-            "reverb_send": result.get("reverb_send", 1.0)
+            "reverb_send": result.get("reverb_send", 1.0),
+            "first_person_active": result.get("first_person_active", False),
         }
 
     def stop(self):

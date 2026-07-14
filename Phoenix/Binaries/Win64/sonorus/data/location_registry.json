@@ -1,0 +1,857 @@
+{
+  "Aranshire": {
+    "localized_id": "Hamlet_Aranshire",
+    "desc_localized_id": "Hamlet_Aranshire_desc",
+    "schedule_id": null
+  },
+  "AstronomyTower": {
+    "localized_id": "HOG_AstronomyTower",
+    "desc_localized_id": "HOG_AstronomyTower_Desc",
+    "schedule_id": "HOG_AstronomyTower"
+  },
+  "AstronomyWing": {
+    "localized_id": "HOG_ASTRONOMYWINGKL",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "Bainburgh": {
+    "localized_id": "Hamlet_Bainburgh",
+    "desc_localized_id": "Hamlet_Bainburgh_desc",
+    "schedule_id": null
+  },
+  "BellTowerCourtyard": {
+    "localized_id": "FT_HW_BellTowerCourtyard",
+    "desc_localized_id": "FT_HW_BellTowerCourtyard_desc",
+    "schedule_id": null
+  },
+  "BellTowerWing": {
+    "localized_id": "HOG_ENTRANCEWINGKL",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "BellTowers": {
+    "localized_id": "HOG_BellTowers",
+    "desc_localized_id": "HOG_BellTowers_Desc",
+    "schedule_id": "HOG_BellTowers"
+  },
+  "Boathouse": {
+    "localized_id": "HOG_Boathouse",
+    "desc_localized_id": "HOG_Boathouse_Desc",
+    "schedule_id": "HOG_Boathouse"
+  },
+  "BoathouseStairway": {
+    "localized_id": "HOG_BoathouseStairway",
+    "desc_localized_id": "HOG_BoathouseStairway_Desc",
+    "schedule_id": "HOG_BoathouseStairway"
+  },
+  "Brocburrow": {
+    "localized_id": "Hamlet_Brocburrow",
+    "desc_localized_id": "Hamlet_Brocburrow_Desc",
+    "schedule_id": null
+  },
+  "CentralTower": {
+    "localized_id": "HOG_CentralTower",
+    "desc_localized_id": "HOG_CentralTower_Desc",
+    "schedule_id": "HOG_CentralTower"
+  },
+  "Class_Alchemy": {
+    "localized_id": "HOG_Class_Alchemy",
+    "desc_localized_id": "HOG_Class_Alchemy_desc",
+    "schedule_id": "HOG_Class_Alchemy"
+  },
+  "Class_Arithmancy": {
+    "localized_id": "HOG_Class_Arithmancy",
+    "desc_localized_id": "HOG_Class_Arithmancy_desc",
+    "schedule_id": "HOG_Class_Arithmancy"
+  },
+  "Class_Astronomy": {
+    "localized_id": "HOG_Class_Astronomy",
+    "desc_localized_id": "HOG_Class_Astronomy_desc",
+    "schedule_id": "HOG_Class_Astronomy"
+  },
+  "Class_Charms": {
+    "localized_id": "HOG_Class_Charms",
+    "desc_localized_id": "HOG_Class_Charms_desc",
+    "schedule_id": "HOG_Class_Charms"
+  },
+  "Class_DADA": {
+    "localized_id": "HOG_Class_DADA",
+    "desc_localized_id": "HOG_Class_DADA_Desc",
+    "schedule_id": "HOG_Class_DADA"
+  },
+  "Class_Detention": {
+    "localized_id": "HOG_Class_Detention",
+    "desc_localized_id": "HOG_Class_Detention_Desc",
+    "schedule_id": "HOG_Class_Detention"
+  },
+  "Class_Divination": {
+    "localized_id": "HOG_Class_Divination",
+    "desc_localized_id": "HOG_Class_Divination_Desc",
+    "schedule_id": "HOG_Class_Divination"
+  },
+  "Class_Fig": {
+    "localized_id": "FT_HW_FigClass",
+    "desc_localized_id": "FT_HW_FigClass_desc",
+    "schedule_id": "HOG_DADATowerFigClassRoom"
+  },
+  "Class_Flying": {
+    "localized_id": "HOG_Class_Flying",
+    "desc_localized_id": "HOG_Class_Flying_desc",
+    "schedule_id": "HOG_Class_Flying"
+  },
+  "Class_HistoryOfMagic": {
+    "localized_id": "HOG_Class_HistoryofMagic",
+    "desc_localized_id": "HOG_Class_HistoryofMagic_desc",
+    "schedule_id": "HOG_Class_HistoryofMagic"
+  },
+  "Class_MagicalCreatures": {
+    "localized_id": "HOG_Class_MagicalCreatures",
+    "desc_localized_id": "HOG_Class_MagicalCreatures_desc",
+    "schedule_id": "HOG_Class_Beasts"
+  },
+  "Class_MuggleStudies": {
+    "localized_id": "HOG_Class_MuggleStudies",
+    "desc_localized_id": "HOG_Class_MuggleStudies_desc",
+    "schedule_id": "HOG_Class_MuggleStudies"
+  },
+  "Class_Music": {
+    "localized_id": "HOG_Class_Music",
+    "desc_localized_id": "HOG_Class_Music_desc",
+    "schedule_id": "HOG_Class_Music"
+  },
+  "Class_Potions": {
+    "localized_id": "HOG_Class_Potions",
+    "desc_localized_id": "HOG_Class_Potions_desc",
+    "schedule_id": "HOG_Class_Potions"
+  },
+  "Class_Transfiguration": {
+    "localized_id": "HOG_Class_Transfiguration",
+    "desc_localized_id": "HOG_Class_Transfiguration_desc",
+    "schedule_id": "HOG_Class_Transfiguration"
+  },
+  "ClockTower": {
+    "localized_id": "HOG_ClockTower",
+    "desc_localized_id": "HOG_ClockTower_Desc",
+    "schedule_id": "HOG_ClockTower"
+  },
+  "ClockTowerCourtyard": {
+    "localized_id": "HOG_ClockTowerCourtyard",
+    "desc_localized_id": "HOG_ClockTowerCourtyard_Desc",
+    "schedule_id": "HOG_ClockTowerCourtyard"
+  },
+  "CoastArm": {
+    "localized_id": "RegionNameCoastArm",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "CoastLake": {
+    "localized_id": "RegionNameCoastLake",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "Cragcroft": {
+    "localized_id": "Hamlet_Cragcroft",
+    "desc_localized_id": "Hamlet_Cragcroft_desc",
+    "schedule_id": "HAM_Cragcroft"
+  },
+  "DADATower": {
+    "localized_id": "HOG_DADATower",
+    "desc_localized_id": "HOG_DADATower_Desc",
+    "schedule_id": "HOG_DADATower"
+  },
+  "Dungeons": {
+    "localized_id": "HOG_NorthHallBasement",
+    "desc_localized_id": null,
+    "schedule_id": "HOG_NorthHall_Basement"
+  },
+  "EntranceHall": {
+    "localized_id": "HOG_EntranceHall",
+    "desc_localized_id": "HOG_EntranceHall_Desc",
+    "schedule_id": "HOG_EntranceHall"
+  },
+  "FacultyTower": {
+    "localized_id": "HOG_FacultyTower",
+    "desc_localized_id": "HOG_FacultyTower_Desc",
+    "schedule_id": "HOG_FacultyTower"
+  },
+  "Feldcroft": {
+    "localized_id": "Hamlet_Feldcroft",
+    "desc_localized_id": "Hamlet_Feldcroft_desc",
+    "schedule_id": "HAM_Feldcroft"
+  },
+  "ForbiddenForest": {
+    "localized_id": "ForbiddenForest",
+    "desc_localized_id": "ForbiddenForest_Desc",
+    "schedule_id": "ForbiddenForest"
+  },
+  "FrameLibrary": {
+    "localized_id": "HOG_PIP_FrameLibrary",
+    "desc_localized_id": "HOG_PIP_FrameLibrary_desc",
+    "schedule_id": "HOG_PIP_FrameLibrary"
+  },
+  "Garden": {
+    "localized_id": "HOG_Garden",
+    "desc_localized_id": "HOG_Garden_Desc",
+    "schedule_id": "HOG_Garden"
+  },
+  "GrandStaircaseTower": {
+    "localized_id": "HOG_GrandStaircaseTower",
+    "desc_localized_id": "HOG_GrandStaircaseTower_Desc",
+    "schedule_id": "HOG_GrandStaircaseTower"
+  },
+  "GrandStaircaseWing": {
+    "localized_id": "HOG_GRANDSTAIRCASEKL",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "GreatHall": {
+    "localized_id": "HOG_GreatHall",
+    "desc_localized_id": "HOG_GreatHall_Desc",
+    "schedule_id": "HOG_GreatHall"
+  },
+  "GreatHallWing": {
+    "localized_id": "HOG_GREATHALLKL",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "GreatHall_Gryffindor": {
+    "localized_id": "HOG_GreatHall_Gryffindor",
+    "desc_localized_id": "HOG_GreatHall_Gryffindor_Desc",
+    "schedule_id": "HOG_GreatHall_Gryffindor"
+  },
+  "GreatHall_Hufflepuff": {
+    "localized_id": "HOG_GreatHall_Hufflepuff",
+    "desc_localized_id": "HOG_GreatHall_Hufflepuff_Desc",
+    "schedule_id": "HOG_GreatHall_Hufflepuff"
+  },
+  "GreatHall_Ravenclaw": {
+    "localized_id": "HOG_GreatHall_Ravenclaw",
+    "desc_localized_id": "HOG_GreatHall_Ravenclaw_Desc",
+    "schedule_id": "HOG_GreatHall_Ravenclaw"
+  },
+  "GreatHall_Slytherin": {
+    "localized_id": "HOG_GreatHall_Slytherin",
+    "desc_localized_id": "HOG_GreatHall_Slytherin_Desc",
+    "schedule_id": "HOG_GreatHall_Slytherin"
+  },
+  "Greenhouses": {
+    "localized_id": "HOG_Greenhouses",
+    "desc_localized_id": "HOG_Greenhouses_Desc",
+    "schedule_id": "HOG_Greenhouses"
+  },
+  "Grotto": {
+    "localized_id": "HOG_Grotto",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "Grounds": {
+    "localized_id": "HOG_GroundsQ",
+    "desc_localized_id": "HOG_GroundsQ_desc",
+    "schedule_id": "HOG_GroundsQ"
+  },
+  "GryffindorCommonRoom": {
+    "localized_id": "Hog_Gryffindor_CommonRoom",
+    "desc_localized_id": "Hog_Gryffindor_CommonRoom_desc",
+    "schedule_id": "HOG_Gryffindor_CommonRoom"
+  },
+  "GryffindorLowerHallway": {
+    "localized_id": "HOG_GryffindorLowerHallway",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "GryffindorTower": {
+    "localized_id": "HOG_GryffindorTower",
+    "desc_localized_id": "HOG_GryffindorTower_Desc",
+    "schedule_id": "HOG_GryffindorTower"
+  },
+  "HM_3BroomsBar": {
+    "localized_id": "HM_3BroomsBar",
+    "desc_localized_id": "HM_3BroomsBar_desc",
+    "schedule_id": "HM_3BroomsBar"
+  },
+  "HM_BeastShop": {
+    "localized_id": "HM_BeastShop",
+    "desc_localized_id": "HM_BeastShop_desc",
+    "schedule_id": "HM_BeastShop"
+  },
+  "HM_CeridwensCauldrons": {
+    "localized_id": "HM_CeridwensCauldrons",
+    "desc_localized_id": null,
+    "schedule_id": "HM_CeridwensCauldrons"
+  },
+  "HM_DervishnBanges": {
+    "localized_id": "HM_DervishnBanges",
+    "desc_localized_id": null,
+    "schedule_id": "HM_DervishnBanges"
+  },
+  "HM_DogweednDeathcap": {
+    "localized_id": "HM_DogweednDeathcap",
+    "desc_localized_id": "HM_DogweednDeathcap_desc",
+    "schedule_id": "HM_DogweednDeathcap"
+  },
+  "HM_ExtortionistHideout_Dungeon": {
+    "localized_id": "HM_ExtortionistHideout_Dungeon",
+    "desc_localized_id": "HM_ExtortionistHideout_Dungeon_desc",
+    "schedule_id": null
+  },
+  "HM_GladragsWizardwear": {
+    "localized_id": "HM_AugustusHill",
+    "desc_localized_id": null,
+    "schedule_id": "HM_GladragsWizardwear"
+  },
+  "HM_HairdressingSalon": {
+    "localized_id": "HM_CalliopeSnelling",
+    "desc_localized_id": null,
+    "schedule_id": "HM_HairdressingSalon"
+  },
+  "HM_Hogshead": {
+    "localized_id": "HM_Hogshead",
+    "desc_localized_id": "HM_Hogshead_desc",
+    "schedule_id": "HM_Hogshead"
+  },
+  "HM_HogsheadAlley": {
+    "localized_id": "HM_HOGSHEADALLEY",
+    "desc_localized_id": null,
+    "schedule_id": "HM_HogsheadAlley"
+  },
+  "HM_Honeydukes": {
+    "localized_id": "HM_Honeydukes",
+    "desc_localized_id": "HM_Honeydukes_desc",
+    "schedule_id": "HM_Honeydukes"
+  },
+  "HM_JPippensPotions": {
+    "localized_id": "HM_JPippensPotions",
+    "desc_localized_id": "HM_JPippensPotions_desc",
+    "schedule_id": "HM_JPippensPotions"
+  },
+  "HM_LowerHighStreet": {
+    "localized_id": "HM_LOWERHIGHSTREET",
+    "desc_localized_id": null,
+    "schedule_id": "HM_LowerHighStreet"
+  },
+  "HM_MadamPuddifootsTea": {
+    "localized_id": "HM_MadamPuddifootsTea",
+    "desc_localized_id": "HM_MadamPuddifootsTea_desc",
+    "schedule_id": "HM_MadamPuddifootsTea"
+  },
+  "HM_MagicNeep": {
+    "localized_id": "HM_MagicNeep",
+    "desc_localized_id": "HM_MagicNeep_desc",
+    "schedule_id": "HM_MagicNeep"
+  },
+  "HM_MusicShop": {
+    "localized_id": "HM_MusicShop",
+    "desc_localized_id": null,
+    "schedule_id": "HM_MusicShop"
+  },
+  "HM_Ollivanders": {
+    "localized_id": "HM_GerboldOllivander",
+    "desc_localized_id": null,
+    "schedule_id": "HM_Ollivanders"
+  },
+  "HM_PostOffice": {
+    "localized_id": "HM_PostOffice",
+    "desc_localized_id": null,
+    "schedule_id": "HM_PostOffice"
+  },
+  "HM_RiversEdge": {
+    "localized_id": "HM_RIVERSEDGE",
+    "desc_localized_id": null,
+    "schedule_id": "HM_RiversEdge"
+  },
+  "HM_ScrivenshaftsQuillShop": {
+    "localized_id": "HM_ScrivenshaftsQuillShop",
+    "desc_localized_id": "HM_ScrivenshaftsQuillShop_desc",
+    "schedule_id": "HM_ScrivenshaftsQuillShop"
+  },
+  "HM_SecondHandShop": {
+    "localized_id": "HM_SecondHandShop",
+    "desc_localized_id": null,
+    "schedule_id": "HM_SecondHandShop"
+  },
+  "HM_Spintwitches": {
+    "localized_id": "HM_AlbieWeekes",
+    "desc_localized_id": null,
+    "schedule_id": "HM_Spintwitches"
+  },
+  "HM_SpireAlley": {
+    "localized_id": "HM_TWISTEDALLEY",
+    "desc_localized_id": null,
+    "schedule_id": "HM_TwistedAlley"
+  },
+  "HM_TheGraveyard": {
+    "localized_id": "HM_TheGraveyard",
+    "desc_localized_id": "HM_TheGraveyard_desc",
+    "schedule_id": "HM_TheGraveyard"
+  },
+  "HM_TheOldFool": {
+    "localized_id": "HM_TheOldFool",
+    "desc_localized_id": "HM_TheOldFool_desc",
+    "schedule_id": "HM_TheOldFool"
+  },
+  "HM_ThePlaza": {
+    "localized_id": "HM_ThePlaza",
+    "desc_localized_id": "HM_ThePlaza_desc",
+    "schedule_id": "HM_ThePlaza"
+  },
+  "HM_ThreeBroomsticks": {
+    "localized_id": "HM_ThreeBroomsticks",
+    "desc_localized_id": "HM_ThreeBroomsticks_desc",
+    "schedule_id": "HM_ThreeBroomsticks"
+  },
+  "HM_TomesnScrolls": {
+    "localized_id": "HM_TomesnScrolls",
+    "desc_localized_id": "HM_TomesnScrolls_desc",
+    "schedule_id": "HM_TomesnScrolls"
+  },
+  "HM_UpperHighStreet": {
+    "localized_id": "HM_UPPERHIGHSTREET",
+    "desc_localized_id": null,
+    "schedule_id": "HM_UpperHighStreet"
+  },
+  "HM_WaterMill": {
+    "localized_id": "HM_WaterMill",
+    "desc_localized_id": null,
+    "schedule_id": "HM_WaterMill"
+  },
+  "HM_Zonkos": {
+    "localized_id": "HM_Zonkos",
+    "desc_localized_id": "HM_Zonkos_desc",
+    "schedule_id": "HM_Zonkos"
+  },
+  "HeadmastersOfficeEntrance": {
+    "localized_id": "HOG_Office_PhineasBlackEntrance",
+    "desc_localized_id": "HOG_Office_PhineasBlackEntrance_desc",
+    "schedule_id": "HOG_Office_PhineasBlackEntrance"
+  },
+  "Helmsdale": {
+    "localized_id": "Hamlet_Helmsdale",
+    "desc_localized_id": "Hamlet_Helmsdale_desc",
+    "schedule_id": null
+  },
+  "HerbologyDungeon": {
+    "localized_id": "HERBOLOGY_FORGOTTEN_DUNGEON",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "HieroglyphicHall": {
+    "localized_id": "HOG_HieroglyphicHall",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "Hogsmeade": {
+    "localized_id": "HogsmeadeGrounds",
+    "desc_localized_id": null,
+    "schedule_id": "Hogsmeade"
+  },
+  "HogsmeadeValley": {
+    "localized_id": "Hogsmeade",
+    "desc_localized_id": "Hogsmeade_Desc",
+    "schedule_id": "Hogsmeade"
+  },
+  "HogwartsArea": {
+    "localized_id": "RegionNameHogwartsArea",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "HogwartsCastle": {
+    "localized_id": null,
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "HogwartsGreenhouses": {
+    "localized_id": "FT_HW_HogwartsGreenhouses",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "HogwartsGrounds": {
+    "localized_id": "HogwartsGrounds",
+    "desc_localized_id": "HogwartsGrounds_desc",
+    "schedule_id": "HOG_GroundsQ"
+  },
+  "HogwartsValley": {
+    "localized_id": "RegionNameHogwartsValley",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "HospitalWing": {
+    "localized_id": "HOG_HospitalWing",
+    "desc_localized_id": "HOG_HospitalWing_Desc",
+    "schedule_id": "HOG_HospitalWing"
+  },
+  "HufflepuffBasement": {
+    "localized_id": "HOG_HufflepuffBasement",
+    "desc_localized_id": "HOG_HufflepuffBasement_Desc",
+    "schedule_id": "HOG_HufflepuffBasement"
+  },
+  "HufflepuffCommonRoom": {
+    "localized_id": "Hog_Hufflepuff_CommonRoom",
+    "desc_localized_id": "Hog_Hufflepuff_CommonRoom_desc",
+    "schedule_id": "HOG_Hufflepuff_CommonRoom"
+  },
+  "Irondale": {
+    "localized_id": "Hamlet_Irondale",
+    "desc_localized_id": "Hamlet_Irondale_Desc",
+    "schedule_id": null
+  },
+  "KeenBridge": {
+    "localized_id": "Hamlet_KeenBridge",
+    "desc_localized_id": "Hamlet_KeenBridge_Desc",
+    "schedule_id": "HAM_Keenbridge"
+  },
+  "Kitchens": {
+    "localized_id": "HOG_Kitchens",
+    "desc_localized_id": "HOG_Kitchens_Desc",
+    "schedule_id": "HOG_Kitchens"
+  },
+  "Library": {
+    "localized_id": "HOG_Library",
+    "desc_localized_id": "HOG_Library_Desc",
+    "schedule_id": "HOG_Library"
+  },
+  "LibraryAnnex": {
+    "localized_id": "HOG_LIBRARYANNEXKL",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "LibraryStorage": {
+    "localized_id": "HOG_LibraryStorage",
+    "desc_localized_id": "HOG_LibraryStorage_desc",
+    "schedule_id": null
+  },
+  "Library_MainDesk": {
+    "localized_id": "HOG_Library_MainDesk",
+    "desc_localized_id": "HOG_Library_MainDesk_Desc",
+    "schedule_id": "HOG_Library_MainDesk"
+  },
+  "Library_Restricted": {
+    "localized_id": "HOG_Library_Restricted",
+    "desc_localized_id": "HOG_Library_Restricted_desc",
+    "schedule_id": "HOG_Library_Restricted"
+  },
+  "LongGallery": {
+    "localized_id": "HOG_LongGallery",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "LowerGrandstaircase": {
+    "localized_id": "FT_HW_LowerGrandstaircase",
+    "desc_localized_id": "FT_HW_LowerGrandstaircase_desc",
+    "schedule_id": null
+  },
+  "LowerHogsfield": {
+    "localized_id": "Hamlet_LowerHogsfield",
+    "desc_localized_id": "Hamlet_LowerHogsfield_Desc",
+    "schedule_id": null
+  },
+  "Marunweem": {
+    "localized_id": "Hamlet_Marunweem",
+    "desc_localized_id": "Hamlet_Marunweem_desc",
+    "schedule_id": null
+  },
+  "MouthOfForbiddenForest": {
+    "localized_id": "RegionNameMouthOfForbiddenForest",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "NorthCoast": {
+    "localized_id": "RegionNameNorthCoast",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "NorthExitHogwarts": {
+    "localized_id": "FT_HW_NorthExitHogwarts",
+    "desc_localized_id": "FT_HW_NorthExitHogwarts_desc",
+    "schedule_id": null
+  },
+  "NorthHall": {
+    "localized_id": "HOG_NorthHall",
+    "desc_localized_id": "HOG_NorthHall_Desc",
+    "schedule_id": "HOG_NorthHall"
+  },
+  "NorthSwamp": {
+    "localized_id": "RegionNameNorthSwamp",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "NorthTower": {
+    "localized_id": "HOG_NorthTower",
+    "desc_localized_id": "HOG_NorthTower_Desc",
+    "schedule_id": "HOG_NorthTower"
+  },
+  "Office_Binns": {
+    "localized_id": "HOG_Office_CuthbertBinns",
+    "desc_localized_id": "HOG_Office_CuthbertBinns_Desc",
+    "schedule_id": "HOG_Office_CuthbertBinns"
+  },
+  "Office_Fig": {
+    "localized_id": "HOG_Office_Fig",
+    "desc_localized_id": "HOG_Office_Fig_Desc",
+    "schedule_id": "HOG_Office_Fig"
+  },
+  "Office_Garlick": {
+    "localized_id": "HOG_Office_MirabelGarlick",
+    "desc_localized_id": "HOG_Office_MirabelGarlick_Desc",
+    "schedule_id": "HOG_Office_MirabelGarlick"
+  },
+  "Office_Headmaster": {
+    "localized_id": "HOG_Office_PhineasBlack",
+    "desc_localized_id": "HOG_Office_PhineasBlack_Desc",
+    "schedule_id": "HOG_Office_PhineasBlack"
+  },
+  "Office_Hecat": {
+    "localized_id": "HOG_Office_DinahHecat",
+    "desc_localized_id": "HOG_Office_DinahHecat_Desc",
+    "schedule_id": "HOG_Office_DinahHecat"
+  },
+  "Office_Howin": {
+    "localized_id": "HOG_Office_BaiHowin",
+    "desc_localized_id": "HOG_Office_BaiHowin_Desc",
+    "schedule_id": "HOG_Office_BaiHowin"
+  },
+  "Office_Kogawa": {
+    "localized_id": "HOG_Office_ElizaMokuwa",
+    "desc_localized_id": "HOG_Office_ElizaMokuwa_Desc",
+    "schedule_id": "HOG_Office_ChiyoKogawa"
+  },
+  "Office_Onai": {
+    "localized_id": "HOG_Office_MudiwaOnai",
+    "desc_localized_id": "HOG_Office_MudiwaOnai_Desc",
+    "schedule_id": "HOG_Office_MudiwaOnai"
+  },
+  "Office_Ronen": {
+    "localized_id": "HOG_Office_AbrahamRonen",
+    "desc_localized_id": "HOG_Office_AbrahamRonen_Desc",
+    "schedule_id": "HOG_Office_AbrahamRonen"
+  },
+  "Office_Shah": {
+    "localized_id": "HOG_Office_SamirShaw",
+    "desc_localized_id": "HOG_Office_SamirShaw_Desc",
+    "schedule_id": "HOG_Office_SamirShaw"
+  },
+  "Office_Sharp": {
+    "localized_id": "HOG_Office_AesopSharp",
+    "desc_localized_id": "HOG_Office_AesopSharp_Desc",
+    "schedule_id": "HOG_Office_AesopSharp"
+  },
+  "Office_Weasley": {
+    "localized_id": "HOG_Office_MatildaWeasley",
+    "desc_localized_id": "HOG_Office_MatildaWeasley_Desc",
+    "schedule_id": "HOG_Office_MatildaWeasley"
+  },
+  "OwlCorridor": {
+    "localized_id": "HOG_OwlCorridor",
+    "desc_localized_id": "HOG_OwlCorridor_desc",
+    "schedule_id": "HOG_OwlCorridor"
+  },
+  "Owlery": {
+    "localized_id": "HOG_Owlery",
+    "desc_localized_id": "HOG_Owlery_Desc",
+    "schedule_id": "HOG_Owlery"
+  },
+  "Owlery_SecretRoom": {
+    "localized_id": "HOG_Owlery_SecretRoom",
+    "desc_localized_id": "HOG_Owlery_SecretRoom_desc",
+    "schedule_id": "HOG_Owlery_SecretRoom"
+  },
+  "PittUponFord": {
+    "localized_id": "RegionNamePittUponFord",
+    "desc_localized_id": null,
+    "schedule_id": "HAM_PittUponFord"
+  },
+  "PondDock": {
+    "localized_id": "HOG_PondDock",
+    "desc_localized_id": "HOG_PondDock_desc",
+    "schedule_id": "HOG_PondDock"
+  },
+  "PotionsClassroom": {
+    "localized_id": "HOG_PotionsClassroom",
+    "desc_localized_id": "HOG_PotionsClassroom_Desc",
+    "schedule_id": null
+  },
+  "PrefectBathroom": {
+    "localized_id": "HOG_PrefectBathroom",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "QuadCourtyard": {
+    "localized_id": "HOG_QuadCourtyard",
+    "desc_localized_id": "HOG_QuadCourtyard_Desc",
+    "schedule_id": "HOG_QuadCourtyard"
+  },
+  "QuadEastHall": {
+    "localized_id": "HOG_QuadEastHall",
+    "desc_localized_id": "HOG_QuadEastHall_Desc",
+    "schedule_id": "HOG_QuadEastHall"
+  },
+  "QuadNorthHall": {
+    "localized_id": "HOG_QuadNorthHall",
+    "desc_localized_id": "HOG_QuadNorthHall_Desc",
+    "schedule_id": "HOG_QuadNorthHall"
+  },
+  "QuadSouthHall": {
+    "localized_id": "HOG_QuadSouthHall",
+    "desc_localized_id": "HOG_QuadSouthHall_Desc",
+    "schedule_id": "HOG_QuadSouthHall"
+  },
+  "QuidditchPitch": {
+    "localized_id": "LORE_Grounds_QuidditchHoops",
+    "desc_localized_id": "LORE_Grounds_QuidditchHoops_desc",
+    "schedule_id": "HOG_Neighborhood_Athletes_Pitch"
+  },
+  "RavenclawCommonRoom": {
+    "localized_id": "HOG_Ravenclaw_CommonRoom",
+    "desc_localized_id": "HOG_Ravenclaw_CommonRoom_Desc",
+    "schedule_id": "HOG_Ravenclaw_CommonRoom"
+  },
+  "RavenclawGirlsStairs": {
+    "localized_id": "HOG_Map_Ravenclaw_GirlStairs",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "RavenclawMainStairs": {
+    "localized_id": "HOG_MAP_RAVENCLAW_MAINSTAIRS",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "RavenclawTower": {
+    "localized_id": "HOG_RavenclawTower",
+    "desc_localized_id": "HOG_RavenclawTower_Desc",
+    "schedule_id": "HOG_RavenclawTower"
+  },
+  "ReceptionHall": {
+    "localized_id": "Hog_ReceptionHall",
+    "desc_localized_id": null,
+    "schedule_id": "HOG_ReceptionHall"
+  },
+  "RoomOfRequirement": {
+    "localized_id": "HOG_RoomofReqHidden",
+    "desc_localized_id": "HOG_RoomofReqHidden_Desc",
+    "schedule_id": "HOG_AstronomyTower_RoomOfReq"
+  },
+  "RoomOfRequirementEntrance": {
+    "localized_id": "HOG_ASTRONOMYTOWER_ROOMOFREQ",
+    "desc_localized_id": "HOG_ASTRONOMYTOWER_ROOMOFREQ_desc",
+    "schedule_id": "HOG_AstronomyTower_RoomOfReq"
+  },
+  "SanBakarsTower": {
+    "localized_id": "RegionNameSanBakarsTower",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "Sanctum": {
+    "localized_id": "HOG_Sanctum",
+    "desc_localized_id": "HOG_Sanctum_Desc",
+    "schedule_id": "HOG_Sanctum"
+  },
+  "SanctumEntrance": {
+    "localized_id": "HOG_SanctumEntrance_Hog",
+    "desc_localized_id": "HOG_SanctumEntrance_Hog_Desc",
+    "schedule_id": "HOG_SanctumEntrance_Hog"
+  },
+  "SanctumEntrance_OL": {
+    "localized_id": "HOG_SanctumEntrance_OL",
+    "desc_localized_id": "HOG_SanctumEntrance_OL_Desc",
+    "schedule_id": "HOG_SanctumEntrance_OL"
+  },
+  "SchoolGrounds": {
+    "localized_id": "HOG_SchoolGrounds",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "Scriptorium": {
+    "localized_id": "HOG_Scriptorium",
+    "desc_localized_id": null,
+    "schedule_id": "HOG_EVL_Scriptorium"
+  },
+  "SlytherinCommonRoom": {
+    "localized_id": "HOG_Slytherin_CommonRoom",
+    "desc_localized_id": null,
+    "schedule_id": "HOG_Slytherin_CommonRoom"
+  },
+  "SlytherinDungeon": {
+    "localized_id": "HOG_SlytherinDungeon",
+    "desc_localized_id": null,
+    "schedule_id": "HOG_SlytherinDungeon"
+  },
+  "SouthCoast": {
+    "localized_id": "RegionNameSouthCoast",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "SouthExitHogwarts": {
+    "localized_id": "FT_HW_SouthExitHogwarts",
+    "desc_localized_id": "FT_HW_SouthExitHogwarts_desc",
+    "schedule_id": null
+  },
+  "SouthSwamp": {
+    "localized_id": "RegionNameSouthSwamp",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "SuspensionBridge": {
+    "localized_id": "HOG_SuspensionBridge",
+    "desc_localized_id": "HOG_SuspensionBridge_Desc",
+    "schedule_id": "HOG_SuspensionBridge"
+  },
+  "TransfigurationCourtyard": {
+    "localized_id": "HOG_TransfigurationCourtyard",
+    "desc_localized_id": "HOG_TransfigurationCourtyard_Desc",
+    "schedule_id": "HOG_TransfigurationCourtyard"
+  },
+  "TrophyRoom": {
+    "localized_id": "HOG_TrophyRoom",
+    "desc_localized_id": "HOG_TrophyRoom_desc",
+    "schedule_id": "HOG_TrophyRoom"
+  },
+  "Undercroft": {
+    "localized_id": "HOG_Undercroft",
+    "desc_localized_id": null,
+    "schedule_id": "HOG_Undercroft"
+  },
+  "UndergroundHarbor": {
+    "localized_id": "HOG_UndergroundHarbor",
+    "desc_localized_id": "HOG_UndergroundHarbor_Desc",
+    "schedule_id": null
+  },
+  "UpperHogsfield": {
+    "localized_id": "Hamlet_UpperHogsfield",
+    "desc_localized_id": "Hamlet_UpperHogsfield_Desc",
+    "schedule_id": null
+  },
+  "ViaductBridge": {
+    "localized_id": "HOG_ViaductBridge",
+    "desc_localized_id": "HOG_ViaductBridge_Desc",
+    "schedule_id": "HOG_ViaductBridge"
+  },
+  "ViaductCourtyard": {
+    "localized_id": "HOG_ViaductCourtyard",
+    "desc_localized_id": "HOG_ViaductCourtyard_Desc",
+    "schedule_id": "HOG_ViaductCourtyard"
+  },
+  "ViaductEntrance": {
+    "localized_id": "HOG_ViaductEntrance",
+    "desc_localized_id": "HOG_ViaductEntrance_Desc",
+    "schedule_id": "HOG_ViaductEntrance"
+  },
+  "WaterCave": {
+    "localized_id": "HOG_WaterCave",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "WestHall": {
+    "localized_id": "HOG_WestHall",
+    "desc_localized_id": null,
+    "schedule_id": "HOG_WestHall"
+  },
+  "WestHogwarts": {
+    "localized_id": "RegionNameWestHogwarts",
+    "desc_localized_id": null,
+    "schedule_id": null
+  },
+  "WoodenBridge": {
+    "localized_id": "HOG_WoodenBridge",
+    "desc_localized_id": null,
+    "schedule_id": "HOG_WoodenBridge"
+  }
+}

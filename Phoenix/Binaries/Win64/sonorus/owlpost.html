@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Owl Post</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=Crimson+Text:ital,wght@0,400;0,600;1,400&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="/owlpost/css/owlpost.css?v=1.2">
+</head>
+
+<body>
+    <img class="owl-feet" src="/owlpost/images/owl-feet.webp" alt="">
+
+    <!-- Owl send animation (triggered on mail send) -->
+    <div class="owl-send hidden" id="owlSend">
+        <img class="owl-send-feet" src="/owlpost/images/owl-feet.webp" alt="">
+        <img class="owl-send-letter" src="/owlpost/images/mail.webp" alt="">
+    </div>
+    <div class="owlpost-container">
+        <div class="container-frost"></div>
+
+        <!-- ===== Top Navigation ===== -->
+        <nav id="topNav">
+            <h1>Owl Post</h1>
+            <div class="game-time-display" id="owlGameTime"></div>
+            <div class="nav-tabs">
+                <button class="tab active" data-view="mail">Mail</button>
+                <button class="tab" data-view="boards">Boards</button>
+            </div>
+        </nav>
+
+        <!-- ===== Mail View ===== -->
+        <div id="mailView" class="view active">
+
+            <!-- Inbox List -->
+            <div id="mailInbox" class="scroll-area">
+                <div id="mailList" class="mail-list">
+                    <div class="loading-state"><span class="spinner"></span> Loading mail...</div>
+                </div>
+                <button class="compose-owl-btn" id="composeToggle" title="Write Owl Mail">
+                    <img src="/owlpost/images/write-owl-mail.webp" alt="Write Owl Mail">
+                </button>
+            </div>
+
+            <!-- Compose View (replaces inbox when composing) -->
+            <div id="composeView" class="thread-detail">
+                <div class="thread-back">
+                    <div class="breadcrumb">
+                        <span class="crumb-link" id="composeBackToInbox">Inbox</span>
+                        <span class="sep">/</span>
+                        <span>New Letter</span>
+                    </div>
+                </div>
+                <div class="compose-letter">
+                    <div class="compose-letter-parchment">
+                        <div class="compose-field">
+                            <label for="composeRecipient">To</label>
+                            <select id="composeRecipient">
+                                <option value="">Select a recipient...</option>
+                            </select>
+                        </div>
+                        <div class="compose-field">
+                            <label for="composeSubject">Re</label>
+                            <input type="text" id="composeSubject" placeholder="Subject of your letter">
+                        </div>
+                        <div class="compose-field compose-body-field">
+                            <textarea id="composeBody" placeholder="Write your letter here..."></textarea>
+                        </div>
+                        <button class="send-owl-btn" id="composeSend" title="Send Owl">
+                            <img src="/owlpost/images/send-owl-mail.webp" alt="Send Owl">
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Thread Detail (replaces inbox when viewing) -->
+            <div id="mailThread" class="thread-detail">
+                <div class="thread-back">
+                    <div class="breadcrumb">
+                        <span class="crumb-link" id="mailBackToInbox">Inbox</span>
+                        <span class="sep">/</span>
+                        <span id="mailThreadSubject">Thread</span>
+                    </div>
+                    <button class="thread-delete-btn" id="mailThreadDelete" title="Delete thread"><i data-lucide="trash-2"></i></button>
+                </div>
+                <div class="thread-messages" id="mailThreadMessages"></div>
+            </div>
+        </div>
+
+        <!-- ===== Boards View ===== -->
+        <div id="boardsView" class="view">
+
+            <!-- Board List -->
+            <div id="boardsList" class="scroll-area">
+                <div class="section-header">Notice Boards</div>
+                <div id="boardListContainer" class="board-list">
+                    <div class="loading-state"><span class="spinner"></span> Loading boards...</div>
+                </div>
+            </div>
+
+            <!-- Thread List (board selected) -->
+            <div id="boardThreadList" class="thread-detail">
+                <div class="thread-back">
+                    <div class="breadcrumb">
+                        <span class="crumb-link" id="boardBackToList">Boards</span>
+                        <span class="sep">/</span>
+                        <span id="boardThreadListName">Board</span>
+                    </div>
+                </div>
+                <div class="scroll-area">
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem;">
+                        <div class="section-header" style="margin-bottom:0;border:none;padding:0;">Threads</div>
+                        <button class="btn btn-secondary" id="newThreadToggle">+ New Thread</button>
+                    </div>
+                    <div class="new-thread-form" id="newThreadForm">
+                        <div>
+                            <label for="newThreadTitle">Title</label>
+                            <input type="text" id="newThreadTitle" placeholder="Thread title">
+                        </div>
+                        <div>
+                            <label for="newThreadBody">Message</label>
+                            <textarea id="newThreadBody" placeholder="Write your post..."></textarea>
+                        </div>
+                        <div class="form-actions">
+                            <button class="btn btn-secondary" id="newThreadCancel">Cancel</button>
+                            <button class="btn btn-primary" id="newThreadSubmit">Post</button>
+                        </div>
+                    </div>
+                    <div id="threadListContainer" class="thread-list">
+                        <div class="loading-state"><span class="spinner"></span> Loading threads...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Thread Detail (thread selected) -->
+            <div id="boardThreadDetail" class="thread-detail">
+                <div class="thread-back">
+                    <div class="breadcrumb">
+                        <span class="crumb-link" id="threadBackToBoards">Boards</span>
+                        <span class="sep">/</span>
+                        <span class="crumb-link" id="threadBackToBoard">Board</span>
+                        <span class="sep">/</span>
+                        <span id="threadDetailTitle">Thread</span>
+                    </div>
+                </div>
+                <div class="thread-messages" id="boardThreadMessages"></div>
+                <div class="thread-reply">
+                    <textarea id="boardReplyBody" placeholder="Write a reply..."></textarea>
+                    <button class="btn btn-primary" id="boardReplySend">Reply</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===== Password Modal ===== -->
+        <div id="passwordModal" class="modal hidden">
+            <div class="modal-card">
+                <h2>Board Locked</h2>
+                <p id="passwordModalReason">A password is required to access this board.</p>
+                <input type="password" id="passwordInput" placeholder="Enter password">
+                <div class="modal-error" id="passwordError"></div>
+                <div class="modal-actions">
+                    <button class="btn btn-ghost" id="passwordCancel">Cancel</button>
+                    <button class="btn btn-primary" id="passwordSubmit">Unlock</button>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Toast for notifications -->
+    <div class="toast" id="toast"></div>
+
+    <script src="/owlpost/js/lucide.min.js"></script>
+    <script src="/owlpost/js/history-audio.js?v=1.2"></script>
+    <script src="/owlpost/js/owlpost.js?v=1.2"></script>
+</body>
+
+</html>

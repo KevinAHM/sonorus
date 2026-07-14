@@ -1,0 +1,34 @@
+{
+  "great-hall-notices": {
+    "description": "Any student or faculty member",
+    "roles": ["student", "faculty"]
+  },
+  "gryffindor-common-room": {
+    "house": "Gryffindor",
+    "members": ["GarrethWeasley", "NatsaiOnai", "CressidaBlume", "NellieOggspire", "LeanderPrewett", "EricNorthcott", "LucanBrattleby"]
+  },
+  "hufflepuff-common-room": {
+    "house": "Hufflepuff",
+    "members": ["PoppySweeting", "AdelaideOakes", "EvangelineBardsley", "CharlotteMorrison", "SacharissaTugwood", "LenoraAbbott"]
+  },
+  "ravenclaw-common-room": {
+    "house": "Ravenclaw",
+    "members": ["AmitKakkar", "EverettClopton", "SamanthaDale", "DuncanHobhouse", "AndrewLarson", "MahendraKapoor", "SophroniaFranklin", "AstoriaCrickett", "ZenobiaNoke"]
+  },
+  "slytherin-common-room": {
+    "house": "Slytherin",
+    "members": ["SebastianSallow", "OminisGaunt", "ImeldaReyes", "NeridaRoberts", "VioletMcDowell"]
+  },
+  "study-groups": {
+    "description": "Academic discussions",
+    "roles": ["student", "faculty"]
+  },
+  "mischief-corner": {
+    "description": "Troublemakers only",
+    "members": ["GarrethWeasley", "SebastianSallow", "NellieOggspire", "CressidaBlume"]
+  },
+  "faculty-board": {
+    "description": "Faculty only - decorative, not populated",
+    "members": ["MatildaWeasley", "AesopSharp", "EleazarFig", "MirabelGarlick", "MudiwaOnai", "AbrahamRonen", "DinahHecat"]
+  }
+}

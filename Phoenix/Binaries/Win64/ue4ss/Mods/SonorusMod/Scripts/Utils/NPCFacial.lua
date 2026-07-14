@@ -1,58 +1,60 @@
 -- NPCFacial.lua - NPC facial component access for Sonorus
--- Handles facial animation state (lip sync detection/control)
+-- Dialogue lip sync stop and eye-default control go through ModActor Blueprint cache by voiceId.
 
 ---@class NPCFacial
 local NPCFacial = {}
 
--- Cache module for static data access
-local Cache = require "Utils.Cache"
-
----Get FacialComponent from an NPC actor
----@param npc userdata The NPC actor
----@return userdata|nil The FacialComponent, or nil if not found
-function NPCFacial.GetNPCFacialComponent(npc)
-    if not npc then return nil end
-
-    local staticData = Cache.GetStaticData()
-    local facialClass = staticData and staticData.facialComponentClass
-    if not facialClass then return nil end
-
-    local facialComp = nil
-    local ok = pcall(function()
-        facialComp = npc:GetComponentByClass(facialClass)
-    end)
-
-    return ok and facialComp or nil
-end
+local BlueprintHelpers = require "Utils.BlueprintHelpers"
 
 ---Stop ambient dialogue lip sync on an NPC
----@param npc userdata The NPC actor
----@return boolean success Whether the cancel succeeded
+---@param npc userdata|string
+---@return boolean
 function NPCFacial.StopNPCDialogueLipSync(npc)
-    local facialComp = NPCFacial.GetNPCFacialComponent(npc)
-    if not facialComp then return false end
+    local voiceId = BlueprintHelpers.ToVoiceId(npc)
+    if not voiceId then return false end
 
-    local result = false
+    local mod = BlueprintHelpers.GetSonorusModActor()
+    if not mod then return false end
+
+    local stopNpcDialogueLipSyncById = mod.StopNpcDialogueLipSyncById
+    if not stopNpcDialogueLipSyncById then
+        error("ModActor missing callable StopNpcDialogueLipSyncById")
+    end
+
+    local out = {}
     local ok = pcall(function()
-        result = facialComp:EditorCancelPlayingCurrentDialogueLine()
+        stopNpcDialogueLipSyncById(mod, voiceId, out)
     end)
-
-    return ok and result
+    if not ok then return false end
+    if out.Success ~= nil then
+        return out.Success == true
+    end
+    return true
 end
 
----Check if NPC is currently playing dialogue lip sync
----@param npc userdata The NPC actor
----@return boolean isPlaying
-function NPCFacial.IsNPCPlayingDialogueLipSync(npc)
-    local facialComp = NPCFacial.GetNPCFacialComponent(npc)
-    if not facialComp then return false end
+---Set NPC eye-default flags through the ModActor Blueprint bridge.
+---@param npc userdata|string
+---@param ambientValue boolean
+---@param additiveValue boolean
+---@return boolean
+function NPCFacial.SetNpcEyeDefaults(npc, ambientValue, additiveValue)
+    local voiceId = BlueprintHelpers.ToVoiceId(npc)
+    if not voiceId then return false end
 
-    local isPlaying = false
-    pcall(function()
-        isPlaying = facialComp:IsPlayingDialogueLine()
+    local mod = BlueprintHelpers.GetSonorusModActor()
+    if not mod then return false end
+
+    local setNpcEyeDefaultsById = mod.SetNpcEyeDefaultsById
+    if not setNpcEyeDefaultsById then
+        error("ModActor missing callable SetNpcEyeDefaultsById")
+    end
+
+    local out = {}
+    local ok = pcall(function()
+        setNpcEyeDefaultsById(mod, voiceId, ambientValue, additiveValue, out)
     end)
-
-    return isPlaying
+    if not ok then return false end
+    return out.Success == true
 end
 
 return NPCFacial

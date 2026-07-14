@@ -15,7 +15,7 @@ from .settings import DATA_DIR, load_settings
 class _LocalizationCache:
     """Singleton cache that persists across reloads."""
     _instance = None
-    _lock = threading.Lock()  # Protects cache initialization
+    _lock = threading.RLock()  # Protects cache initialization across nested cache loads
 
     def __init__(self):
         self.localization = None
@@ -79,10 +79,21 @@ def get_subtitles_path(language=None):
 
 
 def invalidate_cache():
-    """Clear localization caches. Call when language changes."""
+    """Clear localization caches and dependent registry caches. Call when language changes."""
     _cache.localization = None
     _cache.reverse_localization = None
     _cache.cached_language = None
+    # Invalidate downstream caches that derive from localization
+    try:
+        from .commitments import _invalidate_registry_display_cache
+        _invalidate_registry_display_cache()
+    except ImportError:
+        pass
+    try:
+        from .lua_socket import LuaSocketServer
+        LuaSocketServer._location_reverse_map = None
+    except (ImportError, AttributeError):
+        pass
 
 
 def load_localization():
@@ -135,6 +146,15 @@ def get_display_name(npc_id):
     if npc_id in loc:
         return loc[npc_id]
 
+    # Owl Post-only custom characters can provide their own display names.
+    try:
+        from .owl_custom_characters import get_custom_owl_character_display_name
+        custom_name = get_custom_owl_character_display_name(npc_id)
+        if custom_name:
+            return custom_name
+    except Exception:
+        pass
+
     # Fallback: add spaces at camelCase boundaries
     # "NellieOggspire" -> "Nellie Oggspire"
     return re.sub(r'([a-z])([A-Z])', r'\1 \2', npc_id)
@@ -149,6 +169,10 @@ def get_reverse_localization():
                 reverse = {}
                 for slug, display_name in loc.items():
                     if display_name and isinstance(display_name, str):
+                        # Skip menu/UI keys — these are not NPC IDs and can
+                        # shadow real NPC slugs (e.g. Menu_Opponent5 -> "Professor Ronen")
+                        if slug.startswith("Menu_"):
+                            continue
                         # Store lowercase for case-insensitive lookup
                         reverse[display_name.lower()] = slug
                 _cache.reverse_localization = reverse
@@ -172,6 +196,43 @@ def get_lowercase_map():
                     print(f"[Localization] Error loading: {e}")
                     _cache.lowercase_map = {}
     return _cache.lowercase_map
+
+
+def canonicalize_npc_id(npc_id):
+    """
+    Normalize an NPC ID to the canonical slug used by localization/history.
+
+    Handles:
+    - special values like Player / Unknown
+    - lowercase game-emitted IDs using lowercase_map.json
+    - already-canonical localization slugs
+    """
+    if npc_id is None:
+        return None
+
+    npc_id = str(npc_id).strip()
+    if not npc_id:
+        return None
+
+    lowered = npc_id.lower()
+    if lowered == 'player':
+        return 'Player'
+    if lowered == 'unknown':
+        return 'Unknown'
+
+    loc = load_localization()
+    if npc_id in loc:
+        return npc_id
+
+    lowercase_map = get_lowercase_map()
+    if npc_id in lowercase_map:
+        return npc_id
+
+    for canonical_id, lower_id in lowercase_map.items():
+        if isinstance(lower_id, str) and lower_id.lower() == lowered:
+            return canonical_id
+
+    return npc_id
 
 
 def id_from_name(name, nearby_npcs=None):
@@ -199,13 +260,27 @@ def id_from_name(name, nearby_npcs=None):
             if npc_id.lower() == name_lower:
                 return npc_id
 
+        # If the LLM returns a display name like "Slytherin Student", prefer
+        # the live nearby actor over the global localization reverse map. Many
+        # generic and cut/scrapped characters share display names.
+        loc = load_localization()
+        for npc in nearby_npcs:
+            npc_id = npc.get('name', '')
+            if not npc_id:
+                continue
+            display_name = loc.get(npc_id) or get_display_name(npc_id)
+            display_lower = display_name.lower()
+            display_no_spaces = display_lower.replace(' ', '')
+            if name_lower_spaces == display_lower or name_lower == display_no_spaces:
+                return npc_id
+
     # 2. Check lowercase_map.json for IDs that are given by game in lowercase
     lowercase_map = get_lowercase_map()
     # e.g. NeridaRoberts or Nerida Roberts -> neridaroberts
     if name in lowercase_map:
-        return lowercase_map[name]
+        return canonicalize_npc_id(name)
     if name_no_spaces in lowercase_map:
-        return lowercase_map[name_no_spaces]
+        return canonicalize_npc_id(name_no_spaces)
 
     # 2. Check localization for exact display name match
     reverse_loc = get_reverse_localization()
@@ -215,13 +290,26 @@ def id_from_name(name, nearby_npcs=None):
     # 3. Check if name is already a valid slug in localization
     loc = load_localization()
     if name in loc:
-        return name
+        return canonicalize_npc_id(name)
     # Try with spaces removed
     name_no_spaces = name.replace(" ", "")
     if name_no_spaces in loc:
-        return name_no_spaces
+        return canonicalize_npc_id(name_no_spaces)
 
-    # 4. Partial match - check if any display name STARTS with or CONTAINS the input
+    # 4. Partial match nearby display names before global localization, for
+    # ambiguous labels like "Slytherin Student".
+    if nearby_npcs:
+        for npc in nearby_npcs:
+            npc_id = npc.get('name', '')
+            if not npc_id:
+                continue
+            display_name = loc.get(npc_id) or get_display_name(npc_id)
+            display_lower = display_name.lower()
+            first_name = display_lower.split()[0] if ' ' in display_lower else display_lower
+            if display_lower.startswith(name_lower_spaces) or first_name == name_lower_spaces:
+                return npc_id
+
+    # 5. Partial match - check if any display name STARTS with or CONTAINS the input
     # (handles "Nellie" matching "Nellie Oggspire")
     for display_lower, slug in reverse_loc.items():
         # Check if input is the start of a display name
@@ -232,7 +320,7 @@ def id_from_name(name, nearby_npcs=None):
         if first_name == name_lower_spaces:
             return slug
 
-    # 5. Check nearby NPCs for partial match
+    # 6. Check nearby NPCs for partial match
     if nearby_npcs:
         for npc in nearby_npcs:
             npc_id = npc.get('name', '')
@@ -241,9 +329,50 @@ def id_from_name(name, nearby_npcs=None):
             if npc_lower.startswith(name_lower) or name_lower in npc_lower:
                 return npc_id
 
-    # 6. Fallback: return with spaces removed
+    # 7. Fallback: return with spaces removed
     print(f"[Localization] No ID found for '{name}', using fallback")
     return name.replace(" ", "")
+
+
+def strict_id_from_name(name):
+    """
+    Resolve a display name to an internal slug without any fuzzy fallbacks.
+
+    Allowed resolution paths only:
+    - lowercase_map.json exact match
+    - reverse localization exact display-name match
+    - already-a-slug check
+
+    Returns:
+        Canonical slug string when resolved, otherwise None.
+    """
+    if not name:
+        return None
+
+    name = str(name).strip()
+    if not name:
+        return None
+
+    name_no_spaces = name.replace(" ", "")
+    name_lower_spaces = name.lower()
+
+    lowercase_map = get_lowercase_map()
+    if name in lowercase_map:
+        return canonicalize_npc_id(name)
+    if name_no_spaces in lowercase_map:
+        return canonicalize_npc_id(name_no_spaces)
+
+    reverse_loc = get_reverse_localization()
+    if name_lower_spaces in reverse_loc:
+        return reverse_loc[name_lower_spaces]
+
+    loc = load_localization()
+    if name in loc:
+        return canonicalize_npc_id(name)
+    if name_no_spaces in loc:
+        return canonicalize_npc_id(name_no_spaces)
+
+    return None
 
 
 def find_npc_id_by_name(display_name, nearby_npcs):

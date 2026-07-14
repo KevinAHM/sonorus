@@ -1,7 +1,7 @@
 """
 Memory API endpoints for Sonorus NPC memory system.
 
-Handles knowledge graph operations, chapter management, and memory migration.
+Handles lightweight NPC fact memory, chapter management, and memory migration.
 """
 
 import os
@@ -13,41 +13,115 @@ import threading
 
 from flask import Blueprint, request, jsonify, Response
 
-from utils.settings import DATA_DIR
 from utils.localization import get_display_name
 
 memory_bp = Blueprint('memory', __name__)
+
+
+def _is_player_context_ready():
+    try:
+        from utils import player_context
+        return player_context.is_ready()
+    except Exception:
+        return False
+
+
+def _no_player_loaded_response():
+    return jsonify({"success": False, "error": "Player context not ready"}), 400
 
 
 # ============================================
 # Memory API Endpoints
 # ============================================
 
+@memory_bp.route('/api/memories/backups', methods=['GET'])
+def list_memory_backups():
+    """List available memory snapshots."""
+    try:
+        if not _is_player_context_ready():
+            return _no_player_loaded_response()
+
+        from utils.memory import list_memory_backups as _list_memory_backups
+
+        return jsonify({
+            "success": True,
+            "backups": _list_memory_backups()
+        })
+    except Exception as e:
+        print(f"[Memory] Error listing memory backups: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@memory_bp.route('/api/memories/backups/restore', methods=['POST'])
+def restore_memory_backup():
+    """Restore a selected memory snapshot."""
+    try:
+        if not _is_player_context_ready():
+            return _no_player_loaded_response()
+
+        from utils.memory import restore_memory_backup as _restore_memory_backup
+
+        data = request.get_json(silent=True) or {}
+        backup_id = (data.get('backup_id') or '').strip()
+        if not backup_id:
+            return jsonify({"success": False, "error": "backup_id is required"}), 400
+
+        result = _restore_memory_backup(backup_id)
+        status_code = 200 if result.get("success") else 400
+        return jsonify(result), status_code
+    except Exception as e:
+        print(f"[Memory] Error restoring memory backup: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
 @memory_bp.route('/api/memories', methods=['DELETE'])
 def clear_all_memories():
-    """Clear all NPC long-term memories (Kuzu graph and chapter data)."""
+    """Clear all NPC long-term memories and chapter data."""
     try:
-        from utils.memory import reset_memory_connection
-        from utils.memory_queue import reset_all_state
+        if not _is_player_context_ready():
+            return _no_player_loaded_response()
 
-        # Reset the Graphiti connection first (releases file handles)
-        reset_memory_connection()
+        from utils.memory import create_memory_snapshot, get_memory_data_dir
+        from utils.memory_queue import graceful_shutdown, reset_connection_state
 
-        # Delete Kuzu database files
+        memory_data_dir = get_memory_data_dir()
+        create_memory_snapshot("before_clear_all_memories", timeout=180.0, keep=10)
+
+        shutdown_ok = graceful_shutdown(max_wait=30.0)
+        if not shutdown_ok:
+            raise RuntimeError("Memory shutdown did not complete cleanly")
+
+        # Delete legacy Kuzu database files if they are still present from an older build.
         for kuzu_file in ('memory.kuzu', 'memory.kuzu.wal'):
-            kuzu_path = os.path.join(DATA_DIR, kuzu_file)
+            kuzu_path = os.path.join(memory_data_dir, kuzu_file)
             if os.path.exists(kuzu_path):
                 os.remove(kuzu_path)
                 print(f"[Memory] Deleted {kuzu_file}")
 
         # Delete chapters directory (local state)
-        chapters_dir = os.path.join(DATA_DIR, 'chapters')
+        chapters_dir = os.path.join(memory_data_dir, 'chapters')
         if os.path.exists(chapters_dir):
             shutil.rmtree(chapters_dir)
             print(f"[Memory] Deleted chapters directory: {chapters_dir}")
 
-        # Reset queue checkpoints so entries are reprocessed from the beginning
-        reset_all_state()
+        # Delete staged chapter content, bios, Cognis data, and queue DB state too.
+        for path in (
+            os.path.join(memory_data_dir, 'cognis'),
+            os.path.join(memory_data_dir, 'chapter_content'),
+            os.path.join(memory_data_dir, 'npc_bios'),
+        ):
+            if os.path.exists(path):
+                shutil.rmtree(path)
+                print(f"[Memory] Deleted directory: {path}")
+
+        for queue_file in ('memory_queue.db', 'memory_queue.db-wal', 'memory_queue.db-shm'):
+            queue_path = os.path.join(memory_data_dir, queue_file)
+            if os.path.exists(queue_path):
+                os.remove(queue_path)
+                print(f"[Memory] Deleted {queue_file}")
+
+        reset_connection_state()
 
         return jsonify({"success": True, "message": "All memories cleared"})
     except Exception as e:
@@ -55,15 +129,114 @@ def clear_all_memories():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@memory_bp.route('/api/memories/reset', methods=['POST'])
+def reset_memory_system():
+    """Force-reset the entire memory system by deleting all database files.
+
+    Unlike DELETE /api/memories, this does NOT attempt to create a snapshot first
+    or require a clean graceful shutdown. It best-efforts the teardown and then
+    force-deletes every memory-related file regardless. Use when the database is
+    corrupted and normal clear/restore operations fail.
+    """
+    try:
+        if not _is_player_context_ready():
+            return _no_player_loaded_response()
+
+        from utils.memory import get_memory_data_dir
+        from utils.memory_queue import graceful_shutdown, reset_connection_state
+
+        memory_data_dir = get_memory_data_dir()
+        deleted = []
+        errors = []
+
+        # Best-effort shutdown — don't bail if it fails
+        try:
+            graceful_shutdown(max_wait=10.0)
+        except Exception as e:
+            print(f"[Memory] Reset: graceful shutdown failed (continuing anyway): {e}")
+
+        # Best-effort close memory resources so file handles are released.
+        try:
+            from utils.memory import reset_memory_connection
+            reset_memory_connection()
+        except Exception as e:
+            print(f"[Memory] Reset: memory connection reset failed (continuing anyway): {e}")
+
+        # Force delete legacy memory database files if present.
+        for kuzu_file in ('memory.kuzu', 'memory.kuzu.wal'):
+            kuzu_path = os.path.join(memory_data_dir, kuzu_file)
+            if os.path.exists(kuzu_path):
+                try:
+                    os.remove(kuzu_path)
+                    deleted.append(kuzu_file)
+                    print(f"[Memory] Reset: deleted {kuzu_file}")
+                except Exception as e:
+                    errors.append(f"{kuzu_file}: {e}")
+                    print(f"[Memory] Reset: failed to delete {kuzu_file}: {e}")
+
+        # Force delete all memory directories
+        for dir_name in ('cognis', 'chapters', 'chapter_content', 'npc_bios'):
+            dir_path = os.path.join(memory_data_dir, dir_name)
+            if os.path.exists(dir_path):
+                try:
+                    shutil.rmtree(dir_path)
+                    deleted.append(f"{dir_name}/")
+                    print(f"[Memory] Reset: deleted {dir_name}/")
+                except Exception as e:
+                    errors.append(f"{dir_name}/: {e}")
+                    print(f"[Memory] Reset: failed to delete {dir_name}/: {e}")
+
+        # Force delete memory queue database files
+        for queue_file in ('memory_queue.db', 'memory_queue.db-wal', 'memory_queue.db-shm'):
+            queue_path = os.path.join(memory_data_dir, queue_file)
+            if os.path.exists(queue_path):
+                try:
+                    os.remove(queue_path)
+                    deleted.append(queue_file)
+                    print(f"[Memory] Reset: deleted {queue_file}")
+                except Exception as e:
+                    errors.append(f"{queue_file}: {e}")
+                    print(f"[Memory] Reset: failed to delete {queue_file}: {e}")
+
+        # Reset in-memory connection state so the system reinitializes cleanly
+        try:
+            reset_connection_state()
+        except Exception as e:
+            print(f"[Memory] Reset: connection state reset failed: {e}")
+
+        if errors:
+            return jsonify({
+                "success": True,
+                "message": f"Memory system reset with {len(errors)} error(s)",
+                "deleted": deleted,
+                "errors": errors
+            })
+
+        return jsonify({
+            "success": True,
+            "message": "Memory system fully reset",
+            "deleted": deleted
+        })
+
+    except Exception as e:
+        print(f"[Memory] Error resetting memory system: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @memory_bp.route('/api/memories/migrate', methods=['POST'])
 def migrate_memories():
-    """Migrate existing dialogue history into knowledge graph."""
+    """Migrate existing dialogue history into long-term memory facts."""
     try:
+        if not _is_player_context_ready():
+            return _no_player_loaded_response()
+
         from utils.memory import migrate_all_npcs, is_memory_available
         from utils.dialogue import load_dialogue_history
 
         if not is_memory_available():
-            return jsonify({"success": False, "error": "Memory system not available. Install graphiti-core[kuzu] package."}), 400
+            return jsonify({"success": False, "error": "Memory system not available. Check Cognis/Qdrant dependencies."}), 400
 
         # Load full dialogue history
         dialogue_history = load_dialogue_history(lambda: {})
@@ -104,11 +277,22 @@ def migrate_memories():
 def migrate_npc_memories(npc_id):
     """Migrate dialogue history for a specific NPC."""
     try:
-        from utils.memory import migrate_npc_history, is_memory_available
+        if not _is_player_context_ready():
+            return _no_player_loaded_response()
+
+        from utils.memory import (
+            get_npc_long_term_memory_status,
+            is_memory_available,
+            migrate_npc_history,
+        )
         from utils.dialogue import load_dialogue_history
 
         if not is_memory_available():
             return jsonify({"success": False, "error": "Memory system not available"}), 400
+
+        memory_status = get_npc_long_term_memory_status(npc_id)
+        if not memory_status.get("enabled"):
+            return jsonify({"success": False, "error": f"Long-term memory is disabled for {npc_id}"}), 400
 
         dialogue_history = load_dialogue_history(lambda: {})
         npc_name = get_display_name(npc_id)
@@ -157,7 +341,16 @@ def migrate_memories_stream():
     """
     def generate():
         try:
-            from utils.memory import migrate_npc_history, is_memory_available
+            if not _is_player_context_ready():
+                yield f"data: {json.dumps({'type': 'error', 'message': 'Player context not ready'})}\n\n"
+                return
+
+            from utils.memory import (
+                migrate_npc_history,
+                is_memory_available,
+                count_chapter_candidate_entries_by_npc,
+                filter_memory_enabled_npc_ids,
+            )
             from utils.dialogue import load_dialogue_history
 
             if not is_memory_available():
@@ -170,23 +363,15 @@ def migrate_memories_stream():
                 yield f"data: {json.dumps({'type': 'error', 'message': 'No dialogue history to migrate'})}\n\n"
                 return
 
-            # Find all unique significant NPCs in history and count entries
             from utils.settings import load_settings
-            from utils.text_utils import is_significant_npc
             settings = load_settings()
             min_entries = settings.get('memory', {}).get('chapter_entry_threshold', 30)
 
-            npc_entry_counts = {}
-            for entry in dialogue_history:
-                voice_name = entry.get('voiceName')
-                if voice_name and voice_name.lower() != 'player' and is_significant_npc(voice_name):
-                    npc_entry_counts[voice_name] = npc_entry_counts.get(voice_name, 0) + 1
-                for char_id in entry.get('earshot', []):
-                    if char_id.lower() != 'player' and is_significant_npc(char_id):
-                        npc_entry_counts[char_id] = npc_entry_counts.get(char_id, 0) + 1
+            npc_entry_counts = count_chapter_candidate_entries_by_npc(dialogue_history)
 
-            # Filter to NPCs meeting minimum entry threshold
+            # Filter to NPCs meeting minimum entry threshold and eligible for long-term memory.
             npc_ids = {npc_id for npc_id, count in npc_entry_counts.items() if count >= min_entries}
+            npc_ids = set(filter_memory_enabled_npc_ids(npc_ids, settings=settings))
 
             total_npcs = len(npc_ids)
             yield f"data: {json.dumps({'type': 'start', 'total_npcs': total_npcs})}\n\n"
@@ -240,11 +425,24 @@ def migrate_npc_stream(npc_id):
     """Stream migration progress for a single NPC via Server-Sent Events."""
     def generate():
         try:
-            from utils.memory import migrate_npc_history, is_memory_available
+            if not _is_player_context_ready():
+                yield f"data: {json.dumps({'type': 'error', 'message': 'Player context not ready'})}\n\n"
+                return
+
+            from utils.memory import (
+                get_npc_long_term_memory_status,
+                is_memory_available,
+                migrate_npc_history,
+            )
             from utils.dialogue import load_dialogue_history
 
             if not is_memory_available():
                 yield f"data: {json.dumps({'type': 'error', 'message': 'Memory system not available'})}\n\n"
+                return
+
+            memory_status = get_npc_long_term_memory_status(npc_id)
+            if not memory_status.get("enabled"):
+                yield f"data: {json.dumps({'type': 'error', 'message': f'Long-term memory is disabled for {npc_id}'})}\n\n"
                 return
 
             npc_name = get_display_name(npc_id)
@@ -307,20 +505,49 @@ def migrate_npc_stream(npc_id):
     )
 
 
+@memory_bp.route('/api/memories/recheck/<npc_id>', methods=['POST'])
+def recheck_npc_chapters(npc_id):
+    """Force a chapter-boundary check for one NPC without rebuilding memory."""
+    try:
+        from utils.memory import is_memory_available
+        from utils.memory_queue import force_chapter_recheck
+
+        if not is_memory_available():
+            return jsonify({"success": False, "error": "Memory system not available"}), 400
+
+        result = force_chapter_recheck(npc_id)
+        if not result.get("success"):
+            return jsonify(result), 400
+
+        return jsonify({
+            "success": True,
+            "npc_id": npc_id,
+            "npc_name": get_display_name(npc_id),
+            **result
+        })
+    except Exception as e:
+        print(f"[Memory] Error forcing chapter recheck for {npc_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @memory_bp.route('/api/memories/chapters/<npc_id>', methods=['GET'])
 def get_npc_chapters(npc_id):
     """Get chapter data for an NPC (for displaying chapter dividers in dialog history)."""
     try:
-        from utils.memory import ChapterManager
+        from utils.memory import ChapterManager, has_npc_memory_facts
 
+        has_memory_facts = has_npc_memory_facts(npc_id)
         chapter_mgr = ChapterManager()
-        chapters = chapter_mgr.get_all_chapters(npc_id)
+        chapters = chapter_mgr.get_all_chapters(npc_id) if has_memory_facts else {}
 
         return jsonify({
             "success": True,
             "npc_id": npc_id,
             "open_chapter": chapters.get('open_chapter'),
-            "closed_chapters": chapters.get('closed_chapters', [])
+            "closed_chapters": chapters.get('closed_chapters', []),
+            "has_memory_facts": has_memory_facts
         })
 
     except Exception as e:
@@ -364,15 +591,15 @@ def list_memory_npcs():
 
 @memory_bp.route('/api/memories/graph/<npc_id>', methods=['GET'])
 def get_npc_graph(npc_id):
-    """Get raw graph data for an NPC (deterministic - no LLM call)."""
+    """Get raw fact data for an NPC (deterministic - no LLM call)."""
     try:
-        from utils.memory import GraphitiManager, ChapterManager
+        from utils.memory import MemoryManager, ChapterManager
 
-        graphiti_mgr = GraphitiManager()
-        if not graphiti_mgr.init_graphiti():
+        memory_mgr = MemoryManager()
+        if not memory_mgr.init_graphiti():
             return jsonify({"success": False, "error": "Memory system not connected"}), 503
 
-        graph_data = graphiti_mgr.get_graph_data(npc_id)
+        graph_data = memory_mgr.get_graph_data(npc_id)
 
         # Also get chapter info and cached memory
         chapter_mgr = ChapterManager()
@@ -388,7 +615,7 @@ def get_npc_graph(npc_id):
         })
 
     except Exception as e:
-        print(f"[Memory] Error getting graph for {npc_id}: {e}")
+        print(f"[Memory] Error getting facts for {npc_id}: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 
@@ -423,36 +650,39 @@ def generate_npc_prose(npc_id):
 
 @memory_bp.route('/api/memories/graph/<npc_id>', methods=['DELETE'])
 def clear_npc_graph(npc_id):
-    """Delete all nodes and edges for an NPC's graph, plus chapter data."""
+    """Delete all stored facts for an NPC, plus chapter data."""
     try:
-        from utils.memory import GraphitiManager, ChapterManager
+        from utils.memory import MemoryManager, ChapterManager, create_memory_snapshot
         from utils.memory_queue import reset_npc_state
 
+        create_memory_snapshot(f"before_clear_graph_{npc_id}", timeout=180.0, keep=10)
+
+        memory_mgr = MemoryManager()
+
         # Always clear chapter data and queue state so the NPC can be re-migrated,
-        # even if graph clear fails (e.g. corrupted Kuzu DB)
+        # even if fact storage clear fails.
         chapter_mgr = ChapterManager()
         chapter_mgr.clear_npc_data(npc_id)
         reset_npc_state(npc_id)
 
-        # Attempt to clear the graph (may fail if Kuzu DB is corrupted/missing)
-        graph_result = {"success": False, "error": "Graph not initialized"}
-        graphiti_mgr = GraphitiManager()
-        if graphiti_mgr.init_graphiti():
-            graph_result = graphiti_mgr.clear_graph(npc_id)
+        # Attempt to clear stored facts.
+        graph_result = {"success": False, "error": "Memory backend not initialized"}
+        if memory_mgr.init_graphiti():
+            graph_result = memory_mgr.clear_graph(npc_id)
         else:
-            print(f"[Memory] Could not init Graphiti for {npc_id} graph clear - chapters/state already cleared")
+            print(f"[Memory] Could not init memory backend for {npc_id} clear - chapters/state already cleared")
 
         if graph_result.get("success"):
-            print(f"[Memory] Cleared graph + chapters for {npc_id}")
+            print(f"[Memory] Cleared facts + chapters for {npc_id}")
             return jsonify(graph_result)
         else:
-            # Graph clear failed but chapters/state were still cleared
-            print(f"[Memory] Graph clear failed for {npc_id} but chapters/state cleared: {graph_result.get('error')}")
+            # Fact clear failed but chapters/state were still cleared
+            print(f"[Memory] Fact clear failed for {npc_id} but chapters/state cleared: {graph_result.get('error')}")
             graph_result["chapters_cleared"] = True
             return jsonify(graph_result)
 
     except Exception as e:
-        print(f"[Memory] Error clearing graph for {npc_id}: {e}")
+        print(f"[Memory] Error clearing memory for {npc_id}: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
@@ -460,15 +690,15 @@ def clear_npc_graph(npc_id):
 
 @memory_bp.route('/api/memories/graph/<npc_id>/node/<node_name>', methods=['DELETE'])
 def delete_graph_node(npc_id, node_name):
-    """Delete a node and all its edges from the NPC's graph."""
+    """Delete an entity-style node from the legacy graph API."""
     try:
-        from utils.memory import GraphitiManager
+        from utils.memory import MemoryManager
 
-        graphiti_mgr = GraphitiManager()
-        if not graphiti_mgr.init_graphiti():
+        memory_mgr = MemoryManager()
+        if not memory_mgr.init_graphiti():
             return jsonify({"success": False, "error": "Memory system not connected"}), 503
 
-        result = graphiti_mgr.delete_node(npc_id, node_name)
+        result = memory_mgr.delete_node(npc_id, node_name)
 
         if result.get("success"):
             print(f"[Memory] Deleted node '{node_name}' and {result.get('edges_deleted', 0)} edges for {npc_id}")
@@ -485,26 +715,27 @@ def delete_graph_node(npc_id, node_name):
 
 @memory_bp.route('/api/memories/graph/<npc_id>/edge', methods=['DELETE'])
 def delete_graph_edge(npc_id):
-    """Delete a specific edge from the NPC's graph."""
+    """Delete a specific fact from the NPC's memory."""
     try:
-        from utils.memory import GraphitiManager
+        from utils.memory import MemoryManager
 
         data = request.get_json()
         if not data:
             return jsonify({"success": False, "error": "Missing request body"}), 400
 
-        source = data.get('source')
-        target = data.get('target')
+        source = data.get('source') or ''
+        target = data.get('target') or ''
         fact = data.get('fact')
+        memory_id = data.get('memory_id') or ''
 
-        if not source or not target:
-            return jsonify({"success": False, "error": "Missing source or target"}), 400
+        if not fact and not memory_id:
+            return jsonify({"success": False, "error": "Missing fact text or memory_id"}), 400
 
-        graphiti_mgr = GraphitiManager()
-        if not graphiti_mgr.init_graphiti():
+        memory_mgr = MemoryManager()
+        if not memory_mgr.init_graphiti():
             return jsonify({"success": False, "error": "Memory system not connected"}), 503
 
-        result = graphiti_mgr.delete_edge(npc_id, source, target, fact)
+        result = memory_mgr.delete_edge(npc_id, source, target, fact, memory_id=memory_id)
 
         if result.get("success"):
             print(f"[Memory] Deleted edge {source} -> {target} for {npc_id}")
@@ -519,11 +750,46 @@ def delete_graph_edge(npc_id):
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@memory_bp.route('/api/memories/graph/<npc_id>/fact/<memory_id>', methods=['PATCH'])
+def update_memory_fact(npc_id, memory_id):
+    """Edit a specific fact and refresh its search vectors."""
+    try:
+        from utils.memory import MemoryManager
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "error": "Missing request body"}), 400
+
+        fact = (data.get('fact') or '').strip()
+        category = (data.get('category') or '').strip().lower() or None
+
+        if not fact:
+            return jsonify({"success": False, "error": "Missing fact text"}), 400
+
+        memory_mgr = MemoryManager()
+        if not memory_mgr.init_graphiti():
+            return jsonify({"success": False, "error": "Memory system not connected"}), 503
+
+        result = memory_mgr.update_fact(npc_id, memory_id, fact, category=category)
+
+        if result.get("success"):
+            print(f"[Memory] Updated fact {memory_id} for {npc_id}")
+            return jsonify(result)
+        else:
+            return jsonify(result), 400
+
+    except Exception as e:
+        print(f"[Memory] Error updating fact {memory_id} for {npc_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @memory_bp.route('/api/memories/search/<npc_id>', methods=['POST'])
 def search_npc_memory(npc_id):
-    """Search an NPC's memory graph with a query (raw, no LLM processing)."""
+    """Search an NPC's memory facts with a query (raw, no LLM processing)."""
     try:
-        from utils.memory import GraphitiManager
+        from utils.memory import MemoryManager
 
         data = request.get_json() or {}
         query = data.get('query', '').strip()
@@ -531,12 +797,12 @@ def search_npc_memory(npc_id):
         if not query:
             return jsonify({"success": False, "error": "Query is required"}), 400
 
-        graphiti_mgr = GraphitiManager()
-        if not graphiti_mgr.init_graphiti():
+        memory_mgr = MemoryManager()
+        if not memory_mgr.init_graphiti():
             return jsonify({"success": False, "error": "Memory system not connected"}), 503
 
         # Direct search - no LLM intent extraction
-        facts = graphiti_mgr.search_facts(
+        facts = memory_mgr.search_facts(
             npc_id=npc_id,
             query=query,
             max_results=50
@@ -554,11 +820,120 @@ def search_npc_memory(npc_id):
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@memory_bp.route('/api/memories/vector-migration-status', methods=['GET'])
+def get_vector_migration_status():
+    """Return memory vector compatibility status for the active embedding model."""
+    try:
+        if not _is_player_context_ready():
+            return _no_player_loaded_response()
+
+        from utils.memory import MemoryManager, is_memory_available
+
+        if not is_memory_available():
+            return jsonify({"success": False, "error": "Memory system not available"}), 400
+
+        result = MemoryManager().get_vector_migration_status()
+        status_code = 200 if result.get("success") else 400
+        return jsonify(result), status_code
+    except Exception as e:
+        print(f"[Memory] Error getting vector migration status: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@memory_bp.route('/api/memories/vector-migrate/stream', methods=['GET'])
+def migrate_memory_vectors_stream():
+    """Stream progress while rebuilding memory vectors for the active embedding model."""
+    def generate():
+        try:
+            if not _is_player_context_ready():
+                yield f"data: {json.dumps({'type': 'error', 'message': 'Player context not ready'})}\n\n"
+                return
+
+            from utils.memory import MemoryManager, is_memory_available
+
+            if not is_memory_available():
+                yield f"data: {json.dumps({'type': 'error', 'message': 'Memory system not available'})}\n\n"
+                return
+
+            manager = MemoryManager()
+            status = manager.get_vector_migration_status()
+            if not status.get("success"):
+                yield f"data: {json.dumps({'type': 'error', 'message': status.get('error', 'Unable to inspect vectors')})}\n\n"
+                return
+
+            total = status.get("mismatched_count", 0)
+            current_model = status.get("current_model") or ""
+            yield f"data: {json.dumps({'type': 'start', 'total': total, 'current_model': current_model})}\n\n"
+
+            if total <= 0:
+                yield f"data: {json.dumps({'type': 'complete', 'total': 0, 'rebuilt': 0, 'remaining': 0, 'errors': []})}\n\n"
+                return
+
+            progress_queue = queue.Queue()
+
+            def progress_callback(current, total_count, message):
+                progress_queue.put({
+                    "current": current,
+                    "total": total_count,
+                    "message": message,
+                })
+
+            result_holder = [None]
+
+            def run_migration():
+                result_holder[0] = manager.migrate_vectors(progress_callback=progress_callback)
+                progress_queue.put(None)
+
+            thread = threading.Thread(target=run_migration)
+            thread.start()
+
+            while True:
+                try:
+                    progress = progress_queue.get(timeout=0.5)
+                    if progress is None:
+                        break
+                    yield f"data: {json.dumps({'type': 'progress', **progress})}\n\n"
+                except queue.Empty:
+                    yield f": keepalive\n\n"
+
+            thread.join()
+            result = result_holder[0] or {}
+            if result.get("success"):
+                yield f"data: {json.dumps({'type': 'complete', **result})}\n\n"
+            else:
+                message = result.get("error") or "Vector rebuild failed"
+                errors = result.get("errors") or []
+                if errors and not result.get("error"):
+                    message = errors[0].get("error") or message
+                yield f"data: {json.dumps({'type': 'error', 'message': message, **result})}\n\n"
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return Response(
+        generate(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no'
+        }
+    )
+
+
 @memory_bp.route('/api/memories/migration-status', methods=['GET'])
 def get_migration_status():
     """Get migration status for all NPCs with dialogue history."""
     try:
-        from utils.memory import ChapterManager, get_chapters_dir
+        if not _is_player_context_ready():
+            return _no_player_loaded_response()
+
+        from utils.memory import (
+            count_chapter_candidate_entries_by_npc,
+            filter_memory_enabled_npc_ids,
+            has_npc_memory_facts,
+        )
         from utils.dialogue import load_dialogue_history
         from utils.settings import load_settings
 
@@ -569,39 +944,24 @@ def get_migration_status():
         # Load dialogue history to find NPCs
         dialogue_history = load_dialogue_history(lambda: {})
 
-        # Count entries per significant NPC (speaker or in earshot)
-        from utils.text_utils import is_significant_npc
-        npc_entry_counts = {}
-        for entry in dialogue_history:
-            voice_name = entry.get('voiceName')
-            if voice_name and voice_name.lower() != 'player' and is_significant_npc(voice_name):
-                npc_entry_counts[voice_name] = npc_entry_counts.get(voice_name, 0) + 1
-            for char_id in entry.get('earshot', []):
-                if char_id.lower() != 'player' and is_significant_npc(char_id):
-                    npc_entry_counts[char_id] = npc_entry_counts.get(char_id, 0) + 1
+        npc_entry_counts = count_chapter_candidate_entries_by_npc(dialogue_history)
 
-        # Filter NPCs that meet minimum entry threshold
-        npc_ids = {npc_id for npc_id, count in npc_entry_counts.items() if count >= min_entries}
+        # Filter NPCs that meet minimum entry threshold and are eligible for long-term memory.
+        npc_ids = {
+            npc_id for npc_id, count in npc_entry_counts.items()
+            if count >= min_entries
+        }
+        npc_ids = set(filter_memory_enabled_npc_ids(npc_ids, settings=settings))
 
-        # Check which NPCs have chapters (already migrated)
-        chapters_dir = get_chapters_dir()
+        # Check which NPCs have facts in the active Cognis backend. Old Graphiti
+        # chapter files do not count as migrated for this backend.
         migrated_npcs = set()
         pending_npcs = []
 
         for npc_id in npc_ids:
-            chapter_file = os.path.join(chapters_dir, f"{npc_id}.json")
-            if os.path.exists(chapter_file):
-                # Check if file has actual content (not just empty/default)
-                try:
-                    import json
-                    with open(chapter_file, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                        # Consider migrated if has closed chapters or open chapter
-                        if data.get('closed_chapters') or data.get('open_chapter'):
-                            migrated_npcs.add(npc_id)
-                            continue
-                except:
-                    pass
+            if has_npc_memory_facts(npc_id):
+                migrated_npcs.add(npc_id)
+                continue
 
             # Not migrated - add to pending list
             pending_npcs.append({
@@ -633,7 +993,9 @@ def get_migration_status():
 def list_npcs_with_bios():
     """List all NPCs that have generated bios."""
     try:
-        bios_dir = os.path.join(DATA_DIR, 'npc_bios')
+        from utils.memory import get_memory_data_dir
+
+        bios_dir = os.path.join(get_memory_data_dir(), 'npc_bios')
         if not os.path.exists(bios_dir):
             return jsonify({"success": True, "npcs": []})
 
@@ -688,14 +1050,18 @@ def get_npc_bio(npc_id):
 def regenerate_npc_bio(npc_id):
     """Regenerate bio from graph data, incorporating editor's guidance."""
     try:
-        from utils.memory import generate_full_bio
+        from utils.memory import generate_full_bio, get_npc_long_term_memory_status
         from utils.settings import load_settings
+
+        memory_status = get_npc_long_term_memory_status(npc_id)
+        if not memory_status.get("enabled"):
+            return jsonify({"success": False, "error": f"Long-term memory is disabled for {npc_id}"}), 400
 
         # Get editor's guidance from settings
         settings = load_settings()
-        guidance = settings.get('prompts', {}).get('editor_guidance', {}).get(npc_id, '')
-
         npc_name = get_display_name(npc_id)
+        from utils.character_bios import get_editor_guidance
+        guidance = get_editor_guidance(npc_id=npc_id, display_name=npc_name, settings=settings)
 
         print(f"[Bio] Regenerating bio for {npc_name} (guidance: {'yes' if guidance else 'no'})")
 
