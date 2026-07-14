@@ -7,8 +7,17 @@ This removes the VRAM contention that currently forces the user onto the lower-q
 Pocket provider (OmniVoice + Hogwarts Legacy together exceed the NVIDIA's 16 GB).
 
 **Environment:** Windows. Two GPUs: NVIDIA RTX 5080 (16 GB, runs the game) and an AMD card
-with large VRAM (should run TTS). Sonorus 1.0.7 "Manual Install". Sonorus ships an embedded
-CPython 3.13 at `Phoenix\Binaries\Win64\sonorus\python\python.exe`.
+with large VRAM (should run TTS). **Sonorus 1.0.8 pre-release 4** (this plan was verified
+against it; the TTS-provider architecture it depends on is unchanged from 1.0.7). Sonorus
+ships an embedded CPython 3.13 at `Phoenix\Binaries\Win64\sonorus\python\python.exe`.
+
+**Why the stock "GPU selection for OmniVoice" (added in 1.0.8) does NOT solve this:** the
+stock OmniVoice engine (`services/omnivoice_engine.py`) is torch/CUDA — its `device` config
+and `_choose_auto_cuda_device()` only pick among **CUDA (NVIDIA)** devices. Your second card
+is AMD, which torch can't target on Windows, so the selector still lands on the 5080 and the
+same VRAM contention. Running OmniVoice on the AMD card requires the Vulkan/omnivoice.cpp
+route below. (That `device` config is still a good pattern to mirror for the new provider's
+own settings.)
 
 ---
 
@@ -178,10 +187,10 @@ Tasks:
    - `mp.get_context('spawn').Process` running a worker that loads the DLL (Phase 1) and
      holds `ov_context`.
    - Request/response queues; a `synthesize(text, ref_wav, ref_text, lang, on_chunk)` entry.
-   - **Reuse the serialization pattern we already added to the Pocket manager**
-     (`_serialize_worker_io` / a single `_io_lock`) so concurrent player+NPC calls can't
-     interleave on a shared response queue. (See bug #9 in the project's bug report — do not
-     reintroduce that race.)
+   - **Reuse the serialization pattern already in the Pocket manager** — as of 1.0.8 pre-3
+     that's the upstream `_serialized_worker_io` decorator + a single `_io_lock` in
+     `services/pocket_tts_onnx.py`. Apply the same to the omnivoice.cpp worker so concurrent
+     player+NPC calls can't interleave on a shared response queue; do not reintroduce that race.
    - A `warm_up()` that triggers `ov_init` + a tiny synth so first real line isn't cold.
 2. **`services/tts/omnivoice_cpp.py`** — provider. Start by **copying
    `services/tts/omnivoice.py`** and swapping the engine calls:
@@ -196,7 +205,9 @@ Tasks:
 3. **Register the provider** in `services/tts/__init__.py`: add `elif provider_name ==
    'omnivoice_cpp':` branches everywhere `'omnivoice'`/`'pocket'` are dispatched
    (`get_provider`, `init`, `prepare_tts` fast-path list, `list_voices`, etc. — grep for
-   `'omnivoice'` and match each site).
+   `'omnivoice'` and match each site). Note pre-4 already has two OmniVoice providers —
+   `omnivoice` (local torch) and `omnivoice_api` (hosted) — so `omnivoice_cpp` is a clean,
+   non-colliding third name; mirror how those two register.
 4. **Settings + defaults:** add `tts.omnivoice_cpp` defaults in `utils/settings.py`
    (`DEFAULT_SETTINGS`) and allow `tts.provider == "omnivoice_cpp"`.
 
@@ -210,9 +221,10 @@ alignment. The current OmniVoice/Pocket paths already solve this — reuse it.
 
 Tasks:
 
-1. Run Sonorus's existing forced aligner (`align_audio_to_words`, used by the Pocket worker)
-   on each sentence's 24 kHz PCM to get `words / wordStartTimeSeconds / wordEndTimeSeconds`,
-   and pass that as `word_timing` in `on_chunk` (same dict shape Pocket emits).
+1. Run Sonorus's existing forced aligner (`services/alignment.py::align_audio_to_words`, used
+   by the Pocket worker) on each sentence's 24 kHz PCM to get
+   `words / wordStartTimeSeconds / wordEndTimeSeconds`, and pass that as `word_timing` in
+   `on_chunk` (same dict shape Pocket emits).
 2. **Streaming granularity:** the ABI's `ov_synthesize` is one-shot per call, so stream at
    the **sentence** level (call per sentence, emit each as it finishes) to keep first-audio
    latency low. Add inter-sentence silence like the Pocket path does. (Optional later: the
@@ -241,13 +253,13 @@ Tasks:
 - **Provider base / methods:** `services/tts/base.py` (`BaseTTSProvider`, abstract methods
   listed in §1; `speak()` is inherited and does playback/archive/viseme).
 - **Closest template to copy:** `services/tts/omnivoice.py` (voice cache, cloning, sentence
-  streaming) and `services/pocket_tts_onnx.py` (persistent worker + queues + the
-  `_serialize_worker_io` lock).
+  streaming) and `services/pocket_tts_onnx.py` (persistent worker + queues + the upstream
+  `_serialized_worker_io` decorator / `_io_lock`).
 - **Provider dispatch:** `services/tts/__init__.py::get_provider()` and the sibling
-  functions — add `omnivoice_cpp` next to every `omnivoice`/`pocket` branch.
+  functions — add `omnivoice_cpp` next to every `omnivoice`/`omnivoice_api`/`pocket` branch.
 - **Voice references:** `voice_references\<Name>_reference_15s.wav` + `<Name>_reference_15s.txt`.
   Transcript access: `services/omnivoice_engine.py::ensure_voice_reference_transcript`.
-- **Aligner for lipsync:** the same `align_audio_to_words` the Pocket worker uses.
+- **Aligner for lipsync:** `services/alignment.py::align_audio_to_words` (as the Pocket worker uses).
 - **Settings:** `utils/settings.py` `DEFAULT_SETTINGS['tts']` (add `omnivoice_cpp` block);
   provider chosen via `settings['tts']['provider']`.
 
@@ -288,20 +300,4 @@ Tasks:
 
 ## 6. Acceptance criteria (end to end)
 
-- TTS provider `omnivoice_cpp` selectable in the config UI.
-- NPC replies synthesize on the **AMD GPU**; NVIDIA VRAM/utilisation stays free for the game
-  (verify with an overlay while playing).
-- Voice-cloned NPC voices match the existing OmniVoice references.
-- Lipsync in sync; interruptions/epochs behave; conversation latency acceptable.
-- Survives fast travel / long sessions (no regressions to the input-hook or TTS-interleaving
-  fixes already in place).
-
-## 7. Fallbacks if Phase 0/1 fail
-
-- If Vulkan build/perf is unworkable: try the ROCm build (`buildall`/HIP) **only if** the AMD
-  card + Windows HIP SDK support it (spotty — Vulkan is the safer bet).
-- If native integration is too costly: run omnivoice.cpp's `omnivoice-tts.exe` as a
-  **persistent subprocess** reading text on stdin and streaming WAV on stdout
-  (`-o - --stream-by-line`) instead of ctypes — slower/looser but avoids the shared-lib build
-  and ctypes struct work. Keep this as plan B, not plan A.
-- If neither pans out: stay on Pocket (CPU) — already working and low-VRAM.
+- TTS provider `omniv
