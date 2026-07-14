@@ -24,7 +24,7 @@ end
 local SocketClient = {}
 local client = nil
 local buffer = ""
-local SERVER_PORT = 8173
+local SERVER_PORT = 8420
 
 -- Send queue to prevent interleaving (Lua callbacks can interleave)
 local sendQueue = {}

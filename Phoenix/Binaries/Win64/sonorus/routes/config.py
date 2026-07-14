@@ -1551,9 +1551,17 @@ def _is_torch_installed() -> bool:
     try:
         torch_dir = os.path.dirname(spec.origin)
         # torch_cpu.dll is one of the last files written during install
-        return os.path.exists(os.path.join(torch_dir, "lib", "torch_cpu.dll"))
+        if not os.path.exists(os.path.join(torch_dir, "lib", "torch_cpu.dll")):
+            return False
     except Exception:
         return False
+    # The OmniVoice worker also imports these at startup (see omnivoice_engine.py).
+    # torch can finish while these Step-2 packages are still missing (partial
+    # install); report that as "not installed" so the installer repairs it.
+    for _mod in ("safetensors", "transformers", "accelerate"):
+        if importlib.util.find_spec(_mod) is None:
+            return False
+    return True
 
 
 @config_bp.route('/api/tts/omnivoice/status', methods=['GET'])

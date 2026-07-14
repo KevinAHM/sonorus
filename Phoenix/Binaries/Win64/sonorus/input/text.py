@@ -8,6 +8,7 @@ This ensures we can both capture AND suppress keys reliably.
 import threading
 import ctypes
 import time
+import queue
 import pyperclip
 from pynput import keyboard
 from .voice import can_activate_hotkey, is_game_window_active
@@ -127,6 +128,12 @@ class ChatInputCapture:
         self._hold_timer = None  # Timer for hold detection (cancelled on keyup)
         self._modifiers_down = set()
 
+        # Background sender: keep socket sends off the hook thread so the
+        # win32_event_filter callback returns fast (Windows culls low-level
+        # hooks whose callback exceeds ~300ms). See _sender_loop.
+        self._send_queue = queue.Queue()
+        self._sender_thread = None
+
     # Hotkey name to VK code mapping (must match config.html dropdown options)
     HOTKEY_VK_MAP = {
         'enter': VK_RETURN,
@@ -149,12 +156,28 @@ class ChatInputCapture:
     def start(self):
         if self.listener is not None:
             return
+        if self._sender_thread is None:
+            self._sender_thread = threading.Thread(
+                target=self._sender_loop, daemon=True, name="ChatInputSender"
+            )
+            self._sender_thread.start()
         self.listener = keyboard.Listener(
             win32_event_filter=self._win32_filter,
             suppress=False
         )
         self.listener.start()
         print(f"[InputCapture] Started - hotkey: {self.hotkey_name}")
+
+    def _sender_loop(self):
+        """Drain queued messages off the hook thread and send them in order."""
+        while True:
+            msg = self._send_queue.get()
+            if msg is None:
+                break
+            try:
+                self.send(msg)
+            except Exception as e:
+                print(f"[InputCapture] Send error: {e}")
 
     def _modifier_pressed(self, keys):
         return any(vk in self._modifiers_down for vk in keys)
@@ -298,10 +321,18 @@ class ChatInputCapture:
 
             # Check for hotkey press
             if vk == self.hotkey_vk:
-                # Ignore key repeat (hotkey already down)
+                # Ignore key repeat (hotkey already down). Safety: if a KEYUP was
+                # missed (hook briefly timed out), this stays set and every later
+                # press is swallowed - auto-recover if held longer than any real tap.
                 if self._hotkey_down_time is not None:
-                    self.listener.suppress_event()
-                    return
+                    if time.time() - self._hotkey_down_time < 2.0:
+                        self.listener.suppress_event()
+                        return
+                    self._hotkey_held = False
+                    if self._hold_timer is not None:
+                        self._hold_timer.cancel()
+                        self._hold_timer = None
+                    self._hotkey_down_time = None
 
                 # Shared guard - game must be active and not paused
                 if not can_activate_hotkey(self.check_pause):
@@ -440,20 +471,46 @@ class ChatInputCapture:
         # Include mode: "prompt" for director mode, "chat" for normal mode
         mode = "prompt" if self._prompt_mode else "chat"
         msg = {"type": msg_type, "text": text, "active": active, "mode": mode}
+        # Queue for the background sender so the hook callback returns immediately.
         try:
-            self.send(msg)
+            self._send_queue.put_nowait(msg)
         except Exception as e:
-            print(f"[InputCapture] Send error: {e}")
+            print(f"[InputCapture] Send enqueue error: {e}")
 
     def stop(self):
         if self.listener:
             self.listener.stop()
             self.listener = None
             print("[InputCapture] Stopped")
+        if self._sender_thread is not None:
+            self._send_queue.put(None)
+            self._sender_thread = None
 
     def set_hotkey(self, hotkey):
         self.hotkey_name = hotkey.lower()
         self.hotkey_vk = self._parse_hotkey_vk(hotkey)
+
+    def restart_listener(self):
+        """Recreate the low-level keyboard hook (Windows can cull it under load,
+        e.g. a fast-travel loading screen). Called after each load completes."""
+        try:
+            if self.listener is not None:
+                self.listener.stop()
+        except Exception as e:
+            print(f"[InputCapture] restart: stop error: {e}")
+        self.listener = None
+        with self._lock:
+            self.active = False
+            self._hotkey_down_time = None
+            self._hotkey_held = False
+            if self._hold_timer is not None:
+                try:
+                    self._hold_timer.cancel()
+                except Exception:
+                    pass
+                self._hold_timer = None
+        self.start()
+        print("[InputCapture] Listener restarted")
 
 
 _capture_instance = None
@@ -482,3 +539,9 @@ def stop_capture():
 def set_capture_hotkey(hotkey):
     if _capture_instance:
         _capture_instance.set_hotkey(hotkey)
+
+
+def restart_capture():
+    """Rebuild the chat keyboard hook (e.g. after a loading screen)."""
+    if _capture_instance:
+        _capture_instance.restart_listener()

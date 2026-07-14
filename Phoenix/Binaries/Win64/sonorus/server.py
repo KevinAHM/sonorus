@@ -341,7 +341,7 @@ def _is_tts_activity_active():
 conv_state = ConversationState()
 
 # Global socket server instance
-lua_socket = LuaSocketServer()
+lua_socket = LuaSocketServer(port=int(os.getenv("SONORUS_SOCKET_PORT", "8420")))
 
 # Wire up socket with external modules
 if INPUT_CAPTURE_AVAILABLE:
@@ -5088,7 +5088,7 @@ def main():
     except Exception as e:
         print(f"[Server] Warning: Could not set up log file: {e}")
 
-    port = int(os.getenv("SONORUS_SERVER_PORT", "5000"))
+    port = int(os.getenv("SONORUS_SERVER_PORT", "5400"))
 
     # Initialize runtime databases
     # dialogue_db init deferred to first player handshake via PlayerContext
@@ -5170,8 +5170,12 @@ def main():
             hotkey = input_settings.get('chat_hotkey', 'enter')
 
             def check_game_paused():
-                # Quick state-only handshake (no periodic polling anymore)
-                context = lua_socket.request_state_only(timeout=0.2)
+                # Read cached game state (updated by the socket receive thread)
+                # instead of a blocking round-trip. This runs inside the chat
+                # keyboard hook's win32_event_filter, which must return fast; a
+                # blocking request here (fast-travel/loading, socket mid-reconnect)
+                # can stall it past Windows' LowLevelHooksTimeout and cull the hook.
+                context = lua_socket.get_game_context()
                 player_loaded = context.get('playerLoaded', False)
                 is_paused = context.get('isGamePaused', False)
                 if not player_loaded:
@@ -5430,14 +5434,14 @@ def main():
         _overlay_manager = OverlayManager()
 
         _overlay_manager.register('owlpost', BrowserOverlay(
-            url="http://localhost:5000/owlpost/?v=1.2",
+            url=f"http://localhost:{int(os.getenv('SONORUS_SERVER_PORT', '5400'))}/owlpost/?v=1.2",
             title_match="owl post",
             profile_name="owlpost_overlay",
             width_pct=0.5,
             height_pct=0.75,
         ))
         _overlay_manager.register('grimoire', BrowserOverlay(
-            url="http://localhost:5000/?overlay=true&v=1.2",
+            url=f"http://localhost:{int(os.getenv('SONORUS_SERVER_PORT', '5400'))}/?overlay=true&v=1.2",
             title_match="grimoire (overlay)",
             profile_name="grimoire_overlay",
             width_pct=0.5,

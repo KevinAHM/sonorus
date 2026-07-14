@@ -96,7 +96,7 @@ def _format_owl_candidate_for_log(candidate: dict) -> str:
 class LuaSocketServer:
     """TCP server for bidirectional Lua communication."""
 
-    def __init__(self, port=8173):
+    def __init__(self, port=8420):
         self.port = port
         self.server = None
         self.client = None
@@ -809,6 +809,13 @@ class LuaSocketServer:
                 self._pending_time_sync_check = True
                 self.send({"type": "player_ready"})
                 self._send_deferred_connect_data()
+                # Loading screen just finished (fast-travel/zone change) - rebuild
+                # the chat keyboard hook, which Windows may have culled under load.
+                if self._input_capture:
+                    try:
+                        self._input_capture.restart_capture()
+                    except Exception as e:
+                        print(f"[LuaSocket] Chat listener restart failed: {e}")
             else:
                 print("[LuaSocket] Empty player_handshake, ignoring")
                 self._pending_time_sync_check = False
