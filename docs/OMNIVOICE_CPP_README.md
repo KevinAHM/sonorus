@@ -120,6 +120,11 @@ omnivoice-base-Q8_0.gguf        626 MB
 omnivoice-tokenizer-F32.gguf    700 MB   (keep F32 — the RVQ chain degrades if quantized)
 ```
 
+**Runtime dependencies for end users:** the DLLs link `MSVCP140` / `VCRUNTIME140(_1)` — the
+VC++ 2015–2022 redistributable, which Hogwarts Legacy already requires — and `vulkan-1.dll`,
+the Vulkan loader installed by any Vulkan-capable GPU driver. Neither the Vulkan SDK nor the
+VS toolchain is needed to *run* this.
+
 ≈1.3 GB resident. Both paths are resolved by `omnivoice_cpp_engine.BIN_DIR` / `MODEL_DIR`.
 `is_available()` returns False until the DLL and both GGUFs are present, and the config UI
 shows a "runtime not installed" hint instead of failing at synthesis time.
@@ -214,11 +219,12 @@ enhancement — its value would be interrupt trimming and word-level subtitles, 
 ## 9. Known gaps / decisions for you
 
 - **No installer yet.** DLLs and GGUFs must be placed manually today. An
-  `install_omnivoice_cpp.bat` (mirroring `install_omnivoice.bat`) is the obvious next step.
-  `omnivoice_cpp_engine.download_models()` exists (via `huggingface_hub`, per the HF Xet
-  gotcha in the rebase notes) but has no UI button. Note the embedded Python has **no pip
-  until `start_server.bat` bootstraps `get-pip.py`**, and `huggingface_hub` isn't installed
-  by default.
+  `install_omnivoice_cpp.bat` plus a config-UI download button (mirroring
+  `install_omnivoice.bat` and `/api/tts/omnivoice/install-deps`) is the obvious next step.
+  `omnivoice_cpp_engine.download_models()` already implements the fetch via `huggingface_hub`
+  — which is in `requirements.txt` and therefore present at runtime, and which sidesteps the
+  HF Xet 403 from the rebase notes — it simply has no UI button yet. No pip bootstrap and no
+  new dependency are required; unlike the torch provider there is nothing to `pip install`.
 - **Bundle vs. download.** `omnivoice_cpp/` is gitignored here so as not to dump ~1.3 GB of
   models + ~72 MB of DLLs into the repo. Also note `.gitattributes` routes `*.dll` and
   `*.exe` through **LFS**, so bundling binaries has LFS implications. Your call.
