@@ -9,10 +9,33 @@ import copy
 import shutil
 from datetime import date, datetime
 
-# Gemini chat default - move to Gemini 3.5 Flash after June 1, 2027
+# Gemini model defaults follow Google's expected preview deprecation dates.
 GEMINI_3_5_SWITCH_DATE = date(2027, 6, 1)
 GEMINI_CHAT_DEFAULT = 'gemini-3.5-flash' if date.today() >= GEMINI_3_5_SWITCH_DATE else 'gemini-3-flash-preview'
 GEMINI_CHAT_DEFAULT_OR = 'google/gemini-3.5-flash' if date.today() >= GEMINI_3_5_SWITCH_DATE else 'google/gemini-3-flash-preview'
+
+GEMINI_2_5_FLASH_LITE_SWITCH_DATE = date(2026, 10, 15)
+GEMINI_3_1_FLASH_LITE_SWITCH_DATE = date(2027, 5, 7)
+if date.today() >= GEMINI_3_1_FLASH_LITE_SWITCH_DATE:
+    GEMINI_FLASH_LITE_DEFAULT = 'gemini-3.5-flash-lite'
+    GEMINI_FLASH_LITE_DEFAULT_OR = 'google/gemini-3.5-flash-lite'
+elif date.today() >= GEMINI_2_5_FLASH_LITE_SWITCH_DATE:
+    GEMINI_FLASH_LITE_DEFAULT = 'gemini-3.1-flash-lite'
+    GEMINI_FLASH_LITE_DEFAULT_OR = 'google/gemini-3.1-flash-lite'
+else:
+    GEMINI_FLASH_LITE_DEFAULT = 'gemini-2.5-flash-lite'
+    GEMINI_FLASH_LITE_DEFAULT_OR = 'google/gemini-2.5-flash-lite'
+
+# Fact extraction and deduplication adopt Gemini 3.1 Flash Lite immediately,
+# then follow its already-scheduled May 2027 replacement.
+GRAPHITI_FACT_EXTRACTION_DEFAULT = (
+    'gemini-3.5-flash-lite'
+    if date.today() >= GEMINI_3_1_FLASH_LITE_SWITCH_DATE
+    else 'gemini-3.1-flash-lite'
+)
+GRAPHITI_FACT_EXTRACTION_DEFAULT_OR = f'google/{GRAPHITI_FACT_EXTRACTION_DEFAULT}'
+GRAPHITI_FACT_DEDUPLICATION_DEFAULT = GRAPHITI_FACT_EXTRACTION_DEFAULT
+GRAPHITI_FACT_DEDUPLICATION_DEFAULT_OR = GRAPHITI_FACT_EXTRACTION_DEFAULT_OR
 
 # ============================================
 # Per-Model Reasoning Settings
@@ -40,7 +63,7 @@ REASONING_CONTEXT_SETTINGS = {
     'prose': ('memory', 'prose_model_reasoning'),
     'graphiti': ('memory', 'graphiti_model_reasoning'),
     'graphiti_small': ('memory', 'graphiti_small_model_reasoning'),
-    'cognis_memory': ('memory', 'graphiti_small_model_reasoning'),
+    'cognis_memory': ('memory', 'graphiti_model_reasoning'),  # Legacy extraction context
     'reranker': ('memory', 'reranker_model_reasoning'),
 
     # Memory models - additional contexts that use the same models
@@ -78,7 +101,7 @@ OPENROUTER_PROVIDER_CONTEXT_SETTINGS = {
     'prose': ('memory', 'prose_model_providers'),
     'graphiti': ('memory', 'graphiti_model_providers'),
     'graphiti_small': ('memory', 'graphiti_small_model_providers'),
-    'cognis_memory': ('memory', 'graphiti_small_model_providers'),
+    'cognis_memory': ('memory', 'graphiti_model_providers'),  # Legacy extraction context
     'reranker': ('memory', 'reranker_model_providers'),
     'chapter_detection': ('memory', 'chapter_model_providers'),
     'migration_chapter': ('memory', 'chapter_model_providers'),
@@ -134,6 +157,36 @@ DEPRECATED_MODEL_REPLACEMENTS = {
     "google/gemini-3-flash": "google/gemini-3-flash-preview",
 }
 DEPRECATED_MODEL_MIGRATION_KEY = "deprecated_models_to_current_gemini_defaults_v3"
+GRAPHITI_FACT_EXTRACTION_MIGRATION_KEY = "graphiti_fact_extraction_to_gemini_3_1_flash_lite_v1"
+GRAPHITI_FACT_DEDUPLICATION_MIGRATION_KEY = "graphiti_fact_deduplication_to_gemini_3_1_flash_lite_v1"
+INWORLD_TTS_2_DEFAULT_MIGRATION_KEY = "inworld_tts_default_to_2_v1"
+LLAMACPP_SLOT_SAVE_PATH_REMOVAL_MIGRATION_KEY = "llamacpp_slot_save_path_removed_v1"
+DATED_MODEL_MIGRATIONS = (
+    (
+        date(2026, 10, 15),
+        "gemini_2_5_flash_lite_deprecation_2026_10_15_v1",
+        {
+            "gemini-2.5-flash-lite": "gemini-3.1-flash-lite",
+            "google/gemini-2.5-flash-lite": "google/gemini-3.1-flash-lite",
+        },
+    ),
+    (
+        date(2027, 5, 7),
+        "gemini_3_1_flash_lite_deprecation_2027_05_07_v1",
+        {
+            "gemini-3.1-flash-lite": "gemini-3.5-flash-lite",
+            "google/gemini-3.1-flash-lite": "google/gemini-3.5-flash-lite",
+        },
+    ),
+    (
+        date(2027, 6, 1),
+        "gemini_3_flash_preview_deprecation_2027_06_01_v1",
+        {
+            "gemini-3-flash-preview": "gemini-3.5-flash",
+            "google/gemini-3-flash-preview": "google/gemini-3.5-flash",
+        },
+    ),
+)
 OPENAI_RESPONSES_DEFAULT_MIGRATION_KEY = "openai_responses_api_default_enabled_v1"
 
 # ============================================
@@ -287,6 +340,14 @@ def _apply_provider_presets(settings, provider):
     elif provider == 'openrouter':
         provider_presets['chat'] = GEMINI_CHAT_DEFAULT_OR
 
+    # Keep provider presets current after each dated model deprecation.
+    for switch_date, _migration_key, replacements in DATED_MODEL_MIGRATIONS:
+        if date.today() < switch_date:
+            continue
+        for key, model in provider_presets.items():
+            if isinstance(model, str):
+                provider_presets[key], _changed = _replace_model_id(model, replacements)
+
     # Check each model field
     for key, path in fields.items():
         current_value = _get_nested_value(settings, path)
@@ -351,13 +412,12 @@ DEFAULT_SETTINGS = {
         "auto_clone": True,
         "npc_temp_modifiers": {"Sirona": 0.2, "ClementineWillardsey": 0.2, "SebastianSallow": 0.2},
         "npc_model_overrides": {"MirabelGarlick": "inworld-tts-1.5-max"},
-        "inworld": {"api_url": "https://api.inworld.ai", "api_key": "", "model": "inworld-tts-1.5-max", "temperature": 1.1},
+        "inworld": {"api_url": "https://api.inworld.ai", "api_key": "", "model": "inworld-tts-2", "temperature": 1.1, "speaking_rate": 1.0, "emote_passthrough": True, "dynamic_delivery": True},
         "elevenlabs": {"api_url": "https://api.elevenlabs.io", "api_key": "", "plan": "creator", "model": "eleven_v3", "stability": 0.5, "similarity_boost": 0.75, "sample_rate": 24000},
         "openai": {"api_key": "", "model": "tts-1", "voice": "alloy", "speed": 1.0},
         "pocket": {"device": "cpu", "temperature": 0.7, "lsd_steps": 1, "eos_threshold": -4.0, "cache_size": 50},
         "omnivoice": {"device": "auto", "num_steps": 32, "first_sentence_steps": 24, "guidance_scale": 2.0, "apply_smoothing_eq": True},
         "omnivoice_api": {"api_url": "http://127.0.0.1:8000", "api_key": "", "num_steps": 32, "first_sentence_steps": 24, "guidance_scale": 2.0, "apply_smoothing_eq": True, "sample_rate": 48000},
-        "omnivoice_cpp": {"device": "auto", "num_steps": 32, "first_sentence_steps": 24, "guidance_scale": 2.0, "apply_smoothing_eq": True, "seed": 42},
         "voxcpm": {"target_rtfx": 0.9, "inference_timesteps": 7, "gpu_yield_interval": 2, "cfg_value": 2.0, "min_yield_ms": 1.0, "max_yield_ms": 50.0}
     },
     "llm": {
@@ -403,7 +463,6 @@ DEFAULT_SETTINGS = {
             "api_url": "http://127.0.0.1:8080/v1",
             "kv_cache_enabled": True,
             "kv_cache_max_entries": 10,
-            "kv_cache_slot_save_path": "",
             "disable_input_correction": True,
             "disable_vision": True,
             "disable_owl_post": True,
@@ -488,9 +547,9 @@ DEFAULT_SETTINGS = {
         "embedding_model": "text-embedding-3-small",  # Vector embedding model for memory search (OpenAI/OpenRouter only)
         "chapter_model": "gpt-4.1-nano",  # Model for chapter detection
         "chapter_model_providers": [],
-        "graphiti_model": "gpt-4.1-nano",  # Main model for memory fact extraction
+        "graphiti_model": GRAPHITI_FACT_EXTRACTION_DEFAULT,  # Main model for memory fact extraction
         "graphiti_model_providers": [],
-        "graphiti_small_model": "gpt-4.1-nano",  # Smaller model for lightweight memory tasks
+        "graphiti_small_model": GRAPHITI_FACT_DEDUPLICATION_DEFAULT,  # Model for fact merge/dedup decisions
         "graphiti_small_model_providers": [],
         "reranker_model": "gpt-4.1-nano",  # Tiny model for reranking (boolean classifier)
         "reranker_model_providers": [],
@@ -661,7 +720,7 @@ Output ONLY the result, nothing else. NPC ID must match exactly from list.""",
             "wait_for_capture": True,  # Wait for vision capture before AI responds
             "wait_timeout_seconds": 5,  # Max time to wait for a capture when wait_for_capture is enabled
             "llm": {
-                "model": "gemini-2.5-flash-lite",
+                "model": GEMINI_FLASH_LITE_DEFAULT,
                 "temperature": 0.7,
                 "max_tokens": 8192,  # High default for reasoning token budgets
                 "providers": []
@@ -677,13 +736,13 @@ Output ONLY the result, nothing else. NPC ID must match exactly from list.""",
         "player_voice_enabled": True,
         "player_voice_spatial": True,  # 3D spatial audio for player voice (disable for VR mods etc.)
         "player_voice_name": "",  # Override for player voice (leave empty to auto-detect from game)
-        "target_selection_model": "gemini-2.5-flash-lite",
+        "target_selection_model": GEMINI_FLASH_LITE_DEFAULT,
         "target_selection_model_providers": [],
         "speaker_selection_max_tokens": 512,  # Dialogue line + target identification + reasoning
         "target_selection_use_crosshair": True,  # Bypass target LLM - use looked-at NPC directly (falls back to LLM if no NPC in crosshair)
-        "interjection_model": "gemini-2.5-flash-lite",
+        "interjection_model": GEMINI_FLASH_LITE_DEFAULT,
         "interjection_model_providers": [],
-        "commentary_model": "gemini-2.5-flash-lite",
+        "commentary_model": GEMINI_FLASH_LITE_DEFAULT,
         "commentary_model_providers": [],
         "commentary_max_tokens": 8192,  # High default for reasoning token budgets
         "commentary_model_reasoning": False,
@@ -700,10 +759,12 @@ Output ONLY the result, nothing else. NPC ID must match exactly from list.""",
         "companion_move_enabled": True,  # Allow voice commands to move companion ("go over there", "get out of the way")
         "companion_follow_distance_m": 2.0,  # How close companion follows (meters). Default 2.0m = 200uu
         "emotes_enabled": True,  # Prompt LLM to emit [emotion] tags for facial animation (provider-agnostic)
+        "freeform_emote_tags": True,  # Allow improvised tags; aliases are baseline, memory embeddings are optional
         "attention_meter_enabled": True,  # NPCs notice when player stares at them up close and react
         "attention_cold_approach_enabled": True,  # NPCs react to player approaching without prior conversation (requires attention_meter_enabled)
         "gaze_enabled": True,  # NPCs turn head/eyes toward player during conversations and ambient encounters
         "narration_enabled": False,  # Allow inline *narration* with a separate narrator voice
+        "spatial_grounding_enabled": True,  # Keep narrated locations consistent with visual context (requires narration_enabled)
         "narrator_voice": "",  # Voice name for narrator (empty = provider default: PocketONNX "GreyCat", Inworld "Graham")
         "conversation_fpv": True,  # Auto-enable first-person view during conversations
         "conversation_fpv_transition": "normal",  # Fade transition duration for first-person conversations: normal, fast, off
@@ -934,6 +995,47 @@ def _replace_deprecated_model_values(value):
     return value, False
 
 
+def _replace_model_id(model, replacements):
+    """Replace an exact model ID while preserving OpenRouter suffixes such as :nitro."""
+    stripped = model.strip()
+    replacement = replacements.get(stripped)
+    if replacement:
+        return replacement, model != replacement
+
+    for deprecated, current in replacements.items():
+        if stripped.startswith(f"{deprecated}:"):
+            replacement = f"{current}{stripped[len(deprecated):]}"
+            return replacement, model != replacement
+
+    return model, False
+
+
+def _replace_model_values(value, replacements):
+    """Recursively replace exact saved model IDs using a supplied mapping."""
+    if isinstance(value, dict):
+        changed = False
+        for key, child in list(value.items()):
+            new_child, child_changed = _replace_model_values(child, replacements)
+            if child_changed:
+                value[key] = new_child
+                changed = True
+        return value, changed
+
+    if isinstance(value, list):
+        changed = False
+        for index, child in enumerate(value):
+            new_child, child_changed = _replace_model_values(child, replacements)
+            if child_changed:
+                value[index] = new_child
+                changed = True
+        return value, changed
+
+    if isinstance(value, str):
+        return _replace_model_id(value, replacements)
+
+    return value, False
+
+
 def _migrate_deprecated_models(settings):
     """One-time migration for deprecated saved model IDs."""
     migrations = settings.setdefault('migrations', {})
@@ -943,6 +1045,69 @@ def _migrate_deprecated_models(settings):
     settings, changed = _replace_deprecated_model_values(settings)
     settings.setdefault('migrations', {})[DEPRECATED_MODEL_MIGRATION_KEY] = True
     return settings, changed or True
+
+
+def _migrate_dated_models(settings, current_date=None):
+    """Apply each due model deprecation once, allowing later manual overrides."""
+    current_date = current_date or date.today()
+    changed = False
+    applied = []
+
+    for switch_date, migration_key, replacements in DATED_MODEL_MIGRATIONS:
+        migrations = settings.get('migrations', {})
+        if current_date < switch_date or migrations.get(migration_key):
+            continue
+
+        settings, _models_changed = _replace_model_values(settings, replacements)
+        settings.setdefault('migrations', {})[migration_key] = True
+        changed = True
+        applied.append(migration_key)
+
+    return settings, changed, applied
+
+
+def _migrate_graphiti_fact_extraction_model(settings):
+    """Set the provider-appropriate fact extraction model exactly once."""
+    migrations = settings.get('migrations', {})
+    if migrations.get(GRAPHITI_FACT_EXTRACTION_MIGRATION_KEY):
+        return settings, False
+
+    provider = settings.get('llm', {}).get('provider', 'gemini')
+    if provider not in ('gemini', 'openrouter'):
+        return settings, False
+
+    memory = settings.setdefault('memory', {})
+    if provider == 'openrouter':
+        memory['graphiti_model'] = GRAPHITI_FACT_EXTRACTION_DEFAULT_OR
+        memory['graphiti_model_providers'] = ['google-ai-studio', 'google-vertex']
+    else:
+        memory['graphiti_model'] = GRAPHITI_FACT_EXTRACTION_DEFAULT
+        memory['graphiti_model_providers'] = []
+
+    settings.setdefault('migrations', {})[GRAPHITI_FACT_EXTRACTION_MIGRATION_KEY] = True
+    return settings, True
+
+
+def _migrate_graphiti_fact_deduplication_model(settings):
+    """Set the provider-appropriate fact deduplication model exactly once."""
+    migrations = settings.get('migrations', {})
+    if migrations.get(GRAPHITI_FACT_DEDUPLICATION_MIGRATION_KEY):
+        return settings, False
+
+    provider = settings.get('llm', {}).get('provider', 'gemini')
+    if provider not in ('gemini', 'openrouter'):
+        return settings, False
+
+    memory = settings.setdefault('memory', {})
+    if provider == 'openrouter':
+        memory['graphiti_small_model'] = GRAPHITI_FACT_DEDUPLICATION_DEFAULT_OR
+        memory['graphiti_small_model_providers'] = ['google-ai-studio', 'google-vertex']
+    else:
+        memory['graphiti_small_model'] = GRAPHITI_FACT_DEDUPLICATION_DEFAULT
+        memory['graphiti_small_model_providers'] = []
+
+    settings.setdefault('migrations', {})[GRAPHITI_FACT_DEDUPLICATION_MIGRATION_KEY] = True
+    return settings, True
 
 
 def _migrate_openai_responses_default(settings):
@@ -964,6 +1129,37 @@ def _migrate_openai_responses_default(settings):
         return settings, changed or True
 
     return settings, False
+
+
+def _migrate_inworld_tts_2_default(settings):
+    """Move the old Inworld default model to TTS 2 exactly once."""
+    migrations = settings.setdefault('migrations', {})
+    if migrations.get(INWORLD_TTS_2_DEFAULT_MIGRATION_KEY):
+        return settings, False
+
+    inworld_settings = settings.setdefault('tts', {}).setdefault('inworld', {})
+    if inworld_settings.get('model', 'inworld-tts-1.5-max') == 'inworld-tts-1.5-max':
+        inworld_settings['model'] = 'inworld-tts-2'
+        migrations[INWORLD_TTS_2_DEFAULT_MIGRATION_KEY] = True
+        return settings, True
+
+    migrations[INWORLD_TTS_2_DEFAULT_MIGRATION_KEY] = True
+    return settings, True
+
+
+def _migrate_llamacpp_slot_save_path(settings):
+    """Remove the obsolete Sonorus-local slot snapshot cleanup path once."""
+    migrations = settings.get('migrations', {})
+    if migrations.get(LLAMACPP_SLOT_SAVE_PATH_REMOVAL_MIGRATION_KEY):
+        return settings, False
+
+    llamacpp_settings = settings.get('llm', {}).get('llamacpp', {})
+    if 'kv_cache_slot_save_path' not in llamacpp_settings:
+        return settings, False
+
+    llamacpp_settings.pop('kv_cache_slot_save_path')
+    settings.setdefault('migrations', {})[LLAMACPP_SLOT_SAVE_PATH_REMOVAL_MIGRATION_KEY] = True
+    return settings, True
 
 
 def load_settings(raw=False):
@@ -1001,12 +1197,47 @@ def load_settings(raw=False):
                     else:
                         print("[Settings] Warning: Failed to persist deprecated model migration")
 
+                settings, graphiti_model_migrated = _migrate_graphiti_fact_extraction_model(settings)
+                if graphiti_model_migrated:
+                    if save_settings(settings):
+                        print("[Settings] Updated long-term memory fact extraction model")
+                    else:
+                        print("[Settings] Warning: Failed to persist fact extraction model migration")
+
+                settings, graphiti_small_model_migrated = _migrate_graphiti_fact_deduplication_model(settings)
+                if graphiti_small_model_migrated:
+                    if save_settings(settings):
+                        print("[Settings] Updated long-term memory fact deduplication model")
+                    else:
+                        print("[Settings] Warning: Failed to persist fact deduplication model migration")
+
+                settings, dated_models_migrated, dated_migrations = _migrate_dated_models(settings)
+                if dated_models_migrated:
+                    if save_settings(settings):
+                        print(f"[Settings] Applied dated model migrations: {', '.join(dated_migrations)}")
+                    else:
+                        print("[Settings] Warning: Failed to persist dated model migrations")
+
                 settings, openai_responses_migrated = _migrate_openai_responses_default(settings)
                 if openai_responses_migrated:
                     if save_settings(settings):
                         print("[Settings] Applied OpenAI Responses API default for direct OpenAI endpoints")
                     else:
                         print("[Settings] Warning: Failed to persist OpenAI Responses API default migration")
+
+                settings, inworld_tts_migrated = _migrate_inworld_tts_2_default(settings)
+                if inworld_tts_migrated:
+                    if save_settings(settings):
+                        print("[Settings] Applied Inworld TTS 2 default migration")
+                    else:
+                        print("[Settings] Warning: Failed to persist Inworld TTS 2 default migration")
+
+                settings, llamacpp_path_migrated = _migrate_llamacpp_slot_save_path(settings)
+                if llamacpp_path_migrated:
+                    if save_settings(settings):
+                        print("[Settings] Removed obsolete llama.cpp slot save path setting")
+                    else:
+                        print("[Settings] Warning: Failed to persist llama.cpp slot save path migration")
 
                 settings = _backfill_missing_provider_route_presets(settings)
 

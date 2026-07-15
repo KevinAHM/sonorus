@@ -8,12 +8,14 @@ Each NPC has their own owner_id for memory isolation based on earshot.
 import os
 import json
 import asyncio
+import re
 import time
 import string
 import shutil
 import sqlite3
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Optional, Dict, List, Any, ClassVar
 from .settings import load_settings, DATA_DIR, SONORUS_DIR, is_dev_mode, is_llm_provider_feature_disabled
@@ -38,13 +40,20 @@ _MEMORY_SUPPORTED_PROVIDERS = ("openai", "openrouter", "gemini")
 
 def _normalize_openai_compatible_memory_model(model: str, provider: str) -> str:
     model = (model or "gpt-4.1-nano").strip() or "gpt-4.1-nano"
-    if provider in ("openai", "openrouter") and "gemini" in model.lower():
-        model = "openai/gpt-4.1-nano" if provider == "openrouter" else "gpt-4.1-nano"
-    if provider == "openrouter" and "/" not in model and (
-        model.startswith("gpt-") or model.startswith("o")
-    ):
-        return f"openai/{model}"
-    if provider == "openai" and model.startswith("openai/"):
+    if provider == "openrouter":
+        if "/" in model:
+            return model
+        if model.lower().startswith("gemini-"):
+            return f"google/{model}"
+        if model.startswith("gpt-") or model.startswith("o"):
+            return f"openai/{model}"
+        return model
+    if provider == "openai":
+        if "gemini" in model.lower():
+            return "gpt-4.1-nano"
+        if model.startswith("openai/"):
+            return model.split("/", 1)[1]
+    if provider == "gemini" and model.startswith("google/"):
         return model.split("/", 1)[1]
     return model
 
@@ -790,12 +799,18 @@ class CognisMemoryManager:
             config.embedding_model = memory_settings.get("embedding_model") or "text-embedding-3-small"
         elif provider == "gemini":
             config.embedding_model = memory_settings.get("embedding_model") or "gemini-embedding-2"
-        config.llm_model = _normalize_openai_compatible_memory_model(
-            memory_settings.get("graphiti_small_model")
-            or memory_settings.get("graphiti_model")
+        config.extraction_llm_model = _normalize_openai_compatible_memory_model(
+            memory_settings.get("graphiti_model")
+            or memory_settings.get("graphiti_small_model")
             or config.llm_model,
             provider,
         )
+        config.operation_llm_model = _normalize_openai_compatible_memory_model(
+            memory_settings.get("graphiti_small_model")
+            or config.extraction_llm_model,
+            provider,
+        )
+        config.llm_model = config.extraction_llm_model
         config.enable_immediate_recall = False
         config.recency_boost_weight = 0.05
         return config
@@ -2915,34 +2930,18 @@ def get_npc_memory(npc_id: str, npc_name: str = None) -> Optional[str]:
     return compile_memory_prose(npc_id, npc_name)
 
 
-def extract_search_query(player_message: str, npc_name: str, player_name: str = "the player") -> Optional[str]:
-    """
-    Extract a clean search query from player's conversational message.
+def _build_search_query_messages(player_message: str, npc_name: str,
+                                 player_name: str = "the player") -> List[Dict[str, str]]:
+    """Build the exact messages used by the production search-intent extractor."""
+    system_prompt = f"""Extract a search query from a player message.
 
-    Uses a fast LLM to identify what the player is actually asking about,
-    stripping conversational fluff and extracting key entities/topics.
-    Resolves pronouns like "we", "us", "I" to actual entity names.
-
-    Returns:
-        Clean search query string, or None if no search needed (greetings, etc.)
-    """
-    import llm
-
-    # Skip very short messages
-    if len(player_message.strip()) < 5:
-        return None
-
-    prompt = f"""Extract a search query from this player message.
-
-Player: {player_name}
-Speaking to: {npc_name}
-Message: "{player_message}"
-
-Extract key entities/topics for searching the NPC's memory facts (2-6 words).
+Extract key entities/topics for searching an NPC's memory facts (2-6 words).
 - EXCLUDE the NPC's name ({npc_name}) - we're already searching their graph
 - Replace "I/me/my/we/us/our" with player name ({player_name}) if relevant
 - Extract other names, places, events, objects mentioned
 - If greeting/thanks/small talk, return NONE
+- Narration/action can be searchable if it mentions a concrete durable entity, object, place, or event
+- Return NONE for conversational repair/continuation with no memory topic
 
 Return ONLY the search terms or NONE. No explanation.
 
@@ -2963,11 +2962,44 @@ Examples:
 - "did Sebastian mention the scriptorium?" → Sebastian scriptorium
 - "what do you think of Rowan?" → Rowan
 - "what happened at the tavern?" → tavern
+- "*He grabs the shining blue diamond and puts it in his pocket*" → shining blue diamond {player_name}
+- "*she suddenly stopped him* he was just passing.. sorry.. what were you saying?" → NONE
+- "sorry, what were you saying?" → NONE
+- "*nods* go on" → NONE
 - "hey how are you?" → NONE
 - "thanks for your help" → NONE
 - "that's interesting" → NONE
 - "let's go" → NONE
 - "tell me about yourself" → NONE"""
+
+    prompt = f"""Player: {player_name}
+Speaking to: {npc_name}
+Message: "{player_message}"
+
+Search terms:"""
+
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": prompt},
+    ]
+
+
+def extract_search_query(player_message: str, npc_name: str, player_name: str = "the player") -> Optional[str]:
+    """
+    Extract a clean search query from player's conversational message.
+
+    Uses a fast LLM to identify what the player is actually asking about,
+    stripping conversational fluff and extracting key entities/topics.
+    Resolves pronouns like "we", "us", "I" to actual entity names.
+
+    Returns:
+        Clean search query string, or None if no search needed (greetings, etc.)
+    """
+    import llm
+
+    # Skip very short messages
+    if len(player_message.strip()) < 5:
+        return None
 
     settings = load_settings()
     # Use reranker model (small/fast) for intent extraction
@@ -2976,10 +3008,10 @@ Examples:
     try:
         _profiler.mark("search_intent start")
         result = llm.chat(
-            messages=[{"role": "user", "content": prompt}],
+            messages=_build_search_query_messages(player_message, npc_name, player_name),
             model=model,
             temperature=0.2,
-            max_tokens=512,
+            max_tokens=128,
             context="search_intent"
         )
         _profiler.mark("search_intent done")
@@ -3006,11 +3038,141 @@ Examples:
     return player_message
 
 
+_SEARCH_STOPWORDS = {
+    'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+    'of', 'with', 'by', 'from', 'is', 'was', 'are', 'were', 'been', 'be',
+    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+    'should', 'may', 'might', 'must', 'shall', 'can', 'need', 'dare',
+    'that', 'this', 'these', 'those', 'it', 'its', 'they', 'them', 'their',
+    'we', 'us', 'our', 'you', 'your', 'i', 'me', 'my', 'he', 'him', 'his',
+    'she', 'her', 'what', 'which', 'who', 'whom', 'when', 'where', 'why',
+    'how', 'about', 'into', 'through', 'during', 'before', 'after', 'above',
+    'below', 'between', 'under', 'again', 'further', 'then', 'once', 'here',
+    'there', 'all', 'each', 'few', 'more', 'most', 'other', 'some', 'such',
+    'no', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 'just',
+    'also', 'now', 'any', 'both', 'being', 'over', 'ever',
+}
+
+
+def _normalize_search_text(text: str) -> str:
+    text = str(text or "").lower()
+    return re.sub(r"['\u2019](s|t|d|ll|ve|re|m)\b", "", text)
+
+
+def _rank_search_candidates(facts, search_query, reference_time):
+    """Format and rank one Cognis result stream, preserving raw dedup keys."""
+    query_words = [
+        word for word in _normalize_search_text(search_query).split()
+        if word not in _SEARCH_STOPWORDS and len(word) > 2
+    ]
+    keyword_matched = []
+    semantic_only = []
+    seen = set()
+
+    for fact_item in facts or []:
+        raw_fact = fact_item.get('fact', '') if isinstance(fact_item, dict) else str(fact_item)
+        raw_fact = raw_fact.strip()
+        key = raw_fact.lower()
+        if not raw_fact or not key or key in seen:
+            continue
+        seen.add(key)
+        formatted = raw_fact
+        if isinstance(fact_item, dict):
+            formatted = _format_memory_fact_line(
+                raw_fact,
+                valid_at=fact_item.get('valid_at'),
+                chapter=fact_item.get('chapter') or "",
+                reference_time=reference_time,
+            )
+        candidate = {"key": key, "line": formatted}
+        normalized_fact = _normalize_search_text(raw_fact)
+        if any(keyword in normalized_fact for keyword in query_words):
+            keyword_matched.append(candidate)
+        else:
+            semantic_only.append(candidate)
+
+    return keyword_matched + semantic_only, len(keyword_matched), len(semantic_only)
+
+
+def _safe_search_facts(memory_mgr, npc_id, search_query, max_results):
+    try:
+        return memory_mgr.search_facts(
+            npc_id=npc_id,
+            query=search_query,
+            center_node_uuid=None,
+            max_results=max_results,
+        )
+    except Exception as exc:
+        print(f"[Memory] Search failed for '{search_query}': {exc}")
+        return []
+
+
+def _merge_search_candidate_streams(active_candidates, topic_candidates, max_results):
+    """Select balanced unique results, reallocating unused capacity."""
+    if max_results <= 0:
+        return [], 0, 0
+    streams = {
+        "active": list(active_candidates or []),
+        "topic": list(topic_candidates or []),
+    }
+    if not streams["active"]:
+        selected = streams["topic"][:max_results]
+        return selected, 0, len(selected)
+    if not streams["topic"]:
+        selected = streams["active"][:max_results]
+        return selected, len(selected), 0
+
+    quotas = {
+        "active": (max_results + 1) // 2,
+        "topic": max_results // 2,
+    }
+    indices = {"active": 0, "topic": 0}
+    contributions = {"active": 0, "topic": 0}
+    selected = []
+    seen = set()
+
+    def take_one(name, enforce_quota):
+        if enforce_quota and contributions[name] >= quotas[name]:
+            return False
+        stream = streams[name]
+        while indices[name] < len(stream):
+            candidate = stream[indices[name]]
+            indices[name] += 1
+            if candidate["key"] in seen:
+                continue
+            seen.add(candidate["key"])
+            selected.append(candidate)
+            contributions[name] += 1
+            return True
+        return False
+
+    while len(selected) < max_results:
+        progress = False
+        for name in ("active", "topic"):
+            progress = take_one(name, enforce_quota=True) or progress
+            if len(selected) >= max_results:
+                break
+        if not progress:
+            break
+
+    while len(selected) < max_results:
+        progress = False
+        for name in ("active", "topic"):
+            progress = take_one(name, enforce_quota=False) or progress
+            if len(selected) >= max_results:
+                break
+        if not progress:
+            break
+
+    return selected, contributions["active"], contributions["topic"]
+
+
 def search_relevant_facts(npc_id: str, query: str, npc_name: str = None,
                           player_name: str = None, center_node_name: str = None,
                           max_results: int = 50,
                           current_game_date: str = "",
-                          current_game_time: str = "") -> Optional[List[str]]:
+                          current_game_time: str = "",
+                          topic_query: str = None) -> Optional[List[str]]:
     """
     Search for facts relevant to a query, centered on a specific node.
 
@@ -3024,6 +3186,7 @@ def search_relevant_facts(npc_id: str, query: str, npc_name: str = None,
         player_name: Player's character name (for resolving "we", "I", etc.)
         center_node_name: Node to center search on (default: NPC's name or "You")
         max_results: Maximum unique facts to return (after deduplication)
+        topic_query: Optional pre-extracted scene topic to search alongside the active query
 
     Returns:
         List of unique fact strings, or None if search fails/no memory data
@@ -3037,114 +3200,89 @@ def search_relevant_facts(npc_id: str, query: str, npc_name: str = None,
     if not _cognis_available:
         return None
 
-    # Extract clean search query from conversational message
-    search_query = extract_search_query(query, npc_name or "the NPC", player_name or "the player")
-    if not search_query:
-        print(f"[Memory] No search needed for: '{query[:50]}...'")
-        return None
-
-    memory_mgr = MemoryManager()
-    print(f"[Memory] Search init for '{search_query}'...")
-    if not memory_mgr.init_graphiti():
-        return None
-
-    # Keep center-node arguments for legacy callers; Cognis ignores them.
-    if not center_node_name:
-        center_node_name = npc_name if npc_name else "You"
-
-    # Get center node UUID for legacy compatibility.
-    print(f"[Memory] Search get_node_uuid for {center_node_name}...")
-    center_uuid = memory_mgr.get_node_uuid(npc_id, center_node_name)
-    print(f"[Memory] Search get_node_uuid done: {center_uuid}")
-
-    # Search for more than we need to account for filtering and duplicates
-    _profiler.mark("graph_lookup start")
-    facts = memory_mgr.search_facts(
-        npc_id=npc_id,
-        query=search_query,
-        center_node_uuid=center_uuid,
-        max_results=max_results * 4  # Fetch extra to account for keyword filtering
-    )
-    _profiler.mark("graph_lookup done")
-
-    if not facts:
-        return None
-
     reference_time = None
     if current_game_date and "/" in current_game_date and len(current_game_date.split("/", 1)[0]) == 4:
         reference_time = game_time_to_datetime(current_game_date, current_game_time)
 
-    # Normalize text for matching: strip possessives, contractions, lowercase
-    import re
-    def normalize_for_match(text: str) -> str:
-        text = text.lower()
-        # Strip possessives and contractions: 's 't 'd 'll 've 're 'm
-        text = re.sub(r"'(s|t|d|ll|ve|re|m)\b", "", text)
-        text = re.sub(r"'(s|t|d|ll|ve|re|m)\b", "", text)  # Handle curly apostrophe
-        return text
+    clean_topic = str(topic_query or "").strip()
+    if clean_topic.upper() == "NONE":
+        clean_topic = ""
 
-    # Extract keywords from query for filtering (skip common words)
-    stopwords = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
-                 'of', 'with', 'by', 'from', 'is', 'was', 'are', 'were', 'been', 'be',
-                 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
-                 'should', 'may', 'might', 'must', 'shall', 'can', 'need', 'dare',
-                 'that', 'this', 'these', 'those', 'it', 'its', 'they', 'them', 'their',
-                 'we', 'us', 'our', 'you', 'your', 'i', 'me', 'my', 'he', 'him', 'his',
-                 'she', 'her', 'what', 'which', 'who', 'whom', 'when', 'where', 'why',
-                 'how', 'about', 'into', 'through', 'during', 'before', 'after', 'above',
-                 'below', 'between', 'under', 'again', 'further', 'then', 'once', 'here',
-                 'there', 'all', 'each', 'few', 'more', 'most', 'other', 'some', 'such',
-                 'no', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 'just',
-                 'also', 'now', 'any', 'both', 'being', 'over', 'after', 'ever'}
+    memory_mgr = MemoryManager()
+    active_query = None
+    topic_candidates = []
 
-    # Normalize and extract keywords
-    normalized_query = normalize_for_match(search_query)
-    query_words = [w for w in normalized_query.split() if w not in stopwords and len(w) > 2]
-
-    # Separate facts into keyword-matched and semantic-only
-    keyword_matched = []
-    semantic_only = []
-    seen = set()
-
-    for fact_item in facts:
-        # Handle both dict format (from search_facts) and string format
-        raw_fact_str = fact_item.get('fact', '') if isinstance(fact_item, dict) else str(fact_item)
-        fact_str = raw_fact_str
-        if isinstance(fact_item, dict):
-            fact_str = _format_memory_fact_line(
-                raw_fact_str,
-                valid_at=fact_item.get('valid_at'),
-                chapter=fact_item.get('chapter') or "",
-                reference_time=reference_time,
+    if clean_topic:
+        print(f"[Memory] Dual search init with topic '{clean_topic}'")
+        if not memory_mgr.init_graphiti():
+            return None
+        _profiler.mark("graph_lookup start")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            topic_future = executor.submit(
+                _safe_search_facts,
+                memory_mgr,
+                npc_id,
+                clean_topic,
+                max_results * 4,
             )
-        if not fact_str:
-            continue
+            active_query = extract_search_query(query, npc_name or "the NPC", player_name or "the player")
+            duplicate_query = (
+                active_query
+                and _normalize_search_text(active_query).strip() == _normalize_search_text(clean_topic).strip()
+            )
+            if active_query and not duplicate_query:
+                active_facts = _safe_search_facts(
+                    memory_mgr, npc_id, active_query, max_results * 4
+                )
+            else:
+                active_facts = []
+            topic_facts = topic_future.result()
+        _profiler.mark("graph_lookup done")
 
-        fact_lower = raw_fact_str.lower().strip()
-        if fact_lower in seen:
-            continue
-        seen.add(fact_lower)
-
-        # Normalize fact for keyword matching
-        fact_normalized = normalize_for_match(raw_fact_str)
-
-        # Check if any query keyword appears in the normalized fact
-        has_keyword = any(kw in fact_normalized for kw in query_words)
-        if has_keyword:
-            keyword_matched.append(fact_str)
+        topic_candidates, _, _ = _rank_search_candidates(
+            topic_facts, clean_topic, reference_time
+        )
+        if duplicate_query:
+            active_candidates = topic_candidates
+            topic_candidates = []
+            print("[Memory] Active and topic queries are identical; reused one search")
         else:
-            semantic_only.append(fact_str)
+            active_candidates, _, _ = _rank_search_candidates(
+                active_facts, active_query or "", reference_time
+            )
+    else:
+        active_query = extract_search_query(query, npc_name or "the NPC", player_name or "the player")
+        if not active_query:
+            print(f"[Memory] No search needed for: '{query[:50]}...'")
+            return None
+        print(f"[Memory] Search init for '{active_query}'...")
+        if not memory_mgr.init_graphiti():
+            return None
+        _profiler.mark("graph_lookup start")
+        active_facts = _safe_search_facts(
+            memory_mgr, npc_id, active_query, max_results * 4
+        )
+        _profiler.mark("graph_lookup done")
+        active_candidates, _, _ = _rank_search_candidates(
+            active_facts, active_query, reference_time
+        )
 
-    # Prioritize keyword matches, then add semantic-only as fallback
-    unique_facts = keyword_matched[:max_results]
-    remaining = max_results - len(unique_facts)
-    if remaining > 0:
-        unique_facts.extend(semantic_only[:remaining])
+    selected, active_contribution, topic_contribution = _merge_search_candidate_streams(
+        active_candidates, topic_candidates, max_results
+    )
+    if not selected:
+        return None
 
-    if unique_facts:
-        print(f"[Memory] Search '{search_query}': {len(keyword_matched)} keyword matches, {len(semantic_only)} semantic-only")
-
-    return unique_facts if unique_facts else None
+    active_keys = {candidate["key"] for candidate in active_candidates}
+    topic_keys = {candidate["key"] for candidate in topic_candidates}
+    selected_keys = {candidate["key"] for candidate in selected}
+    print(
+        f"[Memory] Search allocation: active={len(active_candidates)} candidates/"
+        f"{len(selected_keys & active_keys)} represented, topic={len(topic_candidates)} candidates/"
+        f"{len(selected_keys & topic_keys)} represented, contributions="
+        f"{active_contribution}+{topic_contribution}, final={len(selected)}"
+    )
+    return [candidate["line"] for candidate in selected]
 
 
 def evaluate_chapter_boundary(npc_id: str, npc_name: str, dialogue_history: List[Dict],

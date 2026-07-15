@@ -7,14 +7,19 @@ distinguishing natural pauses ("um...") from actual turn completion.
 Uses ONNX runtime for CPU-efficient inference.
 Based on: https://github.com/pipecat-ai/smart-turn
 """
+import hashlib
 import os
-import numpy as np
-from typing import Optional, Dict, Any
 import threading
+from typing import Any, Dict, Optional
+
+import numpy as np
+from huggingface_hub import hf_hub_download
 
 # Model configuration
-MODEL_URL = "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-cpu.onnx"
+MODEL_REPO_ID = "pipecat-ai/smart-turn-v3"
 MODEL_FILENAME = "smart-turn-v3.2-cpu.onnx"
+MODEL_SIZE_BYTES = 8_679_182
+MODEL_SHA256 = "2bb026316b14a660486a75b1733cd3fbab8c2fd0314dc9af7be49f8cca967e4f"
 SAMPLE_RATE = 16000
 MAX_DURATION_SECONDS = 8
 
@@ -49,22 +54,56 @@ def _get_feature_extractor():
     return _feature_extractor
 
 
+def _model_file_is_valid(path: str) -> bool:
+    """Return whether the smart-turn model matches the published artifact."""
+    try:
+        if os.path.getsize(path) != MODEL_SIZE_BYTES:
+            return False
+        digest = hashlib.sha256()
+        with open(path, "rb") as model_file:
+            for chunk in iter(lambda: model_file.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest() == MODEL_SHA256
+    except OSError:
+        return False
+
+
 def _download_model():
-    """Download the smart-turn ONNX model if not present."""
-    if os.path.exists(_MODEL_PATH):
+    """Validate and, when necessary, download the smart-turn ONNX model."""
+    if _model_file_is_valid(_MODEL_PATH):
         return _MODEL_PATH
 
     os.makedirs(_MODELS_DIR, exist_ok=True)
 
-    print(f"[TurnDetection] Downloading smart-turn model...")
-    print(f"[TurnDetection] URL: {MODEL_URL}")
+    replace_invalid = os.path.exists(_MODEL_PATH)
+    if replace_invalid:
+        print("[TurnDetection] Existing smart-turn model is incomplete or corrupt; replacing it")
+        try:
+            os.remove(_MODEL_PATH)
+        except OSError as exc:
+            raise RuntimeError(f"Could not remove invalid smart-turn model: {exc}") from exc
+
+    print("[TurnDetection] Downloading smart-turn model through huggingface_hub...")
 
     try:
-        import urllib.request
-        urllib.request.urlretrieve(MODEL_URL, _MODEL_PATH)
+        downloaded_path = hf_hub_download(
+            repo_id=MODEL_REPO_ID,
+            filename=MODEL_FILENAME,
+            local_dir=_MODELS_DIR,
+            force_download=replace_invalid,
+        )
+        if os.path.abspath(downloaded_path) != os.path.abspath(_MODEL_PATH):
+            raise RuntimeError(f"Model downloaded to unexpected path: {downloaded_path}")
+        if not _model_file_is_valid(_MODEL_PATH):
+            raise RuntimeError("Downloaded smart-turn model failed size/SHA-256 validation")
         print(f"[TurnDetection] Model downloaded to {_MODEL_PATH}")
         return _MODEL_PATH
     except Exception as e:
+        if os.path.exists(_MODEL_PATH) and not _model_file_is_valid(_MODEL_PATH):
+            try:
+                os.remove(_MODEL_PATH)
+            except OSError:
+                pass
         print(f"[TurnDetection] Failed to download model: {e}")
         raise
 
@@ -288,3 +327,7 @@ def unload():
 def is_loaded() -> bool:
     """Check if turn detection model is currently loaded."""
     return _session is not None
+
+
+if __name__ == "__main__":
+    _download_model()

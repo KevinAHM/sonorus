@@ -4,8 +4,10 @@ Config API endpoints for Sonorus settings management.
 Handles settings CRUD, character import/export, system events.
 """
 
-import os
+import importlib.metadata
+import importlib.util
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -24,6 +26,7 @@ from utils.settings import (
 )
 from utils import player_context, player_profile_db
 from utils.localization import get_display_name
+from utils.emote_embeddings import ensure_emote_index_async
 
 import llm
 import event_logger
@@ -346,6 +349,7 @@ def get_mod_package_conflicts():
     try:
         game_root = Path(SONORUS_DIR).parent.parent.parent
         paks_root = game_root / "Content" / "Paks"
+        sonorus_utoc_path = (paks_root / "LogicMods" / "SonorusMod.utoc").resolve()
         scan_roots = [
             paks_root / "mods",
             paks_root / "~mods",
@@ -374,7 +378,7 @@ def get_mod_package_conflicts():
 
         conflicts = []
         for package_id, group in sorted(grouped.items(), key=lambda item: item[0]):
-            if len(group) < 2:
+            if len(group) < 2 or package_id == SONORUS_MOD_PACKAGE_ID:
                 continue
             conflicts.append({
                 "package_id": package_id,
@@ -392,7 +396,11 @@ def get_mod_package_conflicts():
 
         sonorus_conflicts = []
         if SONORUS_MOD_PACKAGE_ID is not None:
-            sonorus_group = grouped.get(SONORUS_MOD_PACKAGE_ID, [])
+            sonorus_group = [
+                entry
+                for entry in grouped.get(SONORUS_MOD_PACKAGE_ID, [])
+                if Path(entry.utoc_path) != sonorus_utoc_path
+            ]
             if sonorus_group:
                 sonorus_conflicts = [
                     {
@@ -515,16 +523,11 @@ def save_config():
     # Preserve setup test flags that are set by test endpoints, not the frontend.
     # The frontend config object doesn't get updated when tests pass (they save directly
     # to settings.json), so a config save would wipe the flags without this preservation.
-    # These keys are backend-owned: always take the stored values, even when the client
-    # echoes back a stale snapshot from page load (testing then saving in one session).
-    # The active_tts_changed / llm_client_changed resets below still run after this.
     existing_setup = existing.get('setup', {})
     new_setup = new_settings.get('setup', {})
     for key in ('tts_tested', 'tts_test_language', 'tts_test_provider', 'llm_tested', 'llm_test_provider'):
-        if key in existing_setup:
+        if key in existing_setup and key not in new_setup:
             new_setup[key] = existing_setup[key]
-        elif key in new_setup:
-            del new_setup[key]
     if new_setup:
         new_settings['setup'] = new_setup
 
@@ -551,17 +554,10 @@ def save_config():
         active_tts_provider == 'omnivoice'
         and new_omnivoice_device != existing_omnivoice_device
     )
-    new_omnivoice_cpp_device = new_settings.get('tts', {}).get('omnivoice_cpp', {}).get('device', 'auto')
-    existing_omnivoice_cpp_device = existing.get('tts', {}).get('omnivoice_cpp', {}).get('device', 'auto')
-    omnivoice_cpp_device_changed = (
-        active_tts_provider == 'omnivoice_cpp'
-        and new_omnivoice_cpp_device != existing_omnivoice_cpp_device
-    )
     active_tts_changed = (
         tts_provider_switched or
         active_tts_provider in tts_providers_changed or
-        omnivoice_device_changed or
-        omnivoice_cpp_device_changed
+        omnivoice_device_changed
     )
 
     if active_tts_changed:
@@ -615,14 +611,6 @@ def save_config():
                     except Exception as e:
                         print(f"[Settings] Error unloading OmniVoice: {e}")
 
-                if existing_tts_provider == 'omnivoice_cpp':
-                    try:
-                        from services.omnivoice_cpp_engine import unload as unload_omnivoice_cpp
-                        unload_omnivoice_cpp()
-                        print("[Settings] Unloaded OmniVoice (Vulkan) worker")
-                    except Exception as e:
-                        print(f"[Settings] Error unloading OmniVoice (Vulkan): {e}")
-
                 # Disconnect Inworld WebSocket before clearing its cache
                 if existing_tts_provider == 'inworld':
                     try:
@@ -658,7 +646,7 @@ def save_config():
                     except Exception as e:
                         print(f"[Settings] Error starting Pocket TTS preload: {e}")
 
-                elif new_tts_provider == 'omnivoice' and _is_torch_installed() and _count_untokenized_voices() == 0:
+                elif new_tts_provider == 'omnivoice' and _are_omnivoice_deps_installed() and _count_untokenized_voices() == 0:
                     try:
                         from services.omnivoice_engine import warm_up as warmup_omnivoice
                         import threading
@@ -671,21 +659,6 @@ def save_config():
                         threading.Thread(target=preload_omnivoice, daemon=True).start()
                     except Exception as e:
                         print(f"[Settings] Error starting OmniVoice preload: {e}")
-
-                elif new_tts_provider == 'omnivoice_cpp':
-                    try:
-                        from services import omnivoice_cpp_engine
-                        if omnivoice_cpp_engine.is_available():
-                            import threading
-                            def preload_omnivoice_cpp():
-                                try:
-                                    omnivoice_cpp_engine.warm_up()
-                                    print("[Settings] OmniVoice (Vulkan) worker preloaded")
-                                except Exception as e:
-                                    print(f"[Settings] OmniVoice (Vulkan) preload failed: {e}")
-                            threading.Thread(target=preload_omnivoice_cpp, daemon=True).start()
-                    except Exception as e:
-                        print(f"[Settings] Error starting OmniVoice (Vulkan) preload: {e}")
 
                 # Connect Inworld WebSocket (if switching to Inworld)
                 elif new_tts_provider == 'inworld':
@@ -721,7 +694,7 @@ def save_config():
                 tts.clear_provider_cache('omnivoice')
                 print("[Settings] Unloaded OmniVoice models for GPU change")
 
-                if _is_torch_installed() and _count_untokenized_voices() == 0:
+                if _are_omnivoice_deps_installed() and _count_untokenized_voices() == 0:
                     import threading
                     from services.omnivoice_engine import warm_up as warmup_omnivoice
                     def preload_omnivoice_after_gpu_change():
@@ -733,27 +706,6 @@ def save_config():
                     threading.Thread(target=preload_omnivoice_after_gpu_change, daemon=True).start()
             except Exception as e:
                 print(f"[Settings] Error reloading OmniVoice after GPU change: {e}")
-
-        if omnivoice_cpp_device_changed and not tts_provider_switched:
-            print(f"[Settings] OmniVoice (Vulkan) GPU changed: {existing_omnivoice_cpp_device} -> {new_omnivoice_cpp_device}")
-            try:
-                from services import tts
-                from services import omnivoice_cpp_engine
-                omnivoice_cpp_engine.unload()
-                tts.clear_provider_cache('omnivoice_cpp')
-                print("[Settings] Unloaded OmniVoice (Vulkan) worker for GPU change")
-
-                if omnivoice_cpp_engine.is_available():
-                    import threading
-                    def preload_omnivoice_cpp_after_gpu_change():
-                        try:
-                            omnivoice_cpp_engine.warm_up()
-                            print("[Settings] OmniVoice (Vulkan) worker restarted after GPU change")
-                        except Exception as e:
-                            print(f"[Settings] OmniVoice (Vulkan) restart after GPU change failed: {e}")
-                    threading.Thread(target=preload_omnivoice_cpp_after_gpu_change, daemon=True).start()
-            except Exception as e:
-                print(f"[Settings] Error restarting OmniVoice (Vulkan) after GPU change: {e}")
 
         # Handle language change - clear ALL provider caches
         if language_changed:
@@ -1038,6 +990,9 @@ def save_config():
                 pass
             except Exception as e:
                 print(f"[Settings] Error reinitializing memory: {e}")
+
+        # Validate or generate the freeform emote index after any relevant save.
+        ensure_emote_index_async()
 
         # Hot-reload LLM client cache (connection pooling)
         if llm_client_changed:
@@ -1438,107 +1393,6 @@ def get_client_logs():
         return jsonify({"error": str(e), "content": ""}), 500
 
 
-def _get_omnivoice_cpp_gpu_status(settings, requested_device=None):
-    """GPU status for the omnivoice_cpp (ggml/Vulkan) provider.
-
-    Vulkan enumeration has no VRAM telemetry, so the VRAM fields stay None.
-    Includes dll_present/models_present so the UI can show install state.
-    """
-    configured_device = settings.get('tts', {}).get('omnivoice_cpp', {}).get('device', 'auto')
-    server_device = requested_device or configured_device or 'auto'
-
-    result = {
-        "cuda_available": False,
-        "vram_free_gb": None,
-        "vram_total_gb": None,
-        "vram_used_gb": None,
-        "model_loaded": False,
-        "model_on_gpu": False,
-        "server_device": server_device,
-        "selected_device": configured_device or 'auto',
-        "selected_gpu_index": None,
-        "gpu_name": None,
-        "gpus": [],
-        "dll_present": False,
-        "models_present": False,
-    }
-
-    try:
-        from utils.vulkan_gpu_info import detect_vulkan_gpus
-        gpus = detect_vulkan_gpus(log=False)
-        result["gpus"] = [
-            {
-                "index": gpu["index"],
-                "device": gpu["device"],
-                "name": gpu["name"],
-                "device_type": gpu["device_type"],
-                "vram_total_gb": None,
-                "vram_free_gb": None,
-                "vram_used_gb": None,
-            }
-            for gpu in gpus
-        ]
-
-        selected_gpu = next((gpu for gpu in gpus if gpu["device"] == server_device), None)
-        if selected_gpu is None and gpus:
-            selected_gpu = gpus[0]
-        if selected_gpu is not None:
-            result["selected_gpu_index"] = selected_gpu["index"]
-            result["gpu_name"] = selected_gpu["name"]
-    except Exception as e:
-        print(f"[Config] Error enumerating Vulkan GPUs: {e}")
-
-    try:
-        from services import omnivoice_cpp_engine
-        result["dll_present"] = bool(omnivoice_cpp_engine.dll_present())
-        result["models_present"] = bool(omnivoice_cpp_engine.models_present())
-        result["model_loaded"] = bool(omnivoice_cpp_engine.is_loaded())
-        result["model_on_gpu"] = result["model_loaded"]
-    except Exception as e:
-        print(f"[Config] Error reading omnivoice_cpp engine status: {e}")
-
-    return jsonify(result)
-
-
-@config_bp.route('/api/tts/omnivoice-cpp/restart-worker', methods=['POST'])
-def restart_omnivoice_cpp_worker():
-    """Restart the OmniVoice (Vulkan) worker so device changes take effect.
-
-    GGML_BACKEND is read at worker start, so a GPU change requires a full
-    worker restart: unload, clear the cached provider, then warm up again.
-    """
-    try:
-        from services import tts
-        from services import omnivoice_cpp_engine
-    except Exception as e:
-        return jsonify({"status": "error", "error": f"omnivoice_cpp engine unavailable: {e}"}), 500
-
-    try:
-        omnivoice_cpp_engine.unload()
-        tts.clear_provider_cache('omnivoice_cpp')
-        print("[Config] OmniVoice (Vulkan) worker unloaded for manual restart")
-    except Exception as e:
-        print(f"[Config] Error unloading OmniVoice (Vulkan) worker: {e}")
-        return jsonify({"status": "error", "error": str(e)}), 500
-
-    warming_up = False
-    try:
-        if omnivoice_cpp_engine.is_available():
-            import threading
-            def warmup_omnivoice_cpp_after_restart():
-                try:
-                    omnivoice_cpp_engine.warm_up()
-                    print("[Config] OmniVoice (Vulkan) worker restarted")
-                except Exception as e:
-                    print(f"[Config] OmniVoice (Vulkan) warm-up after restart failed: {e}")
-            threading.Thread(target=warmup_omnivoice_cpp_after_restart, daemon=True).start()
-            warming_up = True
-    except Exception as e:
-        print(f"[Config] Error starting OmniVoice (Vulkan) warm-up: {e}")
-
-    return jsonify({"status": "ok", "warming_up": warming_up})
-
-
 @config_bp.route('/api/tts/vram-status', methods=['GET'])
 def get_vram_status():
     """
@@ -1569,8 +1423,6 @@ def get_vram_status():
     settings = load_settings(raw=True)
     provider = settings.get('tts', {}).get('provider', 'inworld')
     requested_device = request.args.get('device')
-    if provider == 'omnivoice_cpp' or request.args.get('provider') == 'omnivoice_cpp':
-        return _get_omnivoice_cpp_gpu_status(settings, requested_device)
     if provider == 'omnivoice':
         configured_device = settings.get('tts', {}).get('omnivoice', {}).get('device', 'auto')
         server_device = requested_device or configured_device or 'auto'
@@ -1696,31 +1548,41 @@ def _count_untokenized_voices() -> int:
     return count
 
 
-def _is_torch_installed() -> bool:
-    """Check if torch is fully installed — not just mid-install.
+def _are_omnivoice_deps_installed() -> bool:
+    """Check if all separately installed OmniVoice dependencies are complete.
 
     find_spec('torch') returns True as soon as pip creates the package
     directory, long before the install completes. We verify a late-written
-    DLL exists to confirm the install actually finished.
+    DLL exists to confirm the install actually finished, then check every
+    additional module installed by install_omnivoice.bat.
     """
-    import importlib.util
     spec = importlib.util.find_spec("torch")
     if spec is None:
         return False
     try:
         torch_dir = os.path.dirname(spec.origin)
-        # torch_cpu.dll is one of the last files written during install
+        # torch_cpu.dll is one of the last files written during install.
         if not os.path.exists(os.path.join(torch_dir, "lib", "torch_cpu.dll")):
             return False
     except Exception:
         return False
-    # The OmniVoice worker also imports these at startup (see omnivoice_engine.py).
-    # torch can finish while these Step-2 packages are still missing (partial
-    # install); report that as "not installed" so the installer repairs it.
-    for _mod in ("safetensors", "transformers", "accelerate"):
-        if importlib.util.find_spec(_mod) is None:
-            return False
-    return True
+
+    required_distributions = (
+        "torch",
+        "torchaudio",
+        "transformers",
+        "accelerate",
+        "safetensors",
+        "soundfile",
+    )
+    try:
+        return all(
+            importlib.util.find_spec(distribution_name) is not None
+            and bool(importlib.metadata.version(distribution_name))
+            for distribution_name in required_distributions
+        )
+    except importlib.metadata.PackageNotFoundError:
+        return False
 
 
 @config_bp.route('/api/tts/omnivoice/status', methods=['GET'])
@@ -1728,7 +1590,7 @@ def get_omnivoice_status():
     """OmniVoice provider status: GPU, deps, model, voices, STT."""
     from utils.gpu_info import get_gpu_info_dict
 
-    deps_installed = _is_torch_installed()
+    deps_installed = _are_omnivoice_deps_installed()
 
     model_loaded = False
     if deps_installed:
@@ -1769,7 +1631,7 @@ def install_omnivoice_deps():
     """Launch OmniVoice dependency installer in a visible console window."""
     from utils.gpu_info import is_cuda_compatible
 
-    if _is_torch_installed():
+    if _are_omnivoice_deps_installed():
         return jsonify({"status": "already_installed"}), 200
 
     if not is_cuda_compatible():
@@ -1798,7 +1660,7 @@ def install_omnivoice_deps():
 @config_bp.route('/api/tts/omnivoice/install-status', methods=['GET'])
 def get_omnivoice_install_status():
     """Check if background OmniVoice install has completed."""
-    deps_installed = _is_torch_installed()
+    deps_installed = _are_omnivoice_deps_installed()
     flag_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", ".omnivoice_deps_installed")
     flag_exists = os.path.exists(flag_path)
     return jsonify({
@@ -1930,7 +1792,7 @@ def _pretokenize_all_voices():
 @config_bp.route('/api/tts/omnivoice/pretokenize', methods=['POST'])
 def pretokenize_omnivoice_voices():
     """Process voice references: transcribe via STT, then tokenize via OmniVoice encoder."""
-    if not _is_torch_installed():
+    if not _are_omnivoice_deps_installed():
         return jsonify({"status": "error", "error": "Dependencies not installed"}), 400
 
     settings = load_settings(raw=True)

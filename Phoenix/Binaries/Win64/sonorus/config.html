@@ -693,27 +693,6 @@
                     </div>
                 </div>
 
-                <!-- OmniVoice (Vulkan) Setup Panel -->
-                <div id="omnivoiceCppSetup" style="display: none;">
-                    <div id="omnivoiceCppRuntimeHint" class="field-group" style="display: none;">
-                        <p class="field-hint" id="omnivoiceCppRuntimeHintText" style="color: var(--warning);"></p>
-                    </div>
-                    <div id="omnivoiceCppGpuPicker" class="field-group">
-                        <label class="field-label">OmniVoice GPU</label>
-                        <p class="field-hint">Choose which Vulkan GPU runs the local voice model. Auto picks the best available device.</p>
-                        <select id="omnivoiceCppGpuSelect" onchange="updateOmniVoiceCppGpu(this.value)"></select>
-                        <p class="field-hint" id="omnivoiceCppRestartNotice" style="display: none; color: var(--warning); margin-top: var(--space-xs);">
-                            The TTS worker restarts to apply the GPU change.
-                        </p>
-                    </div>
-                    <div class="field-group">
-                        <button class="btn btn-primary" id="omnivoiceCppRestartBtn" onclick="restartOmniVoiceCppWorker()">
-                            Restart TTS Worker
-                        </button>
-                        <p class="field-hint" id="omnivoiceCppRestartStatus" style="margin-top: var(--space-xs);"></p>
-                    </div>
-                </div>
-
                 <!-- Player Voice Section (disabled when TTS is disabled) -->
                 <div id="playerVoiceSection">
                     <div class="divider"><i data-lucide="star"></i> Player Voice <i data-lucide="star"></i></div>
@@ -1587,7 +1566,7 @@
                             <span class="toggle-label">Facial Emotes</span>
                             <label class="toggle">
                                 <input type="checkbox" id="conv_emotes_enabled"
-                                    onchange="updateSetting('conversation.emotes_enabled', this.checked)">
+                                    onchange="updateSetting('conversation.emotes_enabled', this.checked); updateFreeformEmoteToggleState()">
                                 <span class="toggle-track">
                                     <span class="toggle-thumb"></span>
                                 </span>
@@ -1598,11 +1577,30 @@
                             tags like [happy], [sad], [angry] that drive facial expressions on the speaking character.
                         </p>
 
+                        <div id="conv_freeform_emote_tags_wrapper"
+                            style="border-left: 2px solid var(--gold-dark); margin-left: var(--space-sm); padding-left: var(--space-md);">
+                            <div class="toggle-wrapper" style="padding-top: 0;">
+                                <span class="toggle-label">Freeform Emote Tags</span>
+                                <label class="toggle">
+                                    <input type="checkbox" id="conv_freeform_emote_tags"
+                                        onchange="updateSetting('conversation.freeform_emote_tags', this.checked)">
+                                    <span class="toggle-track">
+                                        <span class="toggle-thumb"></span>
+                                    </span>
+                                </label>
+                            </div>
+                            <p class="field-hint" style="margin-bottom: var(--space-md);">
+                                Let the AI improvise emotion tags beyond the built-in examples. Known aliases are
+                                matched automatically; enabling Long-Term Memory optionally boosts the match rate
+                                for unsupported tags using embeddings. Requires Facial Emotes.
+                            </p>
+                        </div>
+
                         <div class="toggle-wrapper">
                             <span class="toggle-label">Inline Narration</span>
                             <label class="toggle">
                                 <input type="checkbox" id="conv_narration_enabled"
-                                    onchange="updateSetting('conversation.narration_enabled', this.checked)">
+                                    onchange="updateSetting('conversation.narration_enabled', this.checked); updateNarrationToggleState()">
                                 <span class="toggle-track">
                                     <span class="toggle-thumb"></span>
                                 </span>
@@ -1612,6 +1610,23 @@
                             Allow NPCs to include <em>*narration*</em> alongside "dialogue." Narration is spoken by a
                             separate narrator voice. Off by default. Requires Pocket TTS or Inworld.
                         </p>
+                        <div id="conv_spatial_grounding_wrapper"
+                            style="border-left: 2px solid var(--gold-dark); margin-left: var(--space-sm); padding-left: var(--space-md);">
+                            <div class="toggle-wrapper" style="padding-top: 0;">
+                                <span class="toggle-label">Spatial Grounding</span>
+                                <label class="toggle">
+                                    <input type="checkbox" id="conv_spatial_grounding_enabled"
+                                        onchange="updateSetting('conversation.spatial_grounding_enabled', this.checked)">
+                                    <span class="toggle-track">
+                                        <span class="toggle-thumb"></span>
+                                    </span>
+                                </label>
+                            </div>
+                            <p id="conv_spatial_grounding_hint" class="field-hint"
+                                style="margin-bottom: var(--space-md);">
+                                Keep narrated character locations consistent with current visual context. Requires Inline Narration.
+                            </p>
+                        </div>
                         <p class="field-hint" id="narratorVoiceReferenceHint" style="margin-bottom: var(--space-md);">
                         </p>
                     </div>
@@ -2909,14 +2924,14 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                         <div class="field-group">
                             <label class="field-label">Fact Extraction Model</label>
                             <p class="field-hint">Extracts durable facts from chapter summaries</p>
-                            <input type="text" id="graphitiModel" placeholder="gpt-4.1-nano"
+                            <input type="text" id="graphitiModel" placeholder="google/gemini-3.1-flash-lite"
                                 onchange="updateSetting('memory.graphiti_model', this.value)">
                         </div>
 
                         <div class="field-group">
                             <label class="field-label">Fact Deduplication Model</label>
                             <p class="field-hint">Lightweight model for fact merge and dedup decisions</p>
-                            <input type="text" id="graphitiSmallModel" placeholder="gpt-4.1-nano"
+                            <input type="text" id="graphitiSmallModel" placeholder="google/gemini-3.1-flash-lite"
                                 onchange="updateSetting('memory.graphiti_small_model', this.value)">
                         </div>
 

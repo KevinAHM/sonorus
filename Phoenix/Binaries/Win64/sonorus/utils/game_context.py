@@ -55,6 +55,14 @@ def _format_participant_list(participants):
     return ", ".join(names[:-1]) + f", and {names[-1]}"
 
 
+def _get_current_speaker_name(current_speaker):
+    """Return the prompted character's display name for explicit identity cues."""
+    if not current_speaker:
+        return ""
+    speaker_name = get_display_name(current_speaker)
+    return speaker_name if speaker_name and speaker_name != "Unknown" else str(current_speaker)
+
+
 def _load_teacher_schedules():
     global _schedule_cache
     if _schedule_cache is not None:
@@ -666,6 +674,8 @@ def format_game_context(context, current_speaker=None, participants=None, observ
     player_name = context.get('playerName', 'Unknown')
     player_house = context.get('playerHouse', 'Unknown')
     in_stealth = context.get('inStealth', False)
+    current_speaker_name = _get_current_speaker_name(current_speaker)
+    speaker_subject = f"You, {current_speaker_name}," if current_speaker_name else "You"
 
     settings = load_settings()
     conv_settings = settings.get('conversation', {})
@@ -683,14 +693,14 @@ def format_game_context(context, current_speaker=None, participants=None, observ
         # Participants list contains the other conversation participants
         speaking_with = _format_participant_list(participants)
         if speaking_with:
-            header_parts.append(f"You are currently{location_clause}, in a conversation with {speaking_with}.")
+            header_parts.append(f"{speaker_subject} are currently{location_clause}, in a conversation with {speaking_with}.")
         # No player visibility/status info in observer mode
     else:
         speaking_with = _format_participant_list(participants)
         if speaking_with:
-            header_parts.append(f"You are currently{location_clause}, speaking with {speaking_with}.")
+            header_parts.append(f"{speaker_subject} are currently{location_clause}, speaking with {speaking_with}.")
         elif player_name and player_name != "Unknown":
-            player_desc = f"You are currently{location_clause}, speaking with {player_name}, a {player_house} student"
+            player_desc = f"{speaker_subject} are currently{location_clause}, speaking with {player_name}, a {player_house} student"
             status_parts = []
             if context.get('inCombat'):
                 status_parts.append("currently in combat")
@@ -801,9 +811,12 @@ def format_game_context(context, current_speaker=None, participants=None, observ
     nearby = context.get('nearbyNpcs', [])
     nearby_parts = []
 
-    # In observer mode, don't list player as "speaking with you"
+    if current_speaker_name:
+        nearby_parts.append(f"- {current_speaker_name} (You)")
+
+    # In observer mode, the player is not part of this exchange.
     if player_name and player_name != "Unknown" and not observer_mode:
-        nearby_parts.append(f"- {player_name} (speaking with you)")
+        nearby_parts.append(f"- {player_name} (you are responding to them)")
 
     companion_id = context.get('companionId', '')
     followers = [f.lower() for f in context.get('followers', [])]
@@ -1170,6 +1183,8 @@ def format_dynamic_context(context, current_speaker=None, participants=None,
     player_name = context.get('playerName', 'Unknown')
     player_house = context.get('playerHouse', 'Unknown')
     in_stealth = context.get('inStealth', False)
+    current_speaker_name = _get_current_speaker_name(current_speaker)
+    speaker_subject = f"You, {current_speaker_name}," if current_speaker_name else "You"
 
     settings = load_settings()
 
@@ -1186,13 +1201,13 @@ def format_dynamic_context(context, current_speaker=None, participants=None,
     if observer_mode:
         speaking_with = _format_participant_list(participants)
         if speaking_with:
-            header_parts.append(f"You are currently{location_clause}, in a conversation with {speaking_with}.")
+            header_parts.append(f"{speaker_subject} are currently{location_clause}, in a conversation with {speaking_with}.")
     else:
         speaking_with = _format_participant_list(participants)
         if speaking_with:
-            header_parts.append(f"You are currently{location_clause}, speaking with {speaking_with}.")
+            header_parts.append(f"{speaker_subject} are currently{location_clause}, speaking with {speaking_with}.")
         elif player_name and player_name != "Unknown":
-            player_desc = f"You are currently{location_clause}, speaking with {player_name}, a {player_house} student"
+            player_desc = f"{speaker_subject} are currently{location_clause}, speaking with {player_name}, a {player_house} student"
             status_parts = []
             if context.get('inCombat'):
                 status_parts.append("currently in combat")
@@ -1283,8 +1298,11 @@ def format_dynamic_context(context, current_speaker=None, participants=None,
     nearby = context.get('nearbyNpcs', [])
     nearby_parts = []
 
+    if current_speaker_name:
+        nearby_parts.append(f"- {current_speaker_name} (You)")
+
     if player_name and player_name != "Unknown" and not observer_mode:
-        nearby_parts.append(f"- {player_name} (speaking with you)")
+        nearby_parts.append(f"- {player_name} (you are responding to them)")
 
     companion_id = context.get('companionId', '')
     followers = [f.lower() for f in context.get('followers', [])]

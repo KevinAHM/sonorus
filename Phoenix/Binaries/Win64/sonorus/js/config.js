@@ -36,8 +36,9 @@ const TTS_PROVIDERS = {
         fields: [
             { id: "api_url", type: "text", label: "API URL", placeholder: "https://api.inworld.ai", default: "https://api.inworld.ai", hint: "Base URL for the Inworld API (leave default unless using a proxy)", simple_hide: true },
             { id: "api_key", type: "password", label: "API Key", placeholder: "Base64 encoded key", hint: "Use Basic (Base64) key, not JWT — <strong>\u26a0\ufe0f select \"Write\" access when creating (not \"Read\")</strong>", validate: validateInworldApiKey },
-            { id: "model", type: "text", label: "TTS Model", placeholder: "inworld-tts-1.5-max", default: "inworld-tts-1.5-max", hint: "<strong>inworld-tts-1.5-max</strong> (highest quality, recommended), <strong>inworld-tts-1.5-mini</strong> (cheaper and slightly faster)", onChange: "onInworldModelChange" },
-            { id: "temperature", type: "range", label: "TTS Temperature", hint: "Higher = more expressive but can cause instability/artifacts. Default is tuned for balance. For per-NPC adjustments, use <a href=\"#chapterCharacters\" onclick=\"scrollToSection('chapterCharacters')\">Characters</a>.", min: 0.1, max: 2.0, step: 0.1, default: 1.1, simple_hide: true },
+            { id: "model", type: "text", label: "TTS Model", placeholder: "inworld-tts-2", default: "inworld-tts-2", hint: "<strong>inworld-tts-2</strong>&nbsp; (most expressive, highest quality, recommended), <strong>inworld-tts-1.5-mini</strong>&nbsp; (cheaper)", onChange: "onInworldModelChange" },
+            { id: "temperature", type: "range", label: "TTS Expression", hint: "For Inworld TTS 2: 0.1–0.5 = Stable, 0.6–1.4 = Balanced, and 1.5–2.0 = Creative. Earlier models use this value as temperature. For per-NPC adjustments, use <a href=\"#chapterCharacters\" onclick=\"scrollToSection('chapterCharacters')\">Characters</a>.", min: 0.1, max: 2.0, step: 0.1, default: 1.1, simple_hide: true },
+            { id: "speaking_rate", type: "range", label: "Speaking Rate", hint: "Adjust Inworld speech speed. Use 1.05× to closely match the speaking rate of Inworld TTS 1.5 Max when using TTS 2.", min: 0.9, max: 1.1, step: 0.005, default: 1.0, display_suffix: "×", simple_hide: true },
             {
                 id: "sample_rate", type: "select", label: "Sample Rate", options: [
                     { value: 22050, label: "22050 Hz" },
@@ -46,7 +47,9 @@ const TTS_PROVIDERS = {
                     { value: 48000, label: "48000 Hz" }
                 ], default: 48000, simple_hide: true
             },
-            { id: "localize_audio_tags", type: "toggle", label: "Localize Audio Tags", hint: "Translate [sigh], [laugh] etc. to language-specific equivalents for non-English languages. Disable if tags aren't being spoken correctly.", default: true, simple_hide: true }
+            { id: "localize_audio_tags", type: "toggle", label: "Localize Audio Tags", hint: "Translate [sigh], [laugh] etc. to language-specific equivalents for non-English languages. Disable if tags aren't being spoken correctly.", default: true, simple_hide: true },
+            { id: "emote_passthrough", type: "toggle", label: "Emote Passthrough", hint: "Inworld TTS 2 only. Pass emotion tags such as [angry] and [amused] to TTS for expressive delivery. Turn off to use tags only for facial animation.", default: true, simple_hide: true },
+            { id: "dynamic_delivery", type: "toggle", label: "Dynamic Delivery", hint: "Automatically use Creative delivery for high-energy emotion tags. With Inworld 1.5 models, expressive lines receive a +0.3 temperature boost instead.", default: true, simple_hide: true }
         ]
     },
     elevenlabs: {
@@ -88,16 +91,6 @@ const TTS_PROVIDERS = {
     omnivoice: {
         label: "\ud83d\udcaa OmniVoice (Free, Local)",
         description: "\ud83d\udca1 If voice generation feels slow, try lowering your in-game graphics settings to free up GPU headroom for the TTS model.",
-        fields: [
-            { id: "first_sentence_steps", type: "range", label: "First Sentence Steps", hint: "Fewer steps on the first sentence for faster time-to-first-audio.", min: 8, max: 64, step: 4, default: 24 },
-            { id: "num_steps", type: "range", label: "Default Steps", hint: "More steps = higher quality but slower. 32 is recommended.", min: 8, max: 64, step: 4, default: 32 },
-            { id: "guidance_scale", type: "range", label: "Style Guidance (CFG)", hint: "Controls how closely the model follows its style conditioning. Higher = more expressive but less stable.", min: 0.0, max: 10.0, step: 0.1, default: 2.0 },
-            { id: "apply_smoothing_eq", type: "toggle", label: "Apply Smoothing EQ", default: true }
-        ]
-    },
-    omnivoice_cpp: {
-        label: "OmniVoice (Vulkan)",
-        description: "Local OmniVoice running on ggml/Vulkan. Works on any Vulkan-capable GPU (NVIDIA, AMD, Intel) — no CUDA required.",
         fields: [
             { id: "first_sentence_steps", type: "range", label: "First Sentence Steps", hint: "Fewer steps on the first sentence for faster time-to-first-audio.", min: 8, max: 64, step: 4, default: 24 },
             { id: "num_steps", type: "range", label: "Default Steps", hint: "More steps = higher quality but slower. 32 is recommended.", min: 8, max: 64, step: 4, default: 32 },
@@ -181,9 +174,8 @@ const LLM_PROVIDERS = {
         label: "llama.cpp",
         fields: [
             { id: "api_url", type: "text", label: "API URL", placeholder: "http://127.0.0.1:8080/v1", hint: "Local or remote llama.cpp OpenAI-compatible server URL. /v1 is added automatically if omitted." },
-            { id: "kv_cache_enabled", type: "toggle", label: "Enable Slot KV Cache", hint: "Save and restore llama.cpp slot 0 for cacheable prompts. Slot wiring is applied by the llama.cpp provider.", default: true },
-            { id: "kv_cache_max_entries", type: "range", label: "Max KV Cache Entries", hint: "Number of saved slot snapshots to retain once slot caching is wired.", min: 1, max: 25, step: 1, default: 10 },
-            { id: "kv_cache_slot_save_path", type: "text", label: "Slot Save Path (Optional)", placeholder: "C:\\llama-cache", hint: "For local cleanup only. Must match llama-server --slot-save-path if you want Sonorus to delete evicted .bin files." },
+            { id: "kv_cache_enabled", type: "toggle", label: "Enable Slot KV Cache", hint: "Save and restore llama.cpp slot 0 for cacheable prompts. Requires llama-server to be started with <strong>--slot-save-path</strong>. This is most useful when the server has less than 32 GB of RAM available for KV cache; with sufficient RAM, <strong>--cache-ram 16384</strong> or higher can be used instead.", default: true },
+            { id: "kv_cache_max_entries", type: "range", label: "Max KV Cache Entries", hint: "Number of reusable server-side slot snapshots to retain.", min: 1, max: 25, step: 1, default: 10 },
             llmFeatureGateGroup(true)
         ]
     }
@@ -547,11 +539,15 @@ function renderField(field, category, providerId) {
 
         case 'range':
             const rangeValue = currentValue !== '' ? currentValue : field.default;
+            const rangeDisplay = field.display_suffix ? `${rangeValue}${field.display_suffix}` : rangeValue;
+            const rangeDisplayExpr = field.display_suffix
+                ? `this.value + '${field.display_suffix}'`
+                : 'this.value';
             html += `<div class="range-wrapper">
                         <input type="range" id="${fieldId}"
                                min="${field.min}" max="${field.max}" step="${field.step}" value="${rangeValue}"
-                               oninput="updateRangeValue('${fieldId}', this.value); updateProviderSetting('${category}', '${providerId}', '${field.id}', parseFloat(this.value))">
-                        <span class="range-value" id="${fieldId}Value">${rangeValue}</span>
+                               oninput="updateRangeValue('${fieldId}', ${rangeDisplayExpr}); updateProviderSetting('${category}', '${providerId}', '${field.id}', parseFloat(this.value))">
+                        <span class="range-value" id="${fieldId}Value">${rangeDisplay}</span>
                     </div>`;
             break;
 
@@ -655,7 +651,6 @@ function switchProvider(category, providerId) {
         updateVramMonitoring();
         updateRamMonitoring();
         updateOmniVoicePanel();
-        updateOmniVoiceCppPanel();
     }
 
     refreshSetupStateFromConfig();
@@ -1223,128 +1218,6 @@ async function fetchOmniVoiceResources(modelLoaded) {
     }
 }
 
-// ============================================
-// OmniVoice (Vulkan) Setup & Monitoring
-// ============================================
-let omnivoiceCppStatusInterval = null;
-let _omnivoiceCppSavedDevice = null;
-
-function updateOmniVoiceCppPanel() {
-    const provider = config.tts?.provider;
-    const panel = document.getElementById('omnivoiceCppSetup');
-    if (provider !== 'omnivoice_cpp') {
-        if (panel) panel.style.display = 'none';
-        if (omnivoiceCppStatusInterval) {
-            clearInterval(omnivoiceCppStatusInterval);
-            omnivoiceCppStatusInterval = null;
-        }
-        return;
-    }
-    if (panel) panel.style.display = 'block';
-    fetchOmniVoiceCppStatus();
-    if (!omnivoiceCppStatusInterval) {
-        omnivoiceCppStatusInterval = setInterval(fetchOmniVoiceCppStatus, 5000);
-    }
-}
-
-async function fetchOmniVoiceCppStatus() {
-    try {
-        const resp = await fetch('/api/tts/vram-status?provider=omnivoice_cpp');
-        const data = await resp.json();
-        renderOmniVoiceCppPanel(data);
-    } catch (e) {
-        console.error('[OmniVoiceCpp] Status check failed:', e);
-    }
-}
-
-function renderOmniVoiceCppPanel(data) {
-    const gpus = Array.isArray(data.gpus) ? data.gpus : [];
-    // selected_device reflects the saved settings on the server — use it as
-    // the baseline for the "restart needed" notice.
-    _omnivoiceCppSavedDevice = data.selected_device || 'auto';
-
-    // Runtime install-state hint (installer comes in a later update)
-    const hintGroup = document.getElementById('omnivoiceCppRuntimeHint');
-    const hintText = document.getElementById('omnivoiceCppRuntimeHintText');
-    if (hintGroup && hintText) {
-        const missing = [];
-        if (!data.dll_present) missing.push('the omnivoice.cpp runtime');
-        if (!data.models_present) missing.push('the GGUF voice models');
-        if (missing.length > 0) {
-            hintText.textContent = 'Not installed yet: ' + missing.join(' and ') + '. The installer will be available in a future update.';
-            hintGroup.style.display = 'block';
-        } else {
-            hintGroup.style.display = 'none';
-        }
-    }
-
-    renderOmniVoiceCppGpuPicker(gpus);
-    updateOmniVoiceCppRestartNotice();
-}
-
-function renderOmniVoiceCppGpuPicker(gpus) {
-    const select = document.getElementById('omnivoiceCppGpuSelect');
-    if (!select) return;
-
-    const configured = config.tts?.omnivoice_cpp?.device || 'auto';
-    select.innerHTML = '';
-
-    const autoOpt = document.createElement('option');
-    autoOpt.value = 'auto';
-    autoOpt.textContent = 'Auto (best device)';
-    select.appendChild(autoOpt);
-
-    for (const gpu of gpus) {
-        const opt = document.createElement('option');
-        opt.value = gpu.device;
-        opt.textContent = `GPU ${gpu.index}: ${gpu.name}`;
-        select.appendChild(opt);
-    }
-
-    select.value = gpus.some(g => g.device === configured) ? configured : 'auto';
-}
-
-function updateOmniVoiceCppGpu(device) {
-    if (!device) return;
-    updateProviderSetting('tts', 'omnivoice_cpp', 'device', device);
-    updateOmniVoiceCppRestartNotice();
-}
-
-function updateOmniVoiceCppRestartNotice() {
-    const notice = document.getElementById('omnivoiceCppRestartNotice');
-    if (!notice) return;
-    const current = config.tts?.omnivoice_cpp?.device || 'auto';
-    const changed = _omnivoiceCppSavedDevice !== null && current !== _omnivoiceCppSavedDevice;
-    notice.style.display = changed ? 'block' : 'none';
-}
-
-async function restartOmniVoiceCppWorker() {
-    const btn = document.getElementById('omnivoiceCppRestartBtn');
-    const status = document.getElementById('omnivoiceCppRestartStatus');
-    if (btn) btn.disabled = true;
-    if (status) status.textContent = 'Restarting TTS worker...';
-    try {
-        const resp = await fetch('/api/tts/omnivoice-cpp/restart-worker', { method: 'POST' });
-        const data = await resp.json();
-        if (resp.ok && data.status === 'ok') {
-            if (status) {
-                status.textContent = data.warming_up
-                    ? 'Worker restarting in the background.'
-                    : 'Worker stopped. It will start on the next voice request.';
-            }
-            showToast('TTS worker restarted');
-        } else {
-            if (status) status.textContent = '';
-            showToast(data.error || 'Restart failed', 'error');
-        }
-    } catch (e) {
-        if (status) status.textContent = '';
-        showToast('Restart failed: ' + e.message, 'error');
-    } finally {
-        if (btn) btn.disabled = false;
-    }
-}
-
 function _updateMeter(el, used, total, free, needed, label, isLoaded) {
     const fill = el.querySelector('.vram-fill');
     const value = el.querySelector('.vram-value');
@@ -1481,11 +1354,44 @@ function validateLLMApiKey(value, providerId) {
     return null;
 }
 
-// Gemini chat default - switches to Gemini 3.5 Flash after June 1, 2027
-const GEMINI_3_5_SWITCH_DATE = new Date('2027-06-01');
+// Gemini defaults follow Google's expected preview deprecation dates.
+const GEMINI_3_5_SWITCH_DATE = new Date(2027, 5, 1);
 const GEMINI_3_5_ENABLED = new Date() >= GEMINI_3_5_SWITCH_DATE;
 const GEMINI_CHAT_DEFAULT = GEMINI_3_5_ENABLED ? 'gemini-3.5-flash' : 'gemini-3-flash-preview';
 const GEMINI_CHAT_DEFAULT_OR = GEMINI_3_5_ENABLED ? 'google/gemini-3.5-flash' : 'google/gemini-3-flash-preview';
+
+const GEMINI_2_5_FLASH_LITE_SWITCH_DATE = new Date(2026, 9, 15);
+const GEMINI_3_1_FLASH_LITE_SWITCH_DATE = new Date(2027, 4, 7);
+
+function applyDatedGeminiPresetDefaults(presets) {
+    const replacements = new Map();
+    if (new Date() >= GEMINI_2_5_FLASH_LITE_SWITCH_DATE) {
+        replacements.set('gemini-2.5-flash-lite', 'gemini-3.1-flash-lite');
+        replacements.set('google/gemini-2.5-flash-lite', 'google/gemini-3.1-flash-lite');
+    }
+    if (new Date() >= GEMINI_3_1_FLASH_LITE_SWITCH_DATE) {
+        replacements.set('gemini-3.1-flash-lite', 'gemini-3.5-flash-lite');
+        replacements.set('google/gemini-3.1-flash-lite', 'google/gemini-3.5-flash-lite');
+    }
+
+    for (const providerPresets of Object.values(presets)) {
+        for (const [key, model] of Object.entries(providerPresets)) {
+            if (typeof model !== 'string') continue;
+            const separatorIndex = model.indexOf(':');
+            const baseModel = separatorIndex === -1 ? model : model.slice(0, separatorIndex);
+            const suffix = separatorIndex === -1 ? '' : model.slice(separatorIndex);
+            let currentModel = baseModel;
+            let replacement = replacements.get(currentModel);
+            while (replacement) {
+                currentModel = replacement;
+                replacement = replacements.get(currentModel);
+            }
+            if (currentModel !== baseModel) {
+                providerPresets[key] = `${currentModel}${suffix}`;
+            }
+        }
+    }
+}
 
 // Model presets per provider - loaded from shared JSON file (with fallback)
 let MODEL_PRESETS = null;
@@ -1518,6 +1424,7 @@ async function loadModelPresets() {
         if (MODEL_PRESETS.openrouter) {
             MODEL_PRESETS.openrouter.chat = GEMINI_CHAT_DEFAULT_OR;
         }
+        applyDatedGeminiPresetDefaults(MODEL_PRESETS);
 
         console.log('[ModelPresets] Loaded presets for providers:', Object.keys(MODEL_PRESETS));
         return MODEL_PRESETS;
@@ -1541,6 +1448,8 @@ function getHardcodedProviderRoutePresets() {
             inputCorrection: ['wandb', 'groq', 'deepinfra', 'novita'],
             chapter: ['google-ai-studio', 'google-vertex'],
             prose: ['google-ai-studio', 'google-vertex'],
+            graphiti: ['google-ai-studio', 'google-vertex'],
+            graphitiSmall: ['google-ai-studio', 'google-vertex'],
             reranker: ['wandb', 'groq', 'deepinfra', 'novita'],
             owlSummarize: ['google-ai-studio', 'google-vertex'],
             locationResolver: ['mistral', 'deepinfra']
@@ -1550,7 +1459,7 @@ function getHardcodedProviderRoutePresets() {
 
 function getHardcodedPresets() {
     // Fallback presets if JSON fails to load (must match model_presets.json)
-    return {
+    const presets = {
         gemini: {
             chat: GEMINI_CHAT_DEFAULT,
             vision: 'gemini-2.5-flash-lite',
@@ -1561,8 +1470,8 @@ function getHardcodedPresets() {
             embedding: 'gemini-embedding-2',
             chapter: 'gemini-2.5-flash-lite',
             prose: 'gemini-2.5-flash-lite',
-            graphiti: 'gemini-2.5-flash-lite',
-            graphitiSmall: 'gemini-2.5-flash-lite',
+            graphiti: 'gemini-3.1-flash-lite',
+            graphitiSmall: 'gemini-3.1-flash-lite',
             reranker: 'gemini-2.5-flash-lite',
             locationResolver: 'gemini-2.5-flash-lite'
         },
@@ -1576,8 +1485,8 @@ function getHardcodedPresets() {
             embedding: 'openai/text-embedding-3-small',
             chapter: 'google/gemini-3.1-flash-lite',
             prose: 'google/gemini-3.1-flash-lite',
-            graphiti: 'openai/gpt-4.1-nano',
-            graphitiSmall: 'openai/gpt-4.1-nano',
+            graphiti: 'google/gemini-3.1-flash-lite',
+            graphitiSmall: 'google/gemini-3.1-flash-lite',
             reranker: 'meta-llama/llama-3.1-8b-instruct:nitro',
             locationResolver: 'mistralai/mistral-small-3.2-24b-instruct:nitro'
         },
@@ -1626,6 +1535,8 @@ function getHardcodedPresets() {
             locationResolver: 'local-model'
         }
     };
+    applyDatedGeminiPresetDefaults(presets);
+    return presets;
 }
 
 // Model field mappings: { key: { settingPath, elementId, isAgent } }
@@ -1679,12 +1590,12 @@ function applyProviderRoutePresets(providerId) {
 // Only specified fields will have reasoning enabled by default
 const REASONING_DEFAULTS = {
     gemini: {
-        graphiti: true,          // gemini-2.5-flash-lite
-        graphitiSmall: true      // gemini-2.5-flash-lite
+        graphiti: true,          // gemini-3.1-flash-lite
+        graphitiSmall: true      // gemini-3.1-flash-lite
     },
     openrouter: {
         graphiti: false,         // google/gemini-3.1-flash-lite
-        graphitiSmall: true      // google/gemini-2.5-flash-lite:nitro
+        graphitiSmall: true      // google/gemini-3.1-flash-lite
     },
     openai: {
         graphiti: true,          // gpt-4.1-nano
@@ -2520,7 +2431,6 @@ function isCurrentTtsConfigured() {
         ttsProvider === 'pocket' ||
         ttsProvider === 'neutts' ||
         ttsProvider === 'omnivoice' ||
-        ttsProvider === 'omnivoice_cpp' ||
         (ttsProvider === 'omnivoice_api' && Boolean(config.tts?.omnivoice_api?.api_url)) ||
         Boolean(config.tts?.[ttsProvider]?.api_key)
     );
@@ -2557,6 +2467,7 @@ function getCurrentSetupLlmModelsFromConfig() {
     }
     if (memorySettings.enabled) {
         for (const [key, settingKey] of [
+            ['embedding', 'embedding_model'],
             ['chapter', 'chapter_model'],
             ['prose', 'prose_model'],
             ['graphiti', 'graphiti_model'],
@@ -4098,9 +4009,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Initialize OmniVoice panel if selected
     updateOmniVoicePanel();
 
-    // Initialize OmniVoice (Vulkan) panel if selected
-    updateOmniVoiceCppPanel();
-
     // Initialize reasoning toggles for model inputs (after config loaded)
     if (window.ReasoningToggle) {
         await ReasoningToggle.init(config);
@@ -4679,6 +4587,44 @@ function updateAttentionMeterToggleState() {
     }
 }
 
+function updateNarrationToggleState() {
+    const narrationEnabled = document.getElementById('conv_narration_enabled')?.checked;
+    const spatialToggle = document.getElementById('conv_spatial_grounding_enabled');
+    const spatialWrapper = document.getElementById('conv_spatial_grounding_wrapper');
+    if (!spatialToggle) return;
+
+    const isDisabled = !narrationEnabled;
+    spatialToggle.disabled = isDisabled;
+    if (spatialWrapper) {
+        spatialWrapper.style.opacity = isDisabled ? '0.5' : '1';
+        spatialWrapper.style.pointerEvents = isDisabled ? 'none' : 'auto';
+    }
+
+    // If narration is turned off, uncheck spatial grounding too
+    if (isDisabled && spatialToggle.checked) {
+        spatialToggle.checked = false;
+        updateSetting('conversation.spatial_grounding_enabled', false);
+    }
+}
+
+function updateFreeformEmoteToggleState() {
+    const toggle = document.getElementById('conv_freeform_emote_tags');
+    const wrapper = document.getElementById('conv_freeform_emote_tags_wrapper');
+    if (!toggle) return;
+
+    const emotesEnabled = document.getElementById('conv_emotes_enabled')?.checked === true;
+    toggle.disabled = !emotesEnabled;
+    if (wrapper) {
+        wrapper.style.opacity = emotesEnabled ? '1' : '0.5';
+        wrapper.style.pointerEvents = emotesEnabled ? 'auto' : 'none';
+    }
+
+    if (!emotesEnabled && toggle.checked) {
+        toggle.checked = false;
+        updateSetting('conversation.freeform_emote_tags', false);
+    }
+}
+
 function updateFollowersToggleState() {
     const actionsEnabled = document.getElementById('conv_actions_enabled')?.checked;
     const followersToggle = document.getElementById('conv_followers_enabled');
@@ -5093,7 +5039,7 @@ async function populateForm(cfg) {
     renderProviderSettings('tts', currentTTSProvider);
     // Apply model-dependent field states after render
     if (currentTTSProvider === 'inworld') {
-        onInworldModelChange(cfg.tts?.inworld?.model || 'inworld-tts-1.5-max');
+        onInworldModelChange(cfg.tts?.inworld?.model || 'inworld-tts-2');
     }
     updatePlayerVoiceSectionState(currentTTSProvider);
 
@@ -5266,7 +5212,11 @@ async function populateForm(cfg) {
     updateCommentaryControlsState();
     setCheckbox('conv_companion_move_enabled', cfg.conversation?.companion_move_enabled !== false);
     setCheckbox('conv_emotes_enabled', cfg.conversation?.emotes_enabled !== false);
+    setCheckbox('conv_freeform_emote_tags', cfg.conversation?.freeform_emote_tags !== false);
+    updateFreeformEmoteToggleState();
     setCheckbox('conv_narration_enabled', cfg.conversation?.narration_enabled === true);
+    setCheckbox('conv_spatial_grounding_enabled', cfg.conversation?.spatial_grounding_enabled !== false);
+    updateNarrationToggleState();
     // Companion follow distance (meters)
     const followDist = cfg.conversation?.companion_follow_distance_m ?? 2.0;
     setFieldValue('companion_follow_distance', followDist);

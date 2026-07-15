@@ -78,7 +78,7 @@ if not exist "bin" mkdir bin
 :: Download dependencies if missing
 if not exist "bin\parseltongue.exe" (
     echo Downloading parseltongue...
-    curl.exe -fL --retry 3 --retry-delay 2 -o "bin\parseltongue.zip" "https://github.com/insomnious/parseltongue/releases/download/v0.2.3/parseltongue-0.2.3.zip"
+    powershell -Command "Invoke-WebRequest -Uri 'https://github.com/insomnious/parseltongue/releases/download/v0.2.3/parseltongue-0.2.3.zip' -OutFile 'bin\parseltongue.zip'"
     powershell -Command "Expand-Archive -Path 'bin\parseltongue.zip' -DestinationPath 'bin\parseltongue_temp' -Force"
     move /Y "bin\parseltongue_temp\parseltongue.exe" "bin\parseltongue.exe" >nul
     rmdir /S /Q "bin\parseltongue_temp" 2>nul
@@ -87,17 +87,17 @@ if not exist "bin\parseltongue.exe" (
 
 if not exist "bin\wwiser.pyz" (
     echo Downloading wwiser...
-    curl.exe -fL --retry 3 --retry-delay 2 -o "bin\wwiser.pyz" "https://github.com/bnnm/wwiser/releases/download/v20250928/wwiser.pyz"
+    powershell -Command "Invoke-WebRequest -Uri 'https://github.com/bnnm/wwiser/releases/download/v20250928/wwiser.pyz' -OutFile 'bin\wwiser.pyz'"
 )
 
 if not exist "bin\wwnames.db3" (
     echo Downloading wwnames.db3...
-    curl.exe -fL --retry 3 --retry-delay 2 -o "bin\wwnames.db3" "https://github.com/bnnm/wwiser/releases/download/v20250928/wwnames.db3"
+    powershell -Command "Invoke-WebRequest -Uri 'https://github.com/bnnm/wwiser/releases/download/v20250928/wwnames.db3' -OutFile 'bin\wwnames.db3'"
 )
 
 if not exist "bin\repak.exe" (
     echo Downloading repak...
-    curl.exe -fL --retry 3 --retry-delay 2 -o "bin\repak.zip" "https://github.com/trumank/repak/releases/download/v0.2.3/repak_cli-x86_64-pc-windows-msvc.zip"
+    powershell -Command "Invoke-WebRequest -Uri 'https://github.com/trumank/repak/releases/download/v0.2.3/repak_cli-x86_64-pc-windows-msvc.zip' -OutFile 'bin\repak.zip'"
     powershell -Command "Expand-Archive -Path 'bin\repak.zip' -DestinationPath 'bin\repak_temp' -Force"
     move /Y "bin\repak_temp\repak.exe" "bin\repak.exe" >nul
     rmdir /S /Q "bin\repak_temp" 2>nul
@@ -106,18 +106,18 @@ if not exist "bin\repak.exe" (
 
 if not exist "bin\oo2core_9_win64.dll" (
     echo Downloading oo2core...
-    curl.exe -fL --retry 3 --retry-delay 2 -o "bin\oo2core_9_win64.dll" "https://raw.githubusercontent.com/WorkingRobot/OodleUE/refs/heads/main/Engine/Source/Programs/Shared/EpicGames.Oodle/Sdk/2.9.10/win/redist/oo2core_9_win64.dll"
+    powershell -Command "Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/WorkingRobot/OodleUE/refs/heads/main/Engine/Source/Programs/Shared/EpicGames.Oodle/Sdk/2.9.10/win/redist/oo2core_9_win64.dll' -OutFile 'bin\oo2core_9_win64.dll'"
 )
 
 if not exist "bin\sfw.exe" (
     echo Downloading Socket Firewall...
-    curl.exe -fL --retry 3 --retry-delay 2 -o "bin\sfw.exe" "https://github.com/SocketDev/sfw-free/releases/latest/download/sfw-free-windows-x86_64.exe"
+    powershell -Command "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -Uri 'https://github.com/SocketDev/sfw-free/releases/latest/download/sfw-free-windows-x86_64.exe' -OutFile 'bin\sfw.exe'"
 )
 
 if not exist "bin\vgmstream\vgmstream-cli.exe" (
     echo Downloading vgmstream...
     if not exist "bin\vgmstream" mkdir "bin\vgmstream"
-    curl.exe -fL --retry 3 --retry-delay 2 -o "bin\vgmstream.zip" "https://github.com/vgmstream/vgmstream/releases/download/r2055/vgmstream-win64.zip"
+    powershell -Command "Invoke-WebRequest -Uri 'https://github.com/vgmstream/vgmstream/releases/download/r2055/vgmstream-win64.zip' -OutFile 'bin\vgmstream.zip'"
     powershell -Command "Expand-Archive -Path 'bin\vgmstream.zip' -DestinationPath 'bin\vgmstream' -Force"
     del "bin\vgmstream.zip" 2>nul
 )
@@ -126,7 +126,7 @@ if not exist "bin\vgmstream\vgmstream-cli.exe" (
 "%PYTHON%" -m pip --version >nul 2>&1
 if errorlevel 1 (
     echo Bootstrapping pip...
-    curl.exe -fL --retry 3 --retry-delay 2 -o "get-pip.py" "https://bootstrap.pypa.io/get-pip.py"
+    powershell -Command "Invoke-WebRequest -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile 'get-pip.py'"
     "%PYTHON%" get-pip.py --no-warn-script-location
     if errorlevel 1 (
         echo ERROR: Failed to install pip
@@ -139,7 +139,7 @@ if errorlevel 1 (
 )
 
 :: Check if dependencies are installed
-"%PYTHON%" -c "import sys; import importlib.util; sys.exit(0 if all(importlib.util.find_spec(m) is not None for m in ['kaldi_native_fbank', 'real_ladybug', 'json_repair', 'qdrant_client']) else 1)" >nul 2>&1
+"%PYTHON%" -c "import sys; import importlib.util; sys.exit(0 if all(importlib.util.find_spec(m) is not None for m in ['kaldi_native_fbank', 'real_ladybug', 'json_repair', 'qdrant_client', 'huggingface_hub']) else 1)" >nul 2>&1
 if errorlevel 1 (
     echo Installing Python dependencies...
     bin\sfw.exe "%PYTHON%" -m pip install setuptools wheel --no-warn-script-location -q
@@ -163,12 +163,9 @@ if not exist "python\Lib\site-packages\tkinter" (
 
 :: heartbeat.py exits when server.py creates server.heartbeat, or when we write server.lock.stop
 
-:: Pre-download ONNX models (turn detection)
-if not exist "models\smart-turn-v3.2-cpu.onnx" (
-    echo Downloading turn detection model...
-    if not exist "models" mkdir models
-    "%PYTHON%" -c "from huggingface_hub import hf_hub_download; hf_hub_download('pipecat-ai/smart-turn-v3','smart-turn-v3.2-cpu.onnx', local_dir='models')"
-)
+:: Validate/pre-download ONNX models (turn detection)
+"%PYTHON%" services\turn_detection.py
+if errorlevel 1 echo WARNING: Turn detection model download failed; the server will retry when needed.
 
 if "%DEBUG_MODE%"=="1" set SONORUS_DEBUG=1
 

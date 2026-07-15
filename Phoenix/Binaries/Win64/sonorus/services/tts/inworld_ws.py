@@ -27,6 +27,21 @@ except ImportError:
 WS_ENDPOINT = "wss://api.inworld.ai/tts/v1/voice:streamBidirectional"
 
 
+def apply_generation_controls(config: dict, model_id: str, temperature: float) -> dict:
+    """Apply the generation control supported by the selected Inworld model."""
+    temperature = min(temperature, 2.0)
+    if model_id.startswith("inworld-tts-2"):
+        if temperature <= 0.5:
+            config["deliveryMode"] = "STABLE"
+        elif temperature < 1.5:
+            config["deliveryMode"] = "BALANCED"
+        else:
+            config["deliveryMode"] = "CREATIVE"
+    else:
+        config["temperature"] = temperature
+    return config
+
+
 class InworldWSContext:
     """State for a single TTS context on the WebSocket connection."""
 
@@ -308,7 +323,7 @@ class InworldWebSocket:
         Args:
             text: Text to synthesize
             voice_id: Inworld voice ID
-            model_id: Model ID (e.g. "inworld-tts-1.5-max")
+            model_id: Model ID (e.g. "inworld-tts-2")
             temperature: Sampling temperature
             on_chunk: Callback(pcm_bytes, word_alignment) per audio chunk
             speaker_id: Speaker name for logging
@@ -631,7 +646,13 @@ class InworldWebSocket:
                         idle_start = time.time()
                         continue
                     if time.time() - idle_start >= idle_timeout:
-                        print(f"[InworldWS] Multi-voice idle timeout for {vid}")
+                        ctx = contexts.get(vid)
+                        if ctx and ctx.chunks_received > 0:
+                            print(f"[InworldWS] Multi-voice idle timeout for {vid} "
+                                  f"({received}/{sent} flushes, {ctx.bytes_received} bytes) - assuming drained")
+                            return True
+                        print(f"[InworldWS] Multi-voice idle timeout for {vid} "
+                              f"({received}/{sent} flushes, no audio)")
                         return False
                 else:
                     idle_start = time.time()
@@ -750,7 +771,6 @@ class InworldWebSocket:
                 "maxBufferDelayMs": 0,
                 "timestampType": "WORD",
                 "timestampTransportStrategy": "ASYNC",
-                "temperature": temperature,
                 "applyTextNormalization": "OFF",
                 "audioConfig": {
                     "audioEncoding": "LINEAR16",
@@ -758,6 +778,7 @@ class InworldWebSocket:
                     "speakingRate": speed
                 }
             }
+            apply_generation_controls(config, model_id, temperature)
 
             ctx = InworldWSContext(context_id, voice_id, config)
             self._contexts[context_id] = ctx

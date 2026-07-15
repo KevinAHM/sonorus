@@ -13,6 +13,7 @@ import subprocess
 import threading
 import webbrowser
 import faulthandler
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Ensure script directory is in sys.path for embedded Python
 _script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -115,6 +116,13 @@ from constants import (
 from utils.event_commentary import EventCommentaryOrchestrator
 from utils.game_context import format_static_context, format_dynamic_context
 from utils.dialogue import format_dialogue_as_messages
+from utils.conversation_topics import conversation_topics, load_persisted_topic
+from utils.emote_embeddings import ensure_emote_index_async
+from utils.memory import (
+    filter_memory_enabled_npc_ids,
+    get_contextual_memory,
+    search_relevant_facts,
+)
 from utils.llm_utils import strip_response_metadata, call_llm_messages
 from runtime.streaming_playback import (
     build_live_sentence_stream,
@@ -340,8 +348,9 @@ def _is_tts_activity_active():
 # Global conversation state
 conv_state = ConversationState()
 
-# Global socket server instance
-lua_socket = LuaSocketServer(port=int(os.getenv("SONORUS_SOCKET_PORT", "8420")))
+# Global socket server instance. Port 0 lets Windows choose a currently bindable
+# port; SONORUS_SOCKET_PORT remains available as an explicit troubleshooting override.
+lua_socket = LuaSocketServer(port=int(os.getenv("SONORUS_SOCKET_PORT", "0")))
 
 # Wire up socket with external modules
 if INPUT_CAPTURE_AVAILABLE:
@@ -684,6 +693,9 @@ def _filter_pending_history_entries(log_prefix: str, discard_predicate, discard_
     discarded = 0
     for entry in conv_state.pending_history_entries:
         if discard_predicate(entry):
+            topic_update_id = entry.get("_topic_update_id")
+            if topic_update_id:
+                conversation_topics.discard(topic_update_id)
             discarded += 1
             continue
         retained.append(entry)
@@ -712,6 +724,16 @@ def _commit_pending_history_if_any(log_prefix: str):
     if not conv_state.pending_history_entries:
         return 0, []
     count, committed_entries = conv_state.commit_pending_history()
+    for entry in committed_entries:
+        topic_update_id = entry.get("_topic_update_id")
+        if not topic_update_id:
+            continue
+        if entry.get("_playback_completed", True) and not entry.get("interrupted"):
+            source_ids = entry.get("sourceEntryIds") or []
+            source_entry_id = source_ids[-1] if source_ids else None
+            conversation_topics.mark_committed(topic_update_id, source_entry_id)
+        else:
+            conversation_topics.discard(topic_update_id)
     print(f"{log_prefix} Committed {count} history entries")
     return count, committed_entries
 
@@ -720,6 +742,10 @@ def _discard_pending_history_if_any(log_prefix: str, reason: str) -> int:
     if not conv_state.pending_history_entries:
         return 0
     count = len(conv_state.pending_history_entries)
+    for entry in conv_state.pending_history_entries:
+        topic_update_id = entry.get("_topic_update_id")
+        if topic_update_id:
+            conversation_topics.discard(topic_update_id)
     print(f"{log_prefix} Discarded {count} pending entries ({reason})")
     conv_state.pending_history_entries = []
     return count
@@ -2393,6 +2419,9 @@ def stop_conversation(source: str = "unknown", notify: bool = True):
                     if not trimmed_text:
                         # Nothing was spoken at all - discard the entry entirely
                         discarded = conv_state.pending_history_entries.pop()
+                        topic_update_id = discarded.get("_topic_update_id")
+                        if topic_update_id:
+                            conversation_topics.discard(topic_update_id)
                         print(f"[Server] Discarded unspoken entry: '{discarded.get('text', '')[:60]}...'")
                     else:
                         # Strip any partial action tags (e.g. stray "[" from incomplete "[Action: ...]")
@@ -2418,9 +2447,25 @@ def stop_conversation(source: str = "unknown", notify: bool = True):
                 else:
                     full_playback_entries.append(entry)
             if skipped_entries:
+                for entry in skipped_entries:
+                    topic_update_id = entry.get("_topic_update_id")
+                    if topic_update_id:
+                        conversation_topics.discard(topic_update_id)
                 print(f"[Server] Discarded {len(skipped_entries)} pending full-playback entries on interrupt")
             conv_state.pending_history_entries = full_playback_entries
-            count, _ = conv_state.commit_pending_history()
+            count, committed_entries = conv_state.commit_pending_history()
+            for entry in committed_entries:
+                topic_update_id = entry.get("_topic_update_id")
+                if not topic_update_id:
+                    continue
+                if entry.get("_playback_completed", True) and not entry.get("interrupted"):
+                    source_ids = entry.get("sourceEntryIds") or []
+                    conversation_topics.mark_committed(
+                        topic_update_id,
+                        source_ids[-1] if source_ids else None,
+                    )
+                else:
+                    conversation_topics.discard(topic_update_id)
             print(f"[Server] Committed {count} pending history entries on interrupt")
         except Exception as e:
             print(f"[Server] History commit error: {e}")
@@ -2989,6 +3034,15 @@ def process_chat_request(data, is_continuation=False):
         conv_state.prompt_scenario = parsed.get('scenario', '')
         conv_state.prompt_include_player = parsed.get('include_player', False)
 
+    if is_continuation:
+        conversation_topics.continue_scene(current_epoch)
+    else:
+        initial_topic = "NONE" if mode == "prompt" else load_persisted_topic(speaker_id)
+        conversation_topics.begin_scene(current_epoch, player_name, initial_topic)
+    if mode != "prompt":
+        conversation_topics.append_line(player_name, player_display_text)
+    scene_topic_query = conversation_topics.await_current()
+
     # Get display name from ID
     speaker_name = get_display_name(speaker_id)
     print(f"[Chat] Speaker: {speaker_name} (ID: {speaker_id})")
@@ -3051,9 +3105,6 @@ def process_chat_request(data, is_continuation=False):
     if memory_enabled:
         _profiler.mark("memory_ops start")
         try:
-            from utils.memory import get_contextual_memory, search_relevant_facts
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-
             current_location = game_context.get('locationName', '')
             nearby_npc_names = [
                 npc.get('name') or npc.get('id', '')
@@ -3075,6 +3126,7 @@ def process_chat_request(data, is_continuation=False):
                         npc_name=speaker_name, player_name=player_name,
                         current_game_date=current_game_date,
                         current_game_time=current_game_time,
+                        topic_query=scene_topic_query,
                     )
                 return None
 
@@ -3327,10 +3379,16 @@ def process_chat_request(data, is_continuation=False):
     if memory_search_results:
         final_user_parts.append(memory_search_results)
     if conv_settings.get('narration_enabled', False):
-        final_user_parts.append(
+        narration_reminder = (
             'Remember: the timestamped history lines are context, not an output format. '
             'Follow the current narration format. Do not prefix your response with timestamps, your name, or "(to ...)".'
         )
+        if conv_settings.get('spatial_grounding_enabled', True) and dynamic_ctx and '**What you can see:**' in dynamic_ctx:
+            narration_reminder += (
+                ' When visual context gives a character\'s current location, keep any narration spatially consistent with that '
+                'location. You may invent fitting actions, but do not relocate the character to a different part of the scene.'
+            )
+        final_user_parts.append(narration_reminder)
     else:
         final_user_parts.append(
             'Remember: the timestamped history lines are context, not an output format. '
@@ -3366,6 +3424,7 @@ def process_chat_request(data, is_continuation=False):
 
     game_context = pre_llm_context
     nearby_npcs = refreshed_npcs
+    _streaming_pending_entry = None
 
     # Check if we can use streaming LLM→TTS pipeline
     use_streaming = _can_use_streaming_tts() and speaker_id
@@ -3748,6 +3807,28 @@ def process_chat_request(data, is_continuation=False):
         if terminal_action:
             non_streaming_pending_entry["terminalAction"] = terminal_action
 
+    def schedule_response_topic(topic_history_entry):
+        if (
+            not topic_history_entry
+            or topic_history_entry.get("_topic_update_id")
+            or not settings.get('memory', {}).get('enabled', True)
+        ):
+            return
+        topic_listeners = filter_memory_enabled_npc_ids(
+            [speaker_id] + list(topic_history_entry.get("earshot") or []),
+            settings=settings,
+        )
+        if topic_listeners:
+            topic_update_id = conversation_topics.schedule_reply(
+                speaker_name,
+                topic_history_entry.get("text") or response,
+                topic_listeners,
+            )
+            topic_history_entry["_topic_update_id"] = topic_update_id
+
+    if use_streaming:
+        schedule_response_topic(_streaming_pending_entry)
+
     # Update server state
     state["current_character"] = speaker_id
     state["last_response"] = response
@@ -3811,6 +3892,7 @@ def process_chat_request(data, is_continuation=False):
         )
         if playback_result.get("success"):
             voice_id = playback_result.get("voice_id")
+            schedule_response_topic(non_streaming_pending_entry)
         elif playback_result.get("status"):
             return {
                 "status": playback_result.get("status"),
@@ -3860,6 +3942,7 @@ def process_chat_request(data, is_continuation=False):
                     }
                 if non_streaming_pending_entry:
                     conv_state.add_pending_history(non_streaming_pending_entry)
+                    schedule_response_topic(non_streaming_pending_entry)
                 if player_tts_thread is not None:
                     print(f"[Chat] Waiting for player voice to finish...")
                     player_tts_done.wait(timeout=60.0)
@@ -3874,6 +3957,7 @@ def process_chat_request(data, is_continuation=False):
             except Exception as e:
                 print(f"[Chat] TTS error: {e}")
                 lua_socket.send_notification(f"TTS failed: {e}")
+                _discard_pending_history_if_any("[Chat]", "TTS failure")
                 conv_state.state = "idle"
                 conv_state.queue = []
                 conv_state.turn_count = 0
@@ -3914,6 +3998,7 @@ def interjection_loop_worker(game_context, my_epoch):
         my_epoch: Conversation epoch - if this changes, we're stale and must exit
     """
     print(f"[Interjection] Loop started with pre-buffering (epoch={my_epoch})")
+    settings = load_settings()
     pre_buffer = PreBuffer()
     _stale_logged = [False]  # Track if we've logged staleness (mutable for closure)
     pending_audio_played = [True]  # Main turn's audio is always playing when loop starts
@@ -4078,6 +4163,8 @@ def interjection_loop_worker(game_context, my_epoch):
             speaker_name = get_display_name(speaker_id)
             print(f"[Interjection] {speaker_name} ({speaker_id}) will respond")
 
+            scene_topic_query = conversation_topics.await_current()
+
             # LOCK NPC IMMEDIATELY after decision - don't let them walk away during LLM generation!
             lua_socket.send_lock_npc(speaker_id, target_id)
 
@@ -4094,7 +4181,13 @@ def interjection_loop_worker(game_context, my_epoch):
                 break
 
             # Generate LLM response (pass pending entries for most recent context)
-            response = generate_interjection_response(speaker_id, target_id, full_context, conv_state.pending_history_entries)
+            response = generate_interjection_response(
+                speaker_id,
+                target_id,
+                full_context,
+                conv_state.pending_history_entries,
+                topic_query=scene_topic_query,
+            )
             if not response:
                 break
 
@@ -4152,6 +4245,9 @@ def interjection_loop_worker(game_context, my_epoch):
                 target_id=target_id,
                 streaming_subtitles=sentence_subtitles
             )
+            if not turn_result.get("success"):
+                print(f"[Interjection] play_turn failed for {speaker_id}")
+                break
 
             # Buffer TTS
             pre_buffer.start_buffering(
@@ -4169,6 +4265,18 @@ def interjection_loop_worker(game_context, my_epoch):
                 full_context,
                 nearby_npcs,
             )
+            if settings.get('memory', {}).get('enabled', True):
+                topic_listeners = filter_memory_enabled_npc_ids(
+                    [speaker_id] + list(interjection_pending_entry.get("earshot") or []),
+                    settings=settings,
+                )
+                if topic_listeners:
+                    topic_update_id = conversation_topics.schedule_reply(
+                        speaker_name,
+                        response,
+                        topic_listeners,
+                    )
+                    interjection_pending_entry["_topic_update_id"] = topic_update_id
 
             def buffer_tts():
                 if is_stale("buffer_tts_start") or pre_buffer.abort_flag:
@@ -4312,6 +4420,8 @@ def interjection_loop_worker(game_context, my_epoch):
             else:
                 _discard_pending_history_if_any("[Interjection]", "never played")
 
+        conversation_topics.ensure_current_ready()
+
         # Clear cancellation flag when done
         clear_cancel()
 
@@ -4343,7 +4453,8 @@ def interjection_loop_worker(game_context, my_epoch):
                     lua_socket.send_conversation_finished(speakers)
 
 def generate_unsolicited_response(speaker_id, target_id, game_context, pending_entries=None,
-                                  mode="interjection", topic=None, recent_events=None):
+                                  mode="interjection", topic=None, recent_events=None,
+                                  topic_query=None):
     """Generate an unsolicited NPC response outside the normal player request flow."""
     if mode == "commentary":
         try:
@@ -4428,7 +4539,6 @@ def generate_unsolicited_response(speaker_id, target_id, game_context, pending_e
         if settings.get('memory', {}).get('enabled', True):
             # Inject long-term memory if available (contextual)
             try:
-                from utils.memory import get_contextual_memory
                 current_location = game_context.get('locationName') or game_context.get('zoneLocation') or game_context.get('location', '')
 
                 # For interjections, the "nearby" NPC is whoever they're responding to
@@ -4448,9 +4558,6 @@ def generate_unsolicited_response(speaker_id, target_id, game_context, pending_e
 
                 # Dynamic search: use last dialogue entry as query (what they're reacting to)
                 # Prefer pending entries (most recent), fall back to file history
-                from utils.memory import search_relevant_facts
-                import time as _time
-
                 last_entry_text = ""
                 if pending_entries:
                     # Pending entries are most recent (not yet committed to file)
@@ -4460,7 +4567,7 @@ def generate_unsolicited_response(speaker_id, target_id, game_context, pending_e
 
                 if last_entry_text and last_entry_text.strip():
                     print(f"[Interjection] Searching memories based on: '{last_entry_text[:60]}...'")
-                    search_start = _time.time()
+                    search_start = time.time()
                     relevant_facts = search_relevant_facts(
                         npc_id=speaker_id,
                         query=last_entry_text,
@@ -4468,8 +4575,9 @@ def generate_unsolicited_response(speaker_id, target_id, game_context, pending_e
                         player_name=player_name,
                         current_game_date=current_game_date,
                         current_game_time=current_game_time,
+                        topic_query=topic_query,
                     )
-                    search_elapsed = (_time.time() - search_start) * 1000  # ms
+                    search_elapsed = (time.time() - search_start) * 1000  # ms
 
                     if relevant_facts:
                         facts_block = "### Relevant Memories\n" + "\n".join(f"- {fact}" for fact in relevant_facts)
@@ -4542,7 +4650,8 @@ def generate_unsolicited_response(speaker_id, target_id, game_context, pending_e
         return None
 
 
-def generate_interjection_response(speaker_id, target_id, game_context, pending_entries=None):
+def generate_interjection_response(speaker_id, target_id, game_context, pending_entries=None,
+                                   topic_query=None):
     """Generate a response for an interjecting NPC."""
     return generate_unsolicited_response(
         speaker_id,
@@ -4550,6 +4659,7 @@ def generate_interjection_response(speaker_id, target_id, game_context, pending_
         game_context,
         pending_entries=pending_entries,
         mode="interjection",
+        topic_query=topic_query,
     )
 
 
@@ -5088,7 +5198,7 @@ def main():
     except Exception as e:
         print(f"[Server] Warning: Could not set up log file: {e}")
 
-    port = int(os.getenv("SONORUS_SERVER_PORT", "5400"))
+    port = int(os.getenv("SONORUS_SERVER_PORT", "5000"))
 
     # Initialize runtime databases
     # dialogue_db init deferred to first player handshake via PlayerContext
@@ -5170,11 +5280,8 @@ def main():
             hotkey = input_settings.get('chat_hotkey', 'enter')
 
             def check_game_paused():
-                # Read cached game state (updated by the socket receive thread)
-                # instead of a blocking round-trip. This runs inside the chat
-                # keyboard hook's win32_event_filter, which must return fast; a
-                # blocking request here (fast-travel/loading, socket mid-reconnect)
-                # can stall it past Windows' LowLevelHooksTimeout and cull the hook.
+                # This callback runs inside the low-level Windows keyboard hook.
+                # Use the socket receiver's thread-safe cache; never block here.
                 context = lua_socket.get_game_context()
                 player_loaded = context.get('playerLoaded', False)
                 is_paused = context.get('isGamePaused', False)
@@ -5434,14 +5541,14 @@ def main():
         _overlay_manager = OverlayManager()
 
         _overlay_manager.register('owlpost', BrowserOverlay(
-            url=f"http://localhost:{int(os.getenv('SONORUS_SERVER_PORT', '5400'))}/owlpost/?v=1.2",
+            url=f"http://localhost:{port}/owlpost/?v=1.2",
             title_match="owl post",
             profile_name="owlpost_overlay",
             width_pct=0.5,
             height_pct=0.75,
         ))
         _overlay_manager.register('grimoire', BrowserOverlay(
-            url=f"http://localhost:{int(os.getenv('SONORUS_SERVER_PORT', '5400'))}/?overlay=true&v=1.2",
+            url=f"http://localhost:{port}/?overlay=true&v=1.2",
             title_match="grimoire (overlay)",
             profile_name="grimoire_overlay",
             width_pct=0.5,
@@ -5558,6 +5665,9 @@ def main():
     print(f"[Server] Starting on http://localhost:{port}")
     print(f"[Server] Config page: http://localhost:{port}/")
     print("[Server] Ready!")
+
+    # Validate or generate freeform emote vectors without blocking server startup.
+    ensure_emote_index_async()
 
     # Preload ONNX models in background (VAD + turn detection)
     # This prevents game lag when open mic is first activated

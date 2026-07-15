@@ -776,10 +776,12 @@ def from_manifest(language: str = "EN_US"):
         if language == "EN_US":
             return False, f"Voice manifest not found. Ensure {manifest_file.name} exists in the data folder."
         else:
+            server_port = os.getenv("SONORUS_SERVER_PORT", "5000")
             return False, (
                 f"Voice manifest not found for {language}. "
                 f"You need to build the voice manifest for this language first. "
-                f"Visit the Voice Manager at http://localhost:{os.getenv('SONORUS_SERVER_PORT','5400')}/voice-manager/ to extract and build {manifest_file.name}."
+                f"Visit the Voice Manager at http://localhost:{server_port}/voice-manager/ "
+                f"to extract and build {manifest_file.name}."
             )
 
     with open(manifest_file, 'r', encoding='utf-8') as f:

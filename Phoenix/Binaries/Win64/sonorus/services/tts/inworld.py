@@ -21,7 +21,7 @@ from .base import BaseTTSProvider, VoiceCache
 from .voice_utils import parse_hashed_voice_name
 from .elevenlabs import update_voice_usage, get_lru_voice, remove_voice_usage
 from utils.text_utils import localize_audio_tags
-from .inworld_ws import InworldWebSocket, WS_AVAILABLE, WS_ENDPOINT
+from .inworld_ws import apply_generation_controls, InworldWebSocket, WS_AVAILABLE, WS_ENDPOINT
 
 # Canonical tags that Inworld TTS supports (audio tags produce audible sounds).
 INWORLD_AUDIO_TAGS = {'laugh', 'sigh', 'breathe', 'cough', 'clear_throat', 'yawn'}
@@ -38,13 +38,51 @@ _TAG_NORMALIZE = {
 }
 
 _BRACKET_TAG_RE = re.compile(r'\[([^\]]+)\]')
+HIGH_ENERGY_EMOTE_TAGS = frozenset({
+    'angry', 'beam', 'surprised', 'disgusted', 'afraid',
+    'fearful', 'horrified', 'panicked',
+})
 
 
-def _filter_inworld_tags(text: str) -> str:
+def _has_high_energy_emote(text: str) -> bool:
+    """Return whether text contains an emote that benefits from extra variation."""
+    return any(
+        match.group(1).lower().strip() in HIGH_ENERGY_EMOTE_TAGS
+        for match in _BRACKET_TAG_RE.finditer(text or '')
+    )
+
+
+def _apply_dynamic_delivery(params: dict, text: str) -> dict:
+    """Boost expressive tagged input without mutating the caller's parameters."""
+    if not params.get('dynamic_delivery') or not _has_high_energy_emote(text):
+        return params
+
+    params = params.copy()
+    if params['model_id'].startswith('inworld-tts-2'):
+        params['temperature'] = max(params['temperature'], 1.5)
+    else:
+        params['temperature'] = min(params['temperature'] + 0.3, 2.0)
+    print(f"[Inworld] Dynamic delivery boost for high-energy emote: {params['temperature']:.2f}")
+    return params
+
+
+def _clamp_speaking_rate(value: float) -> float:
+    """Clamp speaking rate to the range accepted by the Inworld API."""
+    return max(0.5, min(float(value), 1.5))
+
+
+def _filter_inworld_tags(text: str, model_id: str, emote_passthrough: bool = True) -> str:
     """Strip unsupported bracket tags, normalize variants to base form.
+
+    Inworld TTS 2 supports the full set of expressive emote tags, so its input
+    is passed through unchanged. The 1.5 series only receives supported audio
+    tags.
 
     [laughs] -> [laugh], [sighing] -> [sigh], [whisper] -> stripped, etc.
     """
+    if model_id.startswith('inworld-tts-2') and emote_passthrough:
+        return text
+
     allowed = INWORLD_AUDIO_TAGS
 
     def _replace(m):
@@ -116,9 +154,11 @@ def _get_inworld_config():
         "api_key": inworld_settings.get('api_key', ""),
         "language": language,
         "sample_rate": int(inworld_settings.get('sample_rate', 48000)),
-        "model": inworld_settings.get('model', 'inworld-tts-1.5-max'),
+        "model": inworld_settings.get('model', 'inworld-tts-2'),
         "temperature": float(inworld_settings.get('temperature', 1.1)),
-        "speed": float(tts_settings.get('speed', 1.0)),
+        "speaking_rate": _clamp_speaking_rate(
+            inworld_settings.get('speaking_rate', tts_settings.get('speed', 1.0))
+        ),
     }
 
 
@@ -799,10 +839,10 @@ class InworldProvider(BaseTTSProvider):
         """Resolve common TTS parameters (model, temperature, speed, language)."""
         config = self.get_config()
         settings = load_settings()
-        default_model = config.get('model', 'inworld-tts-1.5-max')
+        default_model = config.get('model', 'inworld-tts-2')
         model_id = self.resolve_model_override(default_model, speaker_id)
         base_temperature = config.get('temperature', 1.1)
-        speaking_rate = config.get('speed', 1.0)
+        speaking_rate = _clamp_speaking_rate(config.get('speaking_rate', 1.0))
         language = config.get('language', 'EN_US')
 
         # Per-NPC temperature modifier
@@ -815,6 +855,8 @@ class InworldProvider(BaseTTSProvider):
         # Audio tag localization
         inworld_settings = settings.get('tts', {}).get('inworld', {})
         localize_tags = inworld_settings.get('localize_audio_tags', True)
+        emote_passthrough = inworld_settings.get('emote_passthrough', True)
+        dynamic_delivery = inworld_settings.get('dynamic_delivery', True)
 
         temp_info = f"{temperature:.2f}" + (f" (base {base_temperature:.1f} + mod {temp_modifier:+.2f})" if temp_modifier != 0 else "")
         print(f"[Inworld] Model: {model_id}, Temp: {temp_info}, Speed: {speaking_rate}")
@@ -826,14 +868,18 @@ class InworldProvider(BaseTTSProvider):
             'sample_rate': config.get('sample_rate', 48000),
             'language': language,
             'localize_tags': localize_tags,
+            'emote_passthrough': emote_passthrough,
+            'dynamic_delivery': dynamic_delivery,
             'api_url': config.get('api_url', 'https://api.inworld.ai').rstrip('/'),
         }
 
-    def _localize_text(self, text: str, language: str, localize_tags: bool) -> str:
+    def _localize_text(self, text: str, model_id: str, language: str,
+                       localize_tags: bool, emote_passthrough: bool = True) -> str:
         """Filter unsupported tags, then localize audio tags for non-English."""
-        # Strip any bracket tags Inworld doesn't support
-        text = _filter_inworld_tags(text)
-        if localize_tags and not language.startswith('EN'):
+        text = _filter_inworld_tags(text, model_id, emote_passthrough)
+        # TTS 2 steering instructions must remain in English regardless of the
+        # spoken language. Legacy models retain their optional tag localization.
+        if not model_id.startswith('inworld-tts-2') and localize_tags and not language.startswith('EN'):
             original = text
             text = localize_audio_tags(text, language)
             if text != original:
@@ -858,7 +904,11 @@ class InworldProvider(BaseTTSProvider):
         """
         self._record_synthesis_error("")
         params = self._resolve_tts_params(speaker_id)
-        text = self._localize_text(text, params['language'], params['localize_tags'])
+        params = _apply_dynamic_delivery(params, text)
+        text = self._localize_text(
+            text, params['model_id'], params['language'],
+            params['localize_tags'], params['emote_passthrough'],
+        )
 
         # Route through WebSocket if connected (reconnect if disconnected)
         if not self.ws_connected:
@@ -910,6 +960,8 @@ class InworldProvider(BaseTTSProvider):
         if first_item is None:
             return False
         has_multi_voice = isinstance(first_item, tuple)
+        first_text = first_item[0] if has_multi_voice else first_item
+        params = _apply_dynamic_delivery(params, first_text)
 
         import itertools
         # Reconstruct full iterator with the peeked item put back
@@ -921,11 +973,17 @@ class InworldProvider(BaseTTSProvider):
                 if isinstance(item, tuple):
                     text, per_vid = item
                     if text and text.strip():
-                        loc = self._localize_text(text.strip(), params['language'], params['localize_tags'])
+                        loc = self._localize_text(
+                            text.strip(), params['model_id'], params['language'],
+                            params['localize_tags'], params['emote_passthrough'],
+                        )
                         yield (loc, per_vid)
                 else:
                     if item and item.strip():
-                        yield self._localize_text(item.strip(), params['language'], params['localize_tags'])
+                        yield self._localize_text(
+                            item.strip(), params['model_id'], params['language'],
+                            params['localize_tags'], params['emote_passthrough'],
+                        )
 
         # Try to reconnect WebSocket if disconnected
         if not self.ws_connected:
@@ -1064,9 +1122,9 @@ class InworldProvider(BaseTTSProvider):
                 "sampleRateHertz": params['sample_rate'],
                 "speakingRate": params['speaking_rate'],
             },
-            "temperature": params['temperature'],
             "timestampType": "WORD",
         }
+        apply_generation_controls(payload, params['model_id'], params['temperature'])
 
         headers = {
             "Authorization": _get_auth_header(),

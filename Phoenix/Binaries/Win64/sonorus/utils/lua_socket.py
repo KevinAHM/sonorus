@@ -10,7 +10,12 @@ import socket as sock_lib
 import struct
 import threading
 
+from constants import VOICE_NAME_ALIASES
+
 from . import mods
+from . import presence as presence_tracker_module
+from . import presence_validation
+from . import schedule_cache
 from .dialogue_db import (
     _format_game_date,
     _format_game_time,
@@ -27,10 +32,18 @@ from .owl_post_db import (
     get_latest_recorded_game_time_candidates as get_latest_owl_post_game_time_candidates,
     get_latest_recorded_game_minutes as get_latest_owl_post_game_minutes,
 )
-from .text_utils import is_significant_npc
+from .text_utils import INSIGNIFICANT_PREFIXES, get_significant_npc_names, is_significant_npc
 
 
 TIME_SYNC_WARNING_THRESHOLD_MINUTES = 60
+
+# Presence-ledger rollout gates. Keep these aligned with
+# _G.PresenceLedgerPhaseFlags in logic.lua.
+LEDGER_SCHEDULE_DUMP_ENABLED = False
+LEDGER_PRESENCE_WATCHER_ENABLED = False
+
+_SONORUS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DEFAULT_PORT_FILE = os.path.join(_SONORUS_DIR, "lua_socket.port")
 
 
 def _format_game_minutes_for_log(total_minutes: int) -> str:
@@ -96,11 +109,18 @@ def _format_owl_candidate_for_log(candidate: dict) -> str:
 class LuaSocketServer:
     """TCP server for bidirectional Lua communication."""
 
-    def __init__(self, port=8420):
+    def __init__(self, port=0, port_file=None):
+        if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
+            raise ValueError(f"Invalid Lua socket port: {port!r}")
+        self.requested_port = port
         self.port = port
+        self.port_file = os.fspath(port_file or _DEFAULT_PORT_FILE)
         self.server = None
         self.client = None
         self.lock = threading.Lock()
+        self._lifecycle_lock = threading.Lock()
+        self._port_file_lock = threading.Lock()
+        self._server_thread = None
         self.running = False
         self._connection_id = 0  # Incremented on each new client connection
         # Playback state tracking (for interjection loop)
@@ -168,53 +188,143 @@ class LuaSocketServer:
         """Set the callback for lightweight gameplay events."""
         self._game_event_callback = callback
 
+    def _remove_port_file(self, required=False):
+        """Remove discovery artifacts, retrying brief Windows sharing races."""
+        last_error = None
+        with self._port_file_lock:
+            for path in (self.port_file, self.port_file + ".tmp"):
+                for attempt in range(5):
+                    try:
+                        os.remove(path)
+                        last_error = None
+                        break
+                    except FileNotFoundError:
+                        last_error = None
+                        break
+                    except OSError as exc:
+                        last_error = exc
+                        if attempt < 4:
+                            time.sleep(0.02)
+                if last_error is not None:
+                    message = f"Could not remove Lua socket discovery file {path}: {last_error}"
+                    if required:
+                        raise RuntimeError(message) from last_error
+                    print(f"[Socket] Warning: {message}")
+
+    def _publish_port_file(self, required=False):
+        """Atomically publish the live bound port and a freshness timestamp."""
+        last_error = None
+        with self._port_file_lock:
+            if not self.running or not self.port:
+                return False
+
+            payload = json.dumps({
+                "port": self.port,
+                "pid": os.getpid(),
+                "updated_at": int(time.time()),
+            })
+            temp_path = self.port_file + ".tmp"
+            for attempt in range(5):
+                try:
+                    with open(temp_path, "w", encoding="utf-8") as port_file:
+                        port_file.write(payload)
+                        port_file.write("\n")
+                    os.replace(temp_path, self.port_file)
+                    return True
+                except OSError as exc:
+                    last_error = exc
+                    if attempt < 4:
+                        time.sleep(0.02)
+
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+        message = f"Could not publish Lua socket port {self.port}: {last_error}"
+        if required:
+            raise RuntimeError(message) from last_error
+        print(f"[Socket] Warning: {message}")
+        return False
+
     def start(self):
         """Start socket server in background thread."""
-        if self.running:
-            return
-        self.running = True
-        thread = threading.Thread(target=self._server_loop, daemon=True)
-        thread.start()
-        print(f"[Socket] Server starting on port {self.port}")
+        with self._lifecycle_lock:
+            if self.running:
+                return
+
+            self._remove_port_file(required=True)
+            server = sock_lib.socket(sock_lib.AF_INET, sock_lib.SOCK_STREAM)
+            try:
+                # SO_LINGER with timeout 0 prevents a dead process from delaying cleanup.
+                server.setsockopt(sock_lib.SOL_SOCKET, sock_lib.SO_LINGER, struct.pack('ii', 1, 0))
+                server.bind(("127.0.0.1", self.requested_port))
+                server.listen(1)
+                server.settimeout(1.0)
+                self.server = server
+                self.port = server.getsockname()[1]
+                self.running = True
+                self._publish_port_file(required=True)
+            except Exception:
+                self.running = False
+                self.server = None
+                try:
+                    server.close()
+                except OSError:
+                    pass
+                finally:
+                    self._remove_port_file()
+                raise
+
+            self._server_thread = threading.Thread(target=self._server_loop, daemon=True)
+            self._server_thread.start()
+            print(f"[Socket] Server started on port {self.port}")
 
     def _server_loop(self):
         """Accept connections (runs in background thread)."""
-        self.server = sock_lib.socket(sock_lib.AF_INET, sock_lib.SOCK_STREAM)
-        self.server.setsockopt(sock_lib.SOL_SOCKET, sock_lib.SO_REUSEADDR, 1)
-        # SO_LINGER with timeout 0 allows immediate port rebind after crash/restart
-        self.server.setsockopt(sock_lib.SOL_SOCKET, sock_lib.SO_LINGER, struct.pack('ii', 1, 0))
-        self.server.bind(("127.0.0.1", self.port))
-        self.server.listen(1)
-        self.server.settimeout(1.0)  # Check running flag every second
-
-        while self.running:
-            try:
-                client, addr = self.server.accept()
-                with self.lock:
-                    if self.client:
-                        self.client.close()
-                    self.client = client
-                    self.client.settimeout(0.1)  # Non-blocking receives
-                    self._connection_id += 1  # Track new connection for state sync
-                print(f"[Socket] Lua connected from {addr}")
-                # Start receive thread for this client
-                recv_thread = threading.Thread(target=self._receive_loop, daemon=True)
-                recv_thread.start()
-                # Send initial settings and data
-                self.send_tracking_settings()
-                # send_significant_npcs and resync_active_commitments deferred
-                # until player_handshake (they require per-player DBs)
-                # Wire up VR tracker to push offsets to Lua
+        try:
+            while self.running:
+                self._publish_port_file()
                 try:
-                    from vr import set_vr_lua_socket
-                    set_vr_lua_socket(self)
-                except Exception:
-                    pass
-            except sock_lib.timeout:
-                continue
-            except Exception as e:
-                if self.running:
-                    print(f"[Socket] Accept error: {e}")
+                    client, addr = self.server.accept()
+                    try:
+                        client.settimeout(0.1)  # Non-blocking receives
+                    except Exception:
+                        try:
+                            client.close()
+                        except OSError:
+                            pass
+                        raise
+                    with self.lock:
+                        if self.client:
+                            try:
+                                self.client.close()
+                            except OSError:
+                                pass
+                        self.client = client
+                        self._connection_id += 1  # Track new connection for state sync
+                    print(f"[Socket] Lua connected from {addr}")
+                    # Start receive thread for this client
+                    recv_thread = threading.Thread(target=self._receive_loop, daemon=True)
+                    recv_thread.start()
+                    # Send initial settings and data
+                    self.send_tracking_settings()
+                    # send_significant_npcs and resync_active_commitments deferred
+                    # until player_handshake (they require per-player DBs)
+                    # Wire up VR tracker to push offsets to Lua
+                    try:
+                        from vr import set_vr_lua_socket
+                        set_vr_lua_socket(self)
+                    except Exception:
+                        pass
+                except sock_lib.timeout:
+                    continue
+                except Exception as e:
+                    if self.running:
+                        print(f"[Socket] Accept error: {e}")
+        finally:
+            self.running = False
+            self._remove_port_file()
 
     def send(self, data: dict):
         """Send JSON message to Lua (thread-safe)."""
@@ -227,6 +337,10 @@ class LuaSocketServer:
                 return True
             except Exception as e:
                 print(f"[Socket] Send failed: {e}")
+                try:
+                    self.client.close()
+                except OSError:
+                    pass
                 self.client = None
                 return False
 
@@ -317,11 +431,15 @@ class LuaSocketServer:
         Also sends the ambient dialogue blocklist.
         """
         try:
-            from .text_utils import get_significant_npc_names, INSIGNIFICANT_PREFIXES
             voice_names, display_names = get_significant_npc_names()
+            scheduler_voice_names = [
+                name for name in voice_names if name not in VOICE_NAME_ALIASES
+            ]
             self.send({
                 "type": "sync_significant_npcs",
                 "voice_names": voice_names,
+                "scheduler_voice_names": scheduler_voice_names,
+                "voice_aliases": dict(VOICE_NAME_ALIASES),
                 "display_names": display_names,
                 "insignificant_prefixes": list(INSIGNIFICANT_PREFIXES),
             })
@@ -809,13 +927,11 @@ class LuaSocketServer:
                 self._pending_time_sync_check = True
                 self.send({"type": "player_ready"})
                 self._send_deferred_connect_data()
-                # Loading screen just finished (fast-travel/zone change) - rebuild
-                # the chat keyboard hook, which Windows may have culled under load.
                 if self._input_capture:
                     try:
                         self._input_capture.restart_capture()
                     except Exception as e:
-                        print(f"[LuaSocket] Chat listener restart failed: {e}")
+                        print(f"[LuaSocket] Input capture restart failed: {e}")
             else:
                 print("[LuaSocket] Empty player_handshake, ignoring")
                 self._pending_time_sync_check = False
@@ -906,6 +1022,11 @@ class LuaSocketServer:
         elif msg_type == "shutdown":
             # Lua requested server shutdown
             print("[Socket] Shutdown requested from Lua")
+            if LEDGER_PRESENCE_WATCHER_ENABLED:
+                try:
+                    presence_tracker_module.get_tracker().shutdown()
+                except Exception as e:
+                    print(f"[LuaSocket] presence shutdown flush failed: {e}")
             # Cleanup audio if available
             try:
                 from audio import shutdown as audio_shutdown
@@ -1096,6 +1217,32 @@ class LuaSocketServer:
                 print(f"[Socket] Commitment {action} OK: {npc_id}")
             else:
                 print(f"[Socket] Commitment {action} FAILED: {npc_id} - {error}")
+
+        elif msg_type == "presence_validation_sample":
+            try:
+                self.send(presence_validation.handle_sample(msg))
+            except Exception as e:
+                print(f"[LuaSocket] presence validation failed: {e}")
+                self.send({
+                    "type": "presence_validation_result",
+                    "hint": "Presence validation failed; check server log",
+                })
+
+        elif msg_type == "schedule_dump":
+            if not LEDGER_SCHEDULE_DUMP_ENABLED:
+                return
+            try:
+                schedule_cache.ingest_chunk(msg)
+            except Exception as e:
+                print(f"[LuaSocket] schedule_dump ingest failed: {e}")
+
+        elif msg_type == "presence_update":
+            if not LEDGER_PRESENCE_WATCHER_ENABLED:
+                return
+            try:
+                presence_tracker_module.get_tracker().handle_update(msg)
+            except Exception as e:
+                print(f"[LuaSocket] presence_update failed: {e}")
 
         elif msg_type == "register_commitment_spot":
             display_name = msg.get("location", "")
@@ -1498,9 +1645,23 @@ class LuaSocketServer:
 
     def stop(self):
         """Shutdown server."""
-        self.running = False
-        with self.lock:
-            if self.client:
-                self.client.close()
-        if self.server:
-            self.server.close()
+        with self._lifecycle_lock:
+            self.running = False
+            with self.lock:
+                if self.client:
+                    try:
+                        self.client.close()
+                    except OSError:
+                        pass
+                    self.client = None
+            if self.server:
+                try:
+                    self.server.close()
+                except OSError:
+                    pass
+                self.server = None
+            server_thread = self._server_thread
+            if server_thread is not None and threading.current_thread() is not server_thread:
+                server_thread.join(timeout=1.5)
+            self._server_thread = None
+            self._remove_port_file()

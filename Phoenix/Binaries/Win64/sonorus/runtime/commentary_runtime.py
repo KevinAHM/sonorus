@@ -30,12 +30,19 @@ from utils.game_context import format_static_context, format_dynamic_context
 from utils.llm_utils import call_llm_messages, strip_response_metadata
 
 
-def _format_history_output_reminder() -> str:
-    if load_settings().get("conversation", {}).get("narration_enabled", False):
-        return (
+def _format_history_output_reminder(*, has_vision_context: bool = False) -> str:
+    conversation = load_settings().get("conversation", {})
+    if conversation.get("narration_enabled", False):
+        reminder = (
             'Remember: the timestamped history lines are context, not an output format. '
             'Follow the current narration format. Do not prefix your response with timestamps, your name, or "(to ...)".'
         )
+        if conversation.get("spatial_grounding_enabled", True) and has_vision_context:
+            reminder += (
+                ' When visual context gives a character\'s current location, keep any narration spatially consistent with that '
+                'location. You may invent fitting actions, but do not relocate the character to a different part of the scene.'
+            )
+        return reminder
     return (
         'Remember: the timestamped history lines are context, not an output format. '
         'Respond with dialogue only. Do not prefix your response with timestamps, your name, or "(to ...)".'
@@ -164,7 +171,9 @@ def build_commentary_request(
         final_user_parts.append(dynamic_ctx)
     if memory_search_results:
         final_user_parts.append(memory_search_results)
-    final_user_parts.append(_format_history_output_reminder())
+    final_user_parts.append(_format_history_output_reminder(
+        has_vision_context=bool(dynamic_ctx and "**What you can see:**" in dynamic_ctx)
+    ))
     final_user_message = "\n\n".join(final_user_parts)
 
     # Assemble three-layer messages array
@@ -649,7 +658,9 @@ def build_attention_request(
     if dynamic_ctx:
         final_user_parts.append("---")
         final_user_parts.append(dynamic_ctx)
-    final_user_parts.append(_format_history_output_reminder())
+    final_user_parts.append(_format_history_output_reminder(
+        has_vision_context=bool(dynamic_ctx and "**What you can see:**" in dynamic_ctx)
+    ))
     final_user_message = "\n\n".join(final_user_parts)
 
     # Assemble three-layer messages array

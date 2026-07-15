@@ -947,7 +947,6 @@ def _get_llamacpp_slot_cache(settings: Dict[str, Any] = None):
         api_key,
         bool(llama_settings.get('kv_cache_enabled', True)),
         int(llama_settings.get('kv_cache_max_entries', 10) or 10),
-        llama_settings.get('kv_cache_slot_save_path', '') or '',
     )
     if _llamacpp_slot_cache is None or _llamacpp_slot_cache_key != cache_key:
         from utils.llamacpp_slot_cache import LlamaCppSlotCache
@@ -956,7 +955,6 @@ def _get_llamacpp_slot_cache(settings: Dict[str, Any] = None):
             api_key=api_key,
             enabled=llama_settings.get('kv_cache_enabled', True),
             max_entries=llama_settings.get('kv_cache_max_entries', 10),
-            slot_save_path=llama_settings.get('kv_cache_slot_save_path') or None,
         )
         _llamacpp_slot_cache_key = cache_key
     return _llamacpp_slot_cache

@@ -9,6 +9,20 @@ print("[Sonorus] logic.lua starting...")
 -- the module only reloads code, not cached data
 -- NOTE: package.loaded clearing alone is NOT sufficient - UE4SS caches file
 -- contents at a lower level. Modules that need reliable hot reload use dofile().
+if _G.PresenceWatcher and _G.PresenceWatcher.Stop then
+    pcall(_G.PresenceWatcher.Stop)
+end
+if _G.ScheduleDump and _G.ScheduleDump.Stop then
+    pcall(_G.ScheduleDump.Stop)
+end
+
+-- Presence ledger rollout gates. Both experimental runtime phases remain
+-- dormant in production; enable deliberately for a new collection pass.
+_G.PresenceLedgerPhaseFlags = {
+    scheduleDump = false,
+    presenceWatcher = false,
+}
+
 package.loaded["Utils.Utils"] = nil
 package.loaded["Utils.Cache"] = nil
 package.loaded["Utils.Events"] = nil
@@ -25,6 +39,8 @@ package.loaded["Utils.TimeDilation"] = nil
 package.loaded["Utils.FirstPerson"] = nil
 package.loaded["Utils.PathNav"] = nil
 package.loaded["Utils.TickScheduler"] = nil
+package.loaded["Utils.ScheduleDump"] = nil
+package.loaded["Utils.PresenceWatcher"] = nil
 
 -- Lipsync enabled (was disabled for lag diagnosis)
 _G.DisableLipsync = false
@@ -52,6 +68,12 @@ local Cache = require "Utils.Cache"
 
 -- Shared main-loop scheduler (single UE4SS timer for recurring Lua tasks)
 local TickScheduler = require "Utils.TickScheduler"
+
+-- Presence ledger phase 1 helpers
+local ScheduleDump = require "Utils.ScheduleDump"
+_G.ScheduleDump = ScheduleDump
+local PresenceWatcher = require "Utils.PresenceWatcher"
+_G.PresenceWatcher = PresenceWatcher
 
 -- Utils module
 local Utils = require "Utils.Utils"
@@ -2567,6 +2589,31 @@ end
 
 -- Export globally
 _G.IsSignificantNPC = IsSignificantNPC
+
+if _G.PresenceLedgerPhaseFlags.presenceWatcher then
+    PresenceWatcher.Init({
+        getCachedNPCs = GetCachedNPCs,
+        getStaticData = GetStaticCache,
+        getVoiceId = Utils.GetActorVoiceId,
+        isSignificant = IsSignificantNPC,
+        safeIsValid = SafeIsValid,
+        getGameDateTime = function()
+            local gt = GetTimeOfDay()
+            return {
+                gameDate = gt.dateShort or gt.dateFormatted,
+                gameTime = gt.formatted,
+            }
+        end,
+        send = function(tbl)
+            if _G.SocketClient and _G.SocketClient.send then
+                _G.SocketClient.send(tbl)
+            end
+        end,
+    })
+else
+    PresenceWatcher.Stop()
+    print("[PresenceWatcher] disabled by phase gate\n")
+end
 
 -- ============================================
 -- Get Nearby NPCs (single iteration, returns list + looked-at)

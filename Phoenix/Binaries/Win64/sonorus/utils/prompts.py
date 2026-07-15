@@ -6,6 +6,7 @@ Handles prompt template substitution and character configuration.
 from .settings import load_settings, DEFAULT_SETTINGS, get_setting
 from .localization import get_display_name
 from .character_bios import build_prompt_bio_sections
+from .emote_embeddings import is_freeform_emotes_enabled
 from constants import EMOTE_TAGS_PROMPT
 
 # Language code to display name mapping for AI response instruction
@@ -34,6 +35,7 @@ NARRATION_FORMAT_WITH_VOCAL_TAGS = (
     'Rules:\n'
     '- Spoken words go in double quotes\n'
     '- Actions, thoughts, or scene descriptions go in *asterisks* — always use third person ("He smirked" not "I smirked")\n'
+    '- Keep narration centered on the character you are playing. Do not write spoken dialogue, quoted lines, emotion tags, or independent actions for other characters.\n'
     "- A single *word* or short emphasis phrase can be emphasis: \"I *really* don't think so.\"\n"
     '- Narration/stage direction in *asterisks* should usually be at least 3 words or include punctuation.\n'
     "- Do NOT use double quotes for emphasis or irony around individual words — use *asterisks* instead\n"
@@ -53,6 +55,7 @@ NARRATION_FORMAT_NO_VOCAL_TAGS = (
     'Rules:\n'
     '- Spoken words go in double quotes\n'
     '- Actions, thoughts, or scene descriptions go in *asterisks* — always use third person ("He smirked" not "I smirked")\n'
+    '- Keep narration centered on the character you are playing. Do not write spoken dialogue, quoted lines, emotion tags, or independent actions for other characters.\n'
     "- A single *word* or short emphasis phrase can be emphasis: \"I *really* don't think so.\"\n"
     '- Narration/stage direction in *asterisks* should usually be at least 3 words or include punctuation.\n'
     "- Do NOT use double quotes for emphasis or irony around individual words — use *asterisks* instead\n"
@@ -154,11 +157,22 @@ def get_speech_rules(*, narration_enabled_override=None):
         )
 
     # Facial emote tags: global setting, all providers
-    # Tags are stripped before TTS by each provider's filter; they drive facial animation only
+    # Facial parsing is provider-independent; providers decide whether tags also reach TTS.
     if get_setting('conversation.emotes_enabled', False):
+        freeform_emotes = is_freeform_emotes_enabled(load_settings())
+        if freeform_emotes:
+            emotion_instruction = (
+                f'examples only (not a comprehensive list): {EMOTE_TAGS_PROMPT}. '
+                'Choose or improvise the single best-fitting concise English emotion-state '
+                'tag for the sentence. Use the base emotion or state label, such as [happy], '
+                '[angry], or [wistful], not a manner-of-speaking adverb or vocal direction '
+                'such as [happily], [angrily], [softly], [whispering], or [shouting]'
+            )
+        else:
+            emotion_instruction = EMOTE_TAGS_PROMPT
         if narration_enabled:
             rules += (
-                f'\n**Emotion** (optional, at start of a quoted spoken line, skip if does not match the emotion of the sentence): {EMOTE_TAGS_PROMPT}'
+                f'\n**Emotion** (optional, at start of a quoted spoken line, skip if does not match the emotion of the sentence): {emotion_instruction}'
                 '\nPlace the emotion tag inside the opening quote, before the first word. Can combine with a sound tag. Examples:'
                 '\n"[happy] That\'s wonderful news!" *She clapped her hands.*'
                 '\n"[content] This is nice. I could stay here awhile."'
@@ -179,7 +193,7 @@ def get_speech_rules(*, narration_enabled_override=None):
                 '\nNever place an emotion tag outside quotes or in narration.'
             )
         else:
-            rules += f'\n**Emotion** (optional, at sentence start, skip if does not match the emotion of the sentence): {EMOTE_TAGS_PROMPT}'
+            rules += f'\n**Emotion** (optional, at sentence start, skip if does not match the emotion of the sentence): {emotion_instruction}'
 
     if stt_enabled:
         rules += '\n\n{player} may be using voice input, so interpret the intent behind their words rather than reacting to odd phrasing or apparent misspellings. e.g. "Hogs meet" likely means "Hogsmeade".'

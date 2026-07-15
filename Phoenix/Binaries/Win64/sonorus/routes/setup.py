@@ -201,10 +201,12 @@ def _run_setup_command(command, args=None):
                     raise FileNotFoundError(f"Voice manifest not found. Ensure {manifest_name} exists in the data folder.")
                 else:
                     # For non-English dubbed languages, suggest using voice manager
+                    server_port = os.getenv("SONORUS_SERVER_PORT", "5000")
                     raise FileNotFoundError(
                         f"Voice manifest not found for {voice_language}. "
                         f"You need to build the voice manifest for this language first. "
-                        f"Visit the Voice Manager at http://localhost:{os.getenv('SONORUS_SERVER_PORT','5400')}/voice-manager/ to extract and build {manifest_name}."
+                        f"Visit the Voice Manager at http://localhost:{server_port}/voice-manager/ "
+                        f"to extract and build {manifest_name}."
                     )
 
             # Extract using voice language (undubbed languages extract EN_US audio)

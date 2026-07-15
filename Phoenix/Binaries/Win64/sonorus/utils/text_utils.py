@@ -9,8 +9,9 @@ from constants import (
     STEALTH_EARSHOT_DISTANCE,
     FOLLOWING_COMPANION_EARSHOT_DISTANCE,
     BROOM_EARSHOT_DISTANCE,
+    VOICE_NAME_ALIASES,
 )
-from services.tts.voice_utils import has_voice_reference, get_game_language
+from services.tts.voice_utils import get_game_language, get_voice_reference_names, has_voice_reference
 
 
 def split_into_sentences(text):
@@ -310,21 +311,25 @@ def get_significant_npc_names() -> tuple:
         - voice_names: List like ["SebastianSallow", "NatsaiOnai", ...]
         - display_names: List like ["Sebastian Sallow", "Natsai Onai", ...]
     """
-    from services.tts.voice_utils import get_voice_reference_names
-    from constants import VOICE_NAME_ALIASES
     # Get voice references for current game language
     language = get_game_language()
-    voice_names = list(get_voice_reference_names(language))
-    display_names = [voice_name_to_display_name(v) for v in voice_names]
+    canonical_by_key = {}
+    for voice_name in get_voice_reference_names(language):
+        key = voice_name.casefold()
+        current = canonical_by_key.get(key)
+        if current is None or (current == current.lower() and voice_name != voice_name.lower()):
+            canonical_by_key[key] = voice_name
 
     # Add aliased names (e.g., HOG_Sanctum_Guardian1 -> Guardian1)
     # so Lua knows these game IDs are significant too
     for alias, ref_name in VOICE_NAME_ALIASES.items():
-        if ref_name.lower() in {v.lower() for v in voice_names}:
-            voice_names.append(alias)
-            display_names.append(voice_name_to_display_name(alias))
+        if ref_name.casefold() in canonical_by_key:
+            canonical_by_key.setdefault(alias.casefold(), alias)
 
-    voice_names = [v.lower() for v in voice_names]
+    # Preserve canonical casing for APIs such as GetScheduledEntityFromName.
+    # Lua builds its separate case-insensitive filter set when this is synced.
+    voice_names = sorted(canonical_by_key.values(), key=str.casefold)
+    display_names = [voice_name_to_display_name(v) for v in voice_names]
     return voice_names, display_names
 
 

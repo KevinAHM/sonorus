@@ -24,7 +24,7 @@ end
 local SocketClient = {}
 local client = nil
 local buffer = ""
-local SERVER_PORT = 8420
+local SERVER_PORT = 8173
 
 -- Send queue to prevent interleaving (Lua callbacks can interleave)
 local sendQueue = {}
@@ -597,6 +597,15 @@ function SocketClient.handleMessage(data)
         print("[SocketClient] Received player_ready\n")
         if OnPlayerReady then
             OnPlayerReady()
+        end
+        local ledgerFlags = _G.PresenceLedgerPhaseFlags or {}
+        if ledgerFlags.scheduleDump == true
+                and _G.ScheduleDump and _G.ScheduleDump.OnPlayerReady then
+            _G.ScheduleDump.OnPlayerReady()
+        end
+        if ledgerFlags.presenceWatcher == true
+                and _G.PresenceWatcher and _G.PresenceWatcher.OnPlayerReady then
+            _G.PresenceWatcher.OnPlayerReady()
         end
         return
     end
