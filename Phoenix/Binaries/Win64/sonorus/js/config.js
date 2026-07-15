@@ -2520,6 +2520,7 @@ function isCurrentTtsConfigured() {
         ttsProvider === 'pocket' ||
         ttsProvider === 'neutts' ||
         ttsProvider === 'omnivoice' ||
+        ttsProvider === 'omnivoice_cpp' ||
         (ttsProvider === 'omnivoice_api' && Boolean(config.tts?.omnivoice_api?.api_url)) ||
         Boolean(config.tts?.[ttsProvider]?.api_key)
     );
