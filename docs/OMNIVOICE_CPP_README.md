@@ -188,6 +188,12 @@ This is why the DLLs should be rebuilt and committed deliberately and the 1.30 G
 must remain outside LFS. GitHub Free/Pro's 2 GB per-file limit also easily accommodates
 the largest DLL; see [GitHub's LFS file-size limits](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-git-large-file-storage).
 
+Release archives must contain the hydrated LFS objects, not Git's small pointer files.
+Enable GitHub's **Include Git LFS objects in archives** repository setting, or build the
+release zip from a checkout after `git lfs pull`. The runtime and installer reject pointer
+or truncated DLLs through minimum-size and `MZ` PE-signature checks, but such an archive
+would still be unusable until repackaged correctly.
+
 ---
 
 ## 5. Model, voice, and status API

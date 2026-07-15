@@ -192,6 +192,10 @@ and [plan allowance table](https://docs.github.com/en/billing/reference/product-
 Each changed DLL revision adds the full new object to storage, so native rebuild commits
 should be deliberate.
 
+For releases, enable GitHub's **Include Git LFS objects in archives** setting or create the
+zip from a checkout after `git lfs pull`. Otherwise an archive can contain LFS pointer
+files instead of runnable DLLs; the runtime validation rejects those pointers by design.
+
 ---
 
 ## 6. Endpoint and setup contract
