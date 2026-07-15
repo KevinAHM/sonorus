@@ -300,4 +300,20 @@ Tasks:
 
 ## 6. Acceptance criteria (end to end)
 
-- TTS provider `omniv
+- TTS provider `omnivoice_cpp` is selectable in the config UI.
+- NPC replies synthesize on the **AMD GPU**; the NVIDIA's VRAM/utilisation stays free for the
+  game (verify with an overlay while playing).
+- Voice-cloned NPC voices match the existing OmniVoice references.
+- Lipsync stays in sync; interruptions/epochs behave; conversation latency is acceptable.
+- Survives fast travel / long sessions (no regression to the input-hook or Pocket-serialization
+  fixes already in the codebase).
+
+## 7. Fallbacks if Phase 0/1 fail
+
+- **Vulkan build/perf unworkable:** try the ROCm/HIP build **only if** the AMD card + Windows
+  HIP SDK support it (spotty — Vulkan is the safer bet on Windows).
+- **Native ctypes integration too costly:** run omnivoice.cpp's `omnivoice-tts.exe` as a
+  **persistent subprocess** — feed text on stdin, stream WAV on stdout
+  (`-o - --stream-by-line`) — instead of the shared-lib + ctypes path. Slower and looser, but
+  it avoids the DLL build and the ctypes struct work. Keep this as plan B, not plan A.
+- **Neither pans out:** stay on Pocket (CPU) — already working and low-VRAM.
