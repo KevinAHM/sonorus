@@ -48,6 +48,14 @@ RUNTIME_DLL_FILENAMES = (
     "ggml-cpu.dll",
     "ggml-vulkan.dll",
 )
+_RUNTIME_MIN_BYTES = {
+    "omnivoice.dll": 64 * 1024,
+    "libomnivoice.dll": 64 * 1024,
+    "ggml.dll": 16 * 1024,
+    "ggml-base.dll": 64 * 1024,
+    "ggml-cpu.dll": 128 * 1024,
+    "ggml-vulkan.dll": 1024 * 1024,
+}
 
 
 def _serialized_worker_io(func):
@@ -61,11 +69,23 @@ def _serialized_worker_io(func):
 # Availability checks (main process — lightweight, no DLL load)
 # ============================================================================
 
+def _is_valid_runtime_dll(path: Path) -> bool:
+    """Reject missing, truncated, or unexpanded Git LFS pointer files."""
+    try:
+        minimum_size = _RUNTIME_MIN_BYTES.get(path.name, 16 * 1024)
+        if not path.is_file() or path.stat().st_size < minimum_size:
+            return False
+        with path.open("rb") as dll_file:
+            return dll_file.read(2) == b"MZ"
+    except OSError:
+        return False
+
+
 def _find_dll() -> Optional[Path]:
     """Locate the omnivoice DLL in BIN_DIR (either MSVC or MinGW naming)."""
     for name in _DLL_NAMES:
         candidate = BIN_DIR / name
-        if candidate.is_file():
+        if _is_valid_runtime_dll(candidate):
             return candidate
     return None
 
@@ -76,8 +96,8 @@ def dll_present() -> bool:
 
 
 def missing_runtime_files() -> list[str]:
-    """Return bundled runtime DLLs that are absent from BIN_DIR."""
-    missing = [name for name in RUNTIME_DLL_FILENAMES if not (BIN_DIR / name).is_file()]
+    """Return bundled runtime DLLs that are missing or fail PE sanity checks."""
+    missing = [name for name in RUNTIME_DLL_FILENAMES if not _is_valid_runtime_dll(BIN_DIR / name)]
     if not dll_present():
         missing.insert(0, _DLL_NAMES[0])
     return missing

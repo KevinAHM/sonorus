@@ -34,6 +34,13 @@ for %%F in (omnivoice.dll ggml.dll ggml-base.dll ggml-cpu.dll ggml-vulkan.dll) d
     )
 )
 
+"%PYTHON%" -c "import sys; sys.path.insert(0, '.'); from services.omnivoice_cpp_engine import missing_runtime_files; missing=missing_runtime_files(); print('ERROR: Invalid or truncated runtime file(s): ' + ', '.join(missing)) if missing else None; sys.exit(1 if missing else 0)"
+if errorlevel 1 (
+    echo Reinstall or update Sonorus, then try again.
+    >"%STATUS_FILE%" echo error
+    goto :failed
+)
+
 "%PYTHON%" -c "import huggingface_hub" >nul 2>&1
 if errorlevel 1 (
     echo ERROR: huggingface_hub is not installed.

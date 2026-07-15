@@ -1541,6 +1541,16 @@ def _read_omnivoice_cpp_install_state():
         return ""
 
 
+def _omnivoice_cpp_stt_available():
+    """Check STT configuration and confirm the selected provider can load."""
+    try:
+        from services import stt
+        return bool(stt.is_available() and stt.get_provider() is not None)
+    except Exception as exc:
+        print(f"[OmniVoiceCpp Setup] STT availability check failed: {exc}")
+        return False
+
+
 @config_bp.route('/api/tts/omnivoice-cpp/status', methods=['GET'])
 def get_omnivoice_cpp_status():
     """Return runtime, model-install, and voice-preparation status."""
@@ -1575,15 +1585,14 @@ def get_omnivoice_cpp_status():
         install_state = "error"
         install_message = "Model download failed. Check the installer window and try again."
     elif marker_state == "installing":
-        install_state = "installing"
-        install_message = "Downloading OmniVoice (Vulkan) models..."
+        install_state = "error"
+        install_message = "A previous model download did not finish. Start the installer again to retry."
     else:
         install_state = "idle"
         install_message = "The two GGUF models have not been downloaded."
 
     current_model = next((name for name in model_files if name not in completed_models), "")
-    settings = load_settings(raw=True)
-    stt_configured = settings.get('stt', {}).get('provider', 'none') != 'none'
+    stt_configured = _omnivoice_cpp_stt_available()
 
     return jsonify({
         "dll_present": omnivoice_cpp_engine.dll_present(),
@@ -2133,9 +2142,8 @@ def prepare_omnivoice_cpp_voices():
     """Create missing voice-reference transcript sidecars without loading TTS."""
     global _omnivoice_cpp_voice_progress
 
-    settings = load_settings(raw=True)
-    if settings.get('stt', {}).get('provider', 'none') == 'none':
-        return jsonify({"status": "error", "error": "No STT service configured"}), 400
+    if not _omnivoice_cpp_stt_available():
+        return jsonify({"status": "error", "error": "The selected STT service is not available or fully configured"}), 400
 
     with _omnivoice_cpp_voice_lock:
         if _omnivoice_cpp_voice_progress.get("status") == "processing":
