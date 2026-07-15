@@ -357,6 +357,7 @@ DEFAULT_SETTINGS = {
         "pocket": {"device": "cpu", "temperature": 0.7, "lsd_steps": 1, "eos_threshold": -4.0, "cache_size": 50},
         "omnivoice": {"device": "auto", "num_steps": 32, "first_sentence_steps": 24, "guidance_scale": 2.0, "apply_smoothing_eq": True},
         "omnivoice_api": {"api_url": "http://127.0.0.1:8000", "api_key": "", "num_steps": 32, "first_sentence_steps": 24, "guidance_scale": 2.0, "apply_smoothing_eq": True, "sample_rate": 48000},
+        "omnivoice_cpp": {"device": "auto", "num_steps": 32, "first_sentence_steps": 24, "guidance_scale": 2.0, "apply_smoothing_eq": True, "seed": 42},
         "voxcpm": {"target_rtfx": 0.9, "inference_timesteps": 7, "gpu_yield_interval": 2, "cfg_value": 2.0, "min_yield_ms": 1.0, "max_yield_ms": 50.0}
     },
     "llm": {

@@ -1,10 +1,19 @@
 # Plan: Run OmniVoice TTS on a second (AMD) GPU in Sonorus via omnivoice.cpp
 
 **Audience:** an engineering agent implementing this from scratch.
-**Goal:** Make Sonorus synthesize OmniVoice speech on the machine's **AMD GPU (via
-Vulkan)** instead of the NVIDIA card, so the NVIDIA's VRAM is left entirely for the game.
-This removes the VRAM contention that currently forces the user onto the lower-quality
-Pocket provider (OmniVoice + Hogwarts Legacy together exceed the NVIDIA's 16 GB).
+**Goal:** Add a third OmniVoice provider, `omnivoice_cpp` ("OmniVoice (Vulkan)"), that runs
+OmniVoice on **any Vulkan-capable GPU** via omnivoice.cpp. This serves two audiences:
+
+1. **Dual-GPU offload** (primary user): synthesize on the AMD card so the NVIDIA's VRAM is
+   left entirely for the game — removing the contention that currently forces the
+   lower-quality Pocket provider (OmniVoice + Hogwarts Legacy together exceed 16 GB).
+2. **AMD-only players**: the stock OmniVoice provider is torch/CUDA and unusable without an
+   NVIDIA card; this provider makes OmniVoice work with **no CUDA/torch at all**.
+
+The GPU is selectable in the config UI from an enumerated list of **Vulkan devices** (which
+includes NVIDIA cards too — do not frame anything as AMD-specific). Ships as a clean,
+self-contained third provider alongside `omnivoice`/`omnivoice_api`, suitable for a tidy
+upstream PR.
 
 **Environment:** Windows. Two GPUs: NVIDIA RTX 5080 (16 GB, runs the game) and an AMD card
 with large VRAM (should run TTS). **Sonorus 1.0.8 pre-release 4** (this plan was verified
@@ -118,11 +127,12 @@ Tasks:
    Artifacts needed later: `libomnivoice.dll` (+ its ggml/backend DLLs), `omnivoice-tts.exe`.
 3. Download GGUFs from `Serveurperso/OmniVoice-GGUF` into `models/`
    (`omnivoice-base-Q8_0.gguf`, `omnivoice-tokenizer-F32.gguf`).
-4. **Confirm it runs on the AMD GPU, not the NVIDIA.** The ggml Vulkan backend enumerates
-   devices; `src/backend.h` mentions an env override. Verify the exact variable
-   (likely `GGML_VK_VISIBLE_DEVICES=<index>`; confirm by reading `backend.h` and by testing
-   which index is the AMD card) and prove GPU usage via the AMD card's utilisation in Task
-   Manager / an overlay while running:
+4. **Confirm it runs on the AMD GPU, not the NVIDIA.** ✅ RESOLVED (verified in the fork's
+   `src/backend.h` ~line 110): the env var is **`GGML_BACKEND=<device name>`**, where the
+   name is a ggml device name like `Vulkan0`, `Vulkan1`, `CUDA0`, or `CPU`
+   (`ggml_backend_dev_name`); unset = auto-best. Set it in the worker env before the DLL
+   loads. Confirm empirically which `VulkanN` is the AMD card, and prove GPU usage via the
+   AMD card's utilisation in Task Manager / an overlay while running:
    ```
    echo "Hello from the AMD card." | omnivoice-tts ^
      --model models\omnivoice-base-Q8_0.gguf ^
@@ -205,33 +215,50 @@ Tasks:
 3. **Register the provider** in `services/tts/__init__.py`: add `elif provider_name ==
    'omnivoice_cpp':` branches everywhere `'omnivoice'`/`'pocket'` are dispatched
    (`get_provider`, `init`, `prepare_tts` fast-path list, `list_voices`, etc. — grep for
-   `'omnivoice'` and match each site). Note pre-4 already has two OmniVoice providers —
-   `omnivoice` (local torch) and `omnivoice_api` (hosted) — so `omnivoice_cpp` is a clean,
-   non-colliding third name; mirror how those two register.
+   `'omnivoice'` and match each site). Explicit sites that are easy to miss:
+   `get_provider()`, `clear_provider_cache()` (both the named branch and the clear-all
+   loop), and `is_available()` — unlike torch OmniVoice's "always True", `omnivoice_cpp`
+   availability should check that the DLL and both GGUFs are present. Note pre-4 already
+   has two OmniVoice providers — `omnivoice` (local torch) and `omnivoice_api` (hosted) —
+   so `omnivoice_cpp` is a clean, non-colliding third name; mirror how those two register.
 4. **Settings + defaults:** add `tts.omnivoice_cpp` defaults in `utils/settings.py`
    (`DEFAULT_SETTINGS`) and allow `tts.provider == "omnivoice_cpp"`.
+5. **Device-change handling:** the Vulkan device env var must be set in the worker's
+   environment **before** the DLL initializes the Vulkan backend, so changing the GPU
+   requires a **worker restart**. Mirror the existing `omnivoice_device_changed` logic in
+   `routes/config.py` (~lines 543/680): on settings save with a changed
+   `tts.omnivoice_cpp.device`, unload the worker, clear the provider cache, and re-warm on
+   the new device. The config UI shows a notice that the TTS worker restarts to apply the
+   change, plus a manual **"Restart TTS worker"** button in the provider section.
 
 **Exit criteria:** selecting `omnivoice_cpp` as the TTS provider produces NPC speech in-game
 using the AMD GPU, with the NVIDIA free for rendering.
 
-### Phase 3 — Lipsync alignment + streaming feel (MEDIUM)
+### Phase 3 — Lipsync + streaming feel (EASY–MEDIUM)
 
-omnivoice.cpp returns **no word timings**, but Sonorus drives NPC mouth visemes from word
-alignment. The current OmniVoice/Pocket paths already solve this — reuse it.
+omnivoice.cpp returns **no word timings** — and that's fine: **neither do the current local
+providers.** The Pocket worker has forced alignment hard-disabled (`do_align = False` in
+`services/pocket_tts_onnx.py` ~line 440, "Alignment handled by amplitude visemes in main
+process") and the torch OmniVoice engine always emits `word_timing=None`.
+`services/tts/base.py` (~line 688) automatically generates **amplitude-based visemes** from
+the PCM whenever `on_chunk` receives `word_timing=None`.
 
 Tasks:
 
-1. Run Sonorus's existing forced aligner (`services/alignment.py::align_audio_to_words`, used
-   by the Pocket worker) on each sentence's 24 kHz PCM to get
-   `words / wordStartTimeSeconds / wordEndTimeSeconds`, and pass that as `word_timing` in
-   `on_chunk` (same dict shape Pocket emits).
-2. **Streaming granularity:** the ABI's `ov_synthesize` is one-shot per call, so stream at
+1. **Baseline (required):** emit `on_chunk(pcm_bytes, None)` per sentence — lipsync comes
+   for free from base.py's amplitude visemes, exactly matching stock local-OmniVoice
+   behavior today.
+2. **Optional enhancement (defer, not in first PR):** run
+   `services/alignment.py::align_audio_to_words` on each sentence's PCM to supply real
+   `word_timing`. This is NOT needed for lipsync; its value is interrupt trimming
+   (`turn.add_word_timing`, base.py ~line 705) and word-level subtitle timing.
+3. **Streaming granularity:** the ABI's `ov_synthesize` is one-shot per call, so stream at
    the **sentence** level (call per sentence, emit each as it finishes) to keep first-audio
-   latency low. Add inter-sentence silence like the Pocket path does. (Optional later: the
-   CLI supports `-o - --stream-by-line` stdout streaming; not needed if per-sentence calls
-   are fast enough.)
-3. Verify lipsync stays in sync and interruptions/epoch handling work (test barge-in:
-   look at speaker mid-line).
+   latency low. Add inter-sentence silence like the torch OmniVoice path does. (Optional
+   later: the CLI supports `-o - --stream-by-line` stdout streaming; not needed if
+   per-sentence calls are fast enough.)
+4. Verify lipsync animates, interruptions/epoch handling work (test barge-in: look at
+   speaker mid-line), latency acceptable.
 
 **Exit criteria:** NPC mouths animate in sync; interrupts behave; latency acceptable.
 
@@ -241,10 +268,22 @@ Tasks:
    `sonorus\omnivoice_cpp\bin\`, and the two GGUFs under `sonorus\omnivoice_cpp\models\`
    (or download-on-first-use via `huggingface_hub`, matching how other models are fetched —
    note the HF **Xet** gotcha from bug #5: use `huggingface_hub`, not a raw URL).
-2. Add an **installer step** (`install_omnivoice_cpp.bat` or fold into existing setup) and a
-   **config-UI option**: TTS provider dropdown entry + an AMD **device-index** field that
-   maps to the Vulkan device env var.
-3. Docs: how to pick the AMD device, expected latency, and that it needs the Vulkan runtime.
+2. Add an **installer step** (`install_omnivoice_cpp.bat` or fold into existing setup) and
+   the **config-UI**: a TTS provider dropdown entry ("OmniVoice (Vulkan)") plus a proper
+   **GPU picker**. The existing picker infrastructure (`utils/gpu_info.py`) is
+   **nvidia-smi only** and cannot see AMD cards — add a **shared Vulkan enumeration
+   utility** (`utils/vulkan_gpu_info.py`, e.g. parsing `vulkaninfo --summary` or the ggml
+   device list) whose indices match ggml's Vulkan device order. Build it as a shared
+   utility (not TTS-private) so future features (STT etc.) can use it for CUDA-free
+   setups. Wire it into the gpu-status route (`routes/config.py` ~line 1388) for
+   `provider=omnivoice_cpp`, and add the restart notice + "Restart TTS worker" button
+   from Phase 2 task 5.
+3. Docs: GPU selection, expected latency, Vulkan runtime requirement, and an **output
+   parity note**: the torch provider outputs 48 kHz (always-on AudioVAE upscaler) plus a
+   smoothing EQ; omnivoice.cpp outputs native 24 kHz. The EQ wrapper
+   (`_wrap_omnivoice_eq`) runs in the main process and is reusable; the upscaler is
+   torch-only and is NOT carried over — voices will sound slightly different from stock
+   OmniVoice. That is expected, not a bug.
 
 ---
 
@@ -287,8 +326,9 @@ Tasks:
 
 1. Exact `ov_tts_params` field list/types and whether ref inputs are **paths vs PCM** — read
    `src/omnivoice.h` (do not assume).
-2. Exact **Vulkan device-selection** mechanism/env var and the AMD card's index — read
-   `src/backend.h`; confirm empirically.
+2. ~~Exact **Vulkan device-selection** mechanism/env var~~ — RESOLVED: `GGML_BACKEND=VulkanN`
+   (see Phase 0 task 4). Still confirm empirically which N is which card; store the ggml
+   device name directly in `tts.omnivoice_cpp.device` (`"auto"` = unset).
 3. Whether the ABI offers any **progress/chunk callback** (only `cancel` is documented). If
    not, sentence-level streaming is the plan.
 4. **Latency** on the AMD card at `mg_num_step` 32 vs reduced — measured in Phase 0; decide
@@ -300,9 +340,13 @@ Tasks:
 
 ## 6. Acceptance criteria (end to end)
 
-- TTS provider `omnivoice_cpp` is selectable in the config UI.
-- NPC replies synthesize on the **AMD GPU**; the NVIDIA's VRAM/utilisation stays free for the
-  game (verify with an overlay while playing).
+- TTS provider `omnivoice_cpp` ("OmniVoice (Vulkan)") is selectable in the config UI, with
+  a GPU dropdown listing all **Vulkan devices** by name.
+- Dual-GPU config: NPC replies synthesize on the selected (AMD) GPU; the NVIDIA's
+  VRAM/utilisation stays free for the game (verify with an overlay while playing).
+- Single-GPU AMD config: OmniVoice works with **no CUDA/torch installed**.
+- Changing the GPU in the UI restarts the worker and applies cleanly (notice + manual
+  "Restart TTS worker" button).
 - Voice-cloned NPC voices match the existing OmniVoice references.
 - Lipsync stays in sync; interruptions/epochs behave; conversation latency is acceptable.
 - Survives fast travel / long sessions (no regression to the input-hook or Pocket-serialization

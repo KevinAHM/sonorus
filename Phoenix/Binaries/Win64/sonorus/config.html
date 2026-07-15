@@ -693,6 +693,27 @@
                     </div>
                 </div>
 
+                <!-- OmniVoice (Vulkan) Setup Panel -->
+                <div id="omnivoiceCppSetup" style="display: none;">
+                    <div id="omnivoiceCppRuntimeHint" class="field-group" style="display: none;">
+                        <p class="field-hint" id="omnivoiceCppRuntimeHintText" style="color: var(--warning);"></p>
+                    </div>
+                    <div id="omnivoiceCppGpuPicker" class="field-group">
+                        <label class="field-label">OmniVoice GPU</label>
+                        <p class="field-hint">Choose which Vulkan GPU runs the local voice model. Auto picks the best available device.</p>
+                        <select id="omnivoiceCppGpuSelect" onchange="updateOmniVoiceCppGpu(this.value)"></select>
+                        <p class="field-hint" id="omnivoiceCppRestartNotice" style="display: none; color: var(--warning); margin-top: var(--space-xs);">
+                            The TTS worker restarts to apply the GPU change.
+                        </p>
+                    </div>
+                    <div class="field-group">
+                        <button class="btn btn-primary" id="omnivoiceCppRestartBtn" onclick="restartOmniVoiceCppWorker()">
+                            Restart TTS Worker
+                        </button>
+                        <p class="field-hint" id="omnivoiceCppRestartStatus" style="margin-top: var(--space-xs);"></p>
+                    </div>
+                </div>
+
                 <!-- Player Voice Section (disabled when TTS is disabled) -->
                 <div id="playerVoiceSection">
                     <div class="divider"><i data-lucide="star"></i> Player Voice <i data-lucide="star"></i></div>
