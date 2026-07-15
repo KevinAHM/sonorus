@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 from flask import Blueprint, request, jsonify, send_file, Response
@@ -1449,6 +1450,20 @@ def get_client_logs():
         return jsonify({"error": str(e), "content": ""}), 500
 
 
+_omnivoice_cpp_installer_process = None
+_omnivoice_cpp_install_lock = threading.Lock()
+_omnivoice_cpp_voice_lock = threading.Lock()
+_omnivoice_cpp_voice_progress = {
+    "status": "idle",
+    "total": 0,
+    "completed": 0,
+    "succeeded": 0,
+    "failed": 0,
+    "current": "",
+    "error": "",
+}
+
+
 def _get_omnivoice_cpp_gpu_status(settings, requested_device=None):
     """GPU status for the omnivoice_cpp (ggml/Vulkan) provider.
 
@@ -1471,6 +1486,8 @@ def _get_omnivoice_cpp_gpu_status(settings, requested_device=None):
         "gpu_name": None,
         "gpus": [],
         "dll_present": False,
+        "runtime_present": False,
+        "missing_runtime_files": [],
         "models_present": False,
     }
 
@@ -1502,6 +1519,8 @@ def _get_omnivoice_cpp_gpu_status(settings, requested_device=None):
     try:
         from services import omnivoice_cpp_engine
         result["dll_present"] = bool(omnivoice_cpp_engine.dll_present())
+        result["runtime_present"] = bool(omnivoice_cpp_engine.runtime_present())
+        result["missing_runtime_files"] = omnivoice_cpp_engine.missing_runtime_files()
         result["models_present"] = bool(omnivoice_cpp_engine.models_present())
         result["model_loaded"] = bool(omnivoice_cpp_engine.is_loaded())
         result["model_on_gpu"] = result["model_loaded"]
@@ -1509,6 +1528,121 @@ def _get_omnivoice_cpp_gpu_status(settings, requested_device=None):
         print(f"[Config] Error reading omnivoice_cpp engine status: {e}")
 
     return jsonify(result)
+
+
+def _omnivoice_cpp_install_status_path():
+    return Path(__file__).resolve().parent.parent / "data" / ".omnivoice_cpp_install_status"
+
+
+def _read_omnivoice_cpp_install_state():
+    try:
+        return _omnivoice_cpp_install_status_path().read_text(encoding="utf-8").strip().lower()
+    except (OSError, UnicodeError):
+        return ""
+
+
+@config_bp.route('/api/tts/omnivoice-cpp/status', methods=['GET'])
+def get_omnivoice_cpp_status():
+    """Return runtime, model-install, and voice-preparation status."""
+    from services import omnivoice_cpp_engine
+
+    model_files = [
+        omnivoice_cpp_engine.MODEL_FILENAME,
+        omnivoice_cpp_engine.TOKENIZER_FILENAME,
+    ]
+    completed_models = [
+        name for name in model_files
+        if (omnivoice_cpp_engine.MODEL_DIR / name).is_file()
+    ]
+    models_present = omnivoice_cpp_engine.models_present()
+    marker_state = _read_omnivoice_cpp_install_state()
+
+    process_running = False
+    process_exit_code = None
+    with _omnivoice_cpp_install_lock:
+        process = _omnivoice_cpp_installer_process
+        if process is not None:
+            process_exit_code = process.poll()
+            process_running = process_exit_code is None
+
+    if models_present:
+        install_state = "complete"
+        install_message = "OmniVoice (Vulkan) models are ready."
+    elif process_running:
+        install_state = "installing"
+        install_message = "Downloading OmniVoice (Vulkan) models..."
+    elif marker_state == "error" or (process_exit_code is not None and process_exit_code != 0):
+        install_state = "error"
+        install_message = "Model download failed. Check the installer window and try again."
+    elif marker_state == "installing":
+        install_state = "installing"
+        install_message = "Downloading OmniVoice (Vulkan) models..."
+    else:
+        install_state = "idle"
+        install_message = "The two GGUF models have not been downloaded."
+
+    current_model = next((name for name in model_files if name not in completed_models), "")
+    settings = load_settings(raw=True)
+    stt_configured = settings.get('stt', {}).get('provider', 'none') != 'none'
+
+    return jsonify({
+        "dll_present": omnivoice_cpp_engine.dll_present(),
+        "runtime_present": omnivoice_cpp_engine.runtime_present(),
+        "missing_runtime_files": omnivoice_cpp_engine.missing_runtime_files(),
+        "models_present": models_present,
+        "install_progress": {
+            "status": install_state,
+            "completed": len(completed_models),
+            "total": len(model_files),
+            "current": current_model,
+            "message": install_message,
+        },
+        "voices_needing_transcripts": len(_collect_untranscribed_voices()),
+        "stt_configured": stt_configured,
+        "voice_progress": dict(_omnivoice_cpp_voice_progress),
+    })
+
+
+@config_bp.route('/api/tts/omnivoice-cpp/install-models', methods=['POST'])
+def install_omnivoice_cpp_models():
+    """Launch the models-only installer in a visible console window."""
+    global _omnivoice_cpp_installer_process
+
+    from services import omnivoice_cpp_engine
+
+    if not omnivoice_cpp_engine.runtime_present():
+        missing = ", ".join(omnivoice_cpp_engine.missing_runtime_files())
+        return jsonify({
+            "status": "error",
+            "error": f"Bundled runtime is incomplete ({missing}). Reinstall or update Sonorus.",
+        }), 400
+    if omnivoice_cpp_engine.models_present():
+        return jsonify({"status": "already_installed"}), 200
+
+    sonorus_dir = Path(__file__).resolve().parent.parent
+    bat_path = sonorus_dir / "install_omnivoice_cpp.bat"
+    if not bat_path.is_file():
+        return jsonify({"status": "error", "error": "install_omnivoice_cpp.bat not found"}), 500
+
+    with _omnivoice_cpp_install_lock:
+        if _omnivoice_cpp_installer_process is not None and _omnivoice_cpp_installer_process.poll() is None:
+            return jsonify({"status": "installing"}), 202
+
+        try:
+            _omnivoice_cpp_install_status_path().unlink(missing_ok=True)
+        except OSError as exc:
+            return jsonify({"status": "error", "error": f"Could not reset installer status: {exc}"}), 500
+
+        try:
+            _omnivoice_cpp_installer_process = subprocess.Popen(
+                ["cmd.exe", "/d", "/c", str(bat_path), "--no-pause"],
+                cwd=str(sonorus_dir),
+                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+            )
+        except Exception as exc:
+            return jsonify({"status": "error", "error": str(exc)}), 500
+
+    return jsonify({"status": "installing"}), 202
 
 
 @config_bp.route('/api/tts/omnivoice-cpp/restart-worker', methods=['POST'])
@@ -1683,6 +1817,31 @@ def _is_tokenizable_voice(path) -> bool:
     # Also keep plain _reference (no duration suffix)
     # And files with no _reference pattern at all (e.g. narrator.wav)
     return True
+
+
+def _collect_untranscribed_voices():
+    """Return supported voice references without a non-empty .txt sidecar."""
+    voice_dir = Path(__file__).resolve().parent.parent / "voice_references"
+    if not voice_dir.exists():
+        return []
+
+    audio_exts = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".opus"}
+    missing = []
+    dirs_to_check = [voice_dir] + [path for path in voice_dir.iterdir() if path.is_dir()]
+    for check_dir in dirs_to_check:
+        for path in check_dir.iterdir():
+            if not path.is_file() or path.suffix.lower() not in audio_exts:
+                continue
+            if not _is_tokenizable_voice(path):
+                continue
+            transcript_path = path.with_suffix(".txt")
+            try:
+                if transcript_path.is_file() and transcript_path.read_text(encoding="utf-8").strip():
+                    continue
+            except (OSError, UnicodeError):
+                pass
+            missing.append(path)
+    return missing
 
 
 def _count_untokenized_voices() -> int:
@@ -1895,6 +2054,122 @@ def _transcribe_audio_file(audio_path):
     except Exception as e:
         print(f"[OmniVoice Setup] Error reading/transcribing {audio_path.name}: {e}")
         return None
+
+
+def _prepare_omnivoice_cpp_voices(voices):
+    """Background task that creates missing transcript sidecars via STT."""
+    global _omnivoice_cpp_voice_progress
+
+    total = len(voices)
+    succeeded = 0
+    failed = 0
+    try:
+        for index, voice_path in enumerate(voices):
+            _omnivoice_cpp_voice_progress.update({
+                "status": "processing",
+                "current": voice_path.stem,
+                "completed": index,
+                "succeeded": succeeded,
+                "failed": failed,
+            })
+
+            transcript = _transcribe_audio_file(voice_path)
+            if transcript and str(transcript).strip():
+                transcript_path = voice_path.with_suffix(".txt")
+                temp_path = Path(str(transcript_path) + ".tmp")
+                try:
+                    temp_path.write_text(str(transcript).strip(), encoding="utf-8")
+                    temp_path.replace(transcript_path)
+                    succeeded += 1
+                    print(f"[OmniVoiceCpp Setup] Saved transcript: {transcript_path.name}")
+                except Exception as exc:
+                    failed += 1
+                    print(f"[OmniVoiceCpp Setup] Failed to save {transcript_path.name}: {exc}")
+                    try:
+                        temp_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            else:
+                failed += 1
+
+            _omnivoice_cpp_voice_progress.update({
+                "completed": index + 1,
+                "succeeded": succeeded,
+                "failed": failed,
+            })
+
+            attempts = index + 1
+            if attempts >= 5 and failed / attempts > 0.5:
+                message = f"Stopped after {failed} of {attempts} transcriptions failed. Check the STT configuration."
+                _omnivoice_cpp_voice_progress.update({
+                    "status": "error",
+                    "current": "",
+                    "error": message,
+                })
+                print(f"[OmniVoiceCpp Setup] {message}")
+                return
+
+        _omnivoice_cpp_voice_progress.update({
+            "status": "done",
+            "total": total,
+            "completed": total,
+            "succeeded": succeeded,
+            "failed": failed,
+            "current": "",
+            "error": "" if failed == 0 else f"{failed} voice reference(s) could not be transcribed.",
+        })
+        print(f"[OmniVoiceCpp Setup] Done. Transcribed: {succeeded}, Failed: {failed}")
+    except Exception as exc:
+        _omnivoice_cpp_voice_progress.update({
+            "status": "error",
+            "current": "",
+            "error": str(exc),
+        })
+        print(f"[OmniVoiceCpp Setup] Preparation failed: {exc}")
+
+
+@config_bp.route('/api/tts/omnivoice-cpp/prepare-voices', methods=['POST'])
+def prepare_omnivoice_cpp_voices():
+    """Create missing voice-reference transcript sidecars without loading TTS."""
+    global _omnivoice_cpp_voice_progress
+
+    settings = load_settings(raw=True)
+    if settings.get('stt', {}).get('provider', 'none') == 'none':
+        return jsonify({"status": "error", "error": "No STT service configured"}), 400
+
+    with _omnivoice_cpp_voice_lock:
+        if _omnivoice_cpp_voice_progress.get("status") == "processing":
+            return jsonify({"status": "processing"}), 202
+
+        voices = _collect_untranscribed_voices()
+        if not voices:
+            _omnivoice_cpp_voice_progress = {
+                "status": "done",
+                "total": 0,
+                "completed": 0,
+                "succeeded": 0,
+                "failed": 0,
+                "current": "",
+                "error": "",
+            }
+            return jsonify({"status": "already_prepared"}), 200
+
+        _omnivoice_cpp_voice_progress = {
+            "status": "processing",
+            "total": len(voices),
+            "completed": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "current": "",
+            "error": "",
+        }
+        threading.Thread(
+            target=_prepare_omnivoice_cpp_voices,
+            args=(voices,),
+            daemon=True,
+        ).start()
+
+    return jsonify({"status": "processing", "total": len(voices)}), 202
 
 
 def _pretokenize_all_voices():

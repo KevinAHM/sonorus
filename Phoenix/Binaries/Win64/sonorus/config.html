@@ -698,6 +698,21 @@
                     <div id="omnivoiceCppRuntimeHint" class="field-group" style="display: none;">
                         <p class="field-hint" id="omnivoiceCppRuntimeHintText" style="color: var(--warning);"></p>
                     </div>
+                    <div id="omnivoiceCppInstallSection" class="field-group" style="display: none;">
+                        <button class="btn btn-primary" id="omnivoiceCppInstallBtn" onclick="installOmniVoiceCppModels()">
+                            Download OmniVoice Models
+                        </button>
+                        <p class="field-hint" id="omnivoiceCppInstallHint" style="margin-top: var(--space-xs);">Downloads two GGUF models (approximately 1.3 GB). Existing partial downloads are resumed.</p>
+                        <div id="omnivoiceCppInstallProgress" style="display: none; margin-top: var(--space-sm);">
+                            <div class="voice-progress-row">
+                                <div class="voice-progress-bar">
+                                    <div class="voice-progress-fill reference" id="omnivoiceCppInstallProgressFill" style="width: 0%"></div>
+                                </div>
+                                <span class="voice-progress-count" id="omnivoiceCppInstallProgressCount">0/2</span>
+                            </div>
+                            <p class="field-hint" id="omnivoiceCppInstallProgressStatus" style="margin-top: var(--space-xs);"></p>
+                        </div>
+                    </div>
                     <div id="omnivoiceCppGpuPicker" class="field-group">
                         <label class="field-label">OmniVoice GPU</label>
                         <p class="field-hint">Choose which Vulkan GPU runs the local voice model. Auto picks the best available device.</p>
@@ -706,11 +721,30 @@
                             The TTS worker restarts to apply the GPU change.
                         </p>
                     </div>
-                    <div class="field-group">
+                    <div id="omnivoiceCppRestartSection" class="field-group">
                         <button class="btn btn-primary" id="omnivoiceCppRestartBtn" onclick="restartOmniVoiceCppWorker()">
                             Restart TTS Worker
                         </button>
                         <p class="field-hint" id="omnivoiceCppRestartStatus" style="margin-top: var(--space-xs);"></p>
+                    </div>
+                    <div id="omnivoiceCppVoiceSetup" class="field-group" style="display: none;">
+                        <label class="field-label">Prepare Voice References <span style="font-weight: normal; opacity: 0.7;">(Optional)</span></label>
+                        <p class="field-hint" id="omnivoiceCppVoiceCount" style="margin-bottom: var(--space-sm);"></p>
+                        <div id="omnivoiceCppVoiceProgress" style="display: none; margin-bottom: var(--space-sm);">
+                            <div class="voice-progress-row">
+                                <div class="voice-progress-bar">
+                                    <div class="voice-progress-fill reference" id="omnivoiceCppVoiceProgressFill" style="width: 0%"></div>
+                                </div>
+                                <span class="voice-progress-count" id="omnivoiceCppVoiceProgressCount">0/0</span>
+                            </div>
+                            <p class="field-hint" id="omnivoiceCppVoiceProgressStatus" style="margin-top: var(--space-xs);"></p>
+                        </div>
+                        <div id="omnivoiceCppSttWarning" style="color: var(--warning); margin-bottom: var(--space-sm); display: none;">
+                            Configure a Speech-to-Text service to prepare transcript sidecars. Voices still work without this optional step.
+                        </div>
+                        <button class="btn btn-primary" id="omnivoiceCppPrepareVoicesBtn" onclick="prepareOmniVoiceCppVoices()">
+                            Prepare Voice References
+                        </button>
                     </div>
                 </div>
 

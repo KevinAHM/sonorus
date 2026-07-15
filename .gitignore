@@ -3,5 +3,12 @@ __pycache__/
 Phoenix/Binaries/Win64/sonorus/python/Lib/site-packages/
 Phoenix/Binaries/Win64/sonorus/python/Scripts/
 Phoenix/Binaries/Win64/sonorus/get-pip.py
-Phoenix/Binaries/Win64/sonorus/omnivoice_cpp/
+Phoenix/Binaries/Win64/sonorus/omnivoice_cpp/*
+!Phoenix/Binaries/Win64/sonorus/omnivoice_cpp/bin/
+Phoenix/Binaries/Win64/sonorus/omnivoice_cpp/bin/*
+!Phoenix/Binaries/Win64/sonorus/omnivoice_cpp/bin/omnivoice.dll
+!Phoenix/Binaries/Win64/sonorus/omnivoice_cpp/bin/ggml.dll
+!Phoenix/Binaries/Win64/sonorus/omnivoice_cpp/bin/ggml-base.dll
+!Phoenix/Binaries/Win64/sonorus/omnivoice_cpp/bin/ggml-cpu.dll
+!Phoenix/Binaries/Win64/sonorus/omnivoice_cpp/bin/ggml-vulkan.dll
 Phoenix/Binaries/Win64/sonorus/python/share/

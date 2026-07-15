@@ -42,6 +42,12 @@ MODEL_DIR = _SONORUS_ROOT / "omnivoice_cpp" / "models"
 MODEL_FILENAME = "omnivoice-base-Q8_0.gguf"
 TOKENIZER_FILENAME = "omnivoice-tokenizer-F32.gguf"
 _DLL_NAMES = ("omnivoice.dll", "libomnivoice.dll")
+RUNTIME_DLL_FILENAMES = (
+    "ggml.dll",
+    "ggml-base.dll",
+    "ggml-cpu.dll",
+    "ggml-vulkan.dll",
+)
 
 
 def _serialized_worker_io(func):
@@ -69,6 +75,19 @@ def dll_present() -> bool:
     return _find_dll() is not None
 
 
+def missing_runtime_files() -> list[str]:
+    """Return bundled runtime DLLs that are absent from BIN_DIR."""
+    missing = [name for name in RUNTIME_DLL_FILENAMES if not (BIN_DIR / name).is_file()]
+    if not dll_present():
+        missing.insert(0, _DLL_NAMES[0])
+    return missing
+
+
+def runtime_present() -> bool:
+    """Check that the OmniVoice library and every bundled ggml DLL are present."""
+    return not missing_runtime_files()
+
+
 def models_present() -> bool:
     """Check if both GGUF models have been downloaded."""
     return (
@@ -79,7 +98,7 @@ def models_present() -> bool:
 
 def is_available() -> bool:
     """Check if the omnivoice.cpp backend can be started (DLL + models)."""
-    return dll_present() and models_present()
+    return runtime_present() and models_present()
 
 
 # ============================================================================

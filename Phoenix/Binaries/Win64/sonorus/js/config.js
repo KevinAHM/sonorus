@@ -1249,15 +1249,19 @@ function updateOmniVoiceCppPanel() {
     if (panel) panel.style.display = 'block';
     fetchOmniVoiceCppStatus();
     if (!omnivoiceCppStatusInterval) {
-        omnivoiceCppStatusInterval = setInterval(fetchOmniVoiceCppStatus, 5000);
+        omnivoiceCppStatusInterval = setInterval(fetchOmniVoiceCppStatus, 3000);
     }
 }
 
 async function fetchOmniVoiceCppStatus() {
     try {
-        const resp = await fetch('/api/tts/vram-status?provider=omnivoice_cpp');
-        const data = await resp.json();
-        renderOmniVoiceCppPanel(data);
+        const [gpuResp, setupResp] = await Promise.all([
+            fetch('/api/tts/vram-status?provider=omnivoice_cpp'),
+            fetch('/api/tts/omnivoice-cpp/status')
+        ]);
+        if (!gpuResp.ok || !setupResp.ok) throw new Error('Status request failed');
+        const [gpuData, setupData] = await Promise.all([gpuResp.json(), setupResp.json()]);
+        renderOmniVoiceCppPanel({ ...gpuData, ...setupData });
     } catch (e) {
         console.error('[OmniVoiceCpp] Status check failed:', e);
     }
@@ -1269,23 +1273,119 @@ function renderOmniVoiceCppPanel(data) {
     // the baseline for the "restart needed" notice.
     _omnivoiceCppSavedDevice = data.selected_device || 'auto';
 
-    // Runtime install-state hint (installer comes in a later update)
+    const runtimeReady = data.runtime_present === true;
+    const modelsReady = data.models_present === true;
+    const backendReady = runtimeReady && modelsReady;
+
+    // Bundled runtime state
     const hintGroup = document.getElementById('omnivoiceCppRuntimeHint');
     const hintText = document.getElementById('omnivoiceCppRuntimeHintText');
     if (hintGroup && hintText) {
-        const missing = [];
-        if (!data.dll_present) missing.push('the omnivoice.cpp runtime');
-        if (!data.models_present) missing.push('the GGUF voice models');
-        if (missing.length > 0) {
-            hintText.textContent = 'Not installed yet: ' + missing.join(' and ') + '. The installer will be available in a future update.';
+        if (!runtimeReady) {
+            const missing = Array.isArray(data.missing_runtime_files) ? data.missing_runtime_files.join(', ') : 'runtime DLLs';
+            hintText.textContent = 'The bundled OmniVoice runtime is incomplete (' + missing + '). Reinstall or update Sonorus.';
+            hintText.style.color = 'var(--error)';
+            hintGroup.style.display = 'block';
+        } else if (gpus.length === 0) {
+            hintText.textContent = 'No Vulkan GPU was detected. Auto may fall back to CPU, which is much slower.';
+            hintText.style.color = 'var(--warning)';
             hintGroup.style.display = 'block';
         } else {
             hintGroup.style.display = 'none';
         }
     }
 
+    renderOmniVoiceCppInstall(data, runtimeReady, modelsReady);
+    renderOmniVoiceCppVoiceSetup(data, backendReady);
+
+    const gpuPicker = document.getElementById('omnivoiceCppGpuPicker');
+    const restartSection = document.getElementById('omnivoiceCppRestartSection');
+    if (gpuPicker) gpuPicker.style.display = backendReady ? '' : 'none';
+    if (restartSection) restartSection.style.display = backendReady ? '' : 'none';
+
     renderOmniVoiceCppGpuPicker(gpus);
     updateOmniVoiceCppRestartNotice();
+}
+
+function renderOmniVoiceCppInstall(data, runtimeReady, modelsReady) {
+    const section = document.getElementById('omnivoiceCppInstallSection');
+    if (!section) return;
+
+    const progress = data.install_progress || {};
+    const installing = progress.status === 'installing';
+    section.style.display = runtimeReady && (!modelsReady || installing) ? 'block' : 'none';
+
+    const btn = document.getElementById('omnivoiceCppInstallBtn');
+    const hint = document.getElementById('omnivoiceCppInstallHint');
+    const progressBox = document.getElementById('omnivoiceCppInstallProgress');
+    const progressFill = document.getElementById('omnivoiceCppInstallProgressFill');
+    const progressCount = document.getElementById('omnivoiceCppInstallProgressCount');
+    const progressStatus = document.getElementById('omnivoiceCppInstallProgressStatus');
+    const completed = Number(progress.completed || 0);
+    const total = Number(progress.total || 2);
+
+    if (btn) {
+        btn.disabled = installing;
+        btn.textContent = installing ? 'Downloading Models...' : 'Download OmniVoice Models';
+    }
+    if (hint) {
+        hint.textContent = progress.status === 'error'
+            ? progress.message
+            : 'Downloads two GGUF models (approximately 1.3 GB). Existing partial downloads are resumed.';
+        hint.style.color = progress.status === 'error' ? 'var(--error)' : '';
+    }
+    if (progressBox) progressBox.style.display = installing ? 'block' : 'none';
+    if (progressFill) progressFill.style.width = (total > 0 ? Math.round(completed / total * 100) : 0) + '%';
+    if (progressCount) progressCount.textContent = completed + '/' + total;
+    if (progressStatus) {
+        progressStatus.textContent = progress.current
+            ? 'Downloading: ' + progress.current + ' (byte progress is shown in the installer window)'
+            : (progress.message || 'Starting installer...');
+    }
+}
+
+function renderOmniVoiceCppVoiceSetup(data, backendReady) {
+    const section = document.getElementById('omnivoiceCppVoiceSetup');
+    if (!section) return;
+
+    const progress = data.voice_progress || {};
+    const processing = progress.status === 'processing';
+    const missing = Number(data.voices_needing_transcripts || 0);
+    section.style.display = backendReady && (missing > 0 || processing) ? 'block' : 'none';
+
+    const count = document.getElementById('omnivoiceCppVoiceCount');
+    const warning = document.getElementById('omnivoiceCppSttWarning');
+    const btn = document.getElementById('omnivoiceCppPrepareVoicesBtn');
+    const progressBox = document.getElementById('omnivoiceCppVoiceProgress');
+    const progressFill = document.getElementById('omnivoiceCppVoiceProgressFill');
+    const progressCount = document.getElementById('omnivoiceCppVoiceProgressCount');
+    const progressStatus = document.getElementById('omnivoiceCppVoiceProgressStatus');
+    const completed = Number(progress.completed || 0);
+    const total = Number(progress.total || missing);
+
+    if (count) {
+        if (processing) {
+            count.textContent = 'Creating transcript sidecars for voice references...';
+            count.style.color = '';
+        } else if (progress.error) {
+            count.textContent = progress.error;
+            count.style.color = 'var(--error)';
+        } else {
+            count.textContent = missing + ' voice reference(s) have no transcript sidecar. Preparing them avoids a first-conversation transcription delay.';
+            count.style.color = '';
+        }
+    }
+    if (warning) warning.style.display = !processing && !data.stt_configured ? 'block' : 'none';
+    if (btn) {
+        btn.style.display = !processing && data.stt_configured ? '' : 'none';
+        btn.disabled = processing;
+    }
+    if (progressBox) progressBox.style.display = processing ? 'block' : 'none';
+    if (progressFill) progressFill.style.width = (total > 0 ? Math.round(completed / total * 100) : 0) + '%';
+    if (progressCount) progressCount.textContent = completed + '/' + total;
+    if (progressStatus) {
+        progressStatus.textContent = progress.current ? 'Transcribing: ' + progress.current : (progress.error || 'Starting...');
+    }
 }
 
 function renderOmniVoiceCppGpuPicker(gpus) {
@@ -1322,6 +1422,53 @@ function updateOmniVoiceCppRestartNotice() {
     const current = config.tts?.omnivoice_cpp?.device || 'auto';
     const changed = _omnivoiceCppSavedDevice !== null && current !== _omnivoiceCppSavedDevice;
     notice.style.display = changed ? 'block' : 'none';
+}
+
+async function installOmniVoiceCppModels() {
+    const btn = document.getElementById('omnivoiceCppInstallBtn');
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Starting Installer...';
+    }
+    try {
+        const resp = await fetch('/api/tts/omnivoice-cpp/install-models', { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok && data.status === 'already_installed') {
+            showToast('OmniVoice models are already installed', 'info');
+        } else if (resp.ok && data.status === 'installing') {
+            showToast('OmniVoice model download started', 'success');
+        } else {
+            showToast(data.error || 'Could not start model download', 'error');
+        }
+    } catch (e) {
+        showToast('Could not start model download: ' + e.message, 'error');
+    } finally {
+        fetchOmniVoiceCppStatus();
+    }
+}
+
+async function prepareOmniVoiceCppVoices() {
+    const btn = document.getElementById('omnivoiceCppPrepareVoicesBtn');
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Starting...';
+    }
+    try {
+        const resp = await fetch('/api/tts/omnivoice-cpp/prepare-voices', { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok && data.status === 'already_prepared') {
+            showToast('Voice references are already prepared', 'info');
+        } else if (resp.ok && data.status === 'processing') {
+            showToast('Preparing voice-reference transcripts...', 'success');
+        } else {
+            showToast(data.error || 'Could not prepare voice references', 'error');
+        }
+    } catch (e) {
+        showToast('Could not prepare voice references: ' + e.message, 'error');
+    } finally {
+        if (btn) btn.textContent = 'Prepare Voice References';
+        fetchOmniVoiceCppStatus();
+    }
 }
 
 async function restartOmniVoiceCppWorker() {
