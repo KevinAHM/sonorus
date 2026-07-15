@@ -515,11 +515,16 @@ def save_config():
     # Preserve setup test flags that are set by test endpoints, not the frontend.
     # The frontend config object doesn't get updated when tests pass (they save directly
     # to settings.json), so a config save would wipe the flags without this preservation.
+    # These keys are backend-owned: always take the stored values, even when the client
+    # echoes back a stale snapshot from page load (testing then saving in one session).
+    # The active_tts_changed / llm_client_changed resets below still run after this.
     existing_setup = existing.get('setup', {})
     new_setup = new_settings.get('setup', {})
     for key in ('tts_tested', 'tts_test_language', 'tts_test_provider', 'llm_tested', 'llm_test_provider'):
-        if key in existing_setup and key not in new_setup:
+        if key in existing_setup:
             new_setup[key] = existing_setup[key]
+        elif key in new_setup:
+            del new_setup[key]
     if new_setup:
         new_settings['setup'] = new_setup
 
