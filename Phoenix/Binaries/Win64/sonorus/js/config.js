@@ -1377,8 +1377,14 @@ function renderOmniVoiceCppVoiceSetup(data, backendReady) {
     }
     if (warning) warning.style.display = !processing && !data.stt_configured ? 'block' : 'none';
     if (btn) {
-        btn.style.display = !processing && data.stt_configured ? '' : 'none';
-        btn.disabled = processing;
+        btn.style.display = processing ? 'none' : '';
+        btn.disabled = processing || !data.stt_configured;
+        btn.textContent = data.stt_configured
+            ? 'Prepare Voice References'
+            : 'Configure STT to Prepare Voices';
+        btn.title = data.stt_configured
+            ? ''
+            : 'Select and configure a Speech-to-Text provider first.';
     }
     if (progressBox) progressBox.style.display = processing ? 'block' : 'none';
     if (progressFill) progressFill.style.width = (total > 0 ? Math.round(completed / total * 100) : 0) + '%';
