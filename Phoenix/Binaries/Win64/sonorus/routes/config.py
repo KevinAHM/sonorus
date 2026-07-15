@@ -523,11 +523,16 @@ def save_config():
     # Preserve setup test flags that are set by test endpoints, not the frontend.
     # The frontend config object doesn't get updated when tests pass (they save directly
     # to settings.json), so a config save would wipe the flags without this preservation.
+    # These keys are backend-owned: always take the stored values, even when the client
+    # echoes back a stale snapshot from page load (testing then saving in one session).
+    # The active_tts_changed / llm_client_changed resets below still run after this.
     existing_setup = existing.get('setup', {})
     new_setup = new_settings.get('setup', {})
     for key in ('tts_tested', 'tts_test_language', 'tts_test_provider', 'llm_tested', 'llm_test_provider'):
-        if key in existing_setup and key not in new_setup:
+        if key in existing_setup:
             new_setup[key] = existing_setup[key]
+        elif key in new_setup:
+            del new_setup[key]
     if new_setup:
         new_settings['setup'] = new_setup
 
@@ -554,10 +559,17 @@ def save_config():
         active_tts_provider == 'omnivoice'
         and new_omnivoice_device != existing_omnivoice_device
     )
+    new_omnivoice_cpp_device = new_settings.get('tts', {}).get('omnivoice_cpp', {}).get('device', 'auto')
+    existing_omnivoice_cpp_device = existing.get('tts', {}).get('omnivoice_cpp', {}).get('device', 'auto')
+    omnivoice_cpp_device_changed = (
+        active_tts_provider == 'omnivoice_cpp'
+        and new_omnivoice_cpp_device != existing_omnivoice_cpp_device
+    )
     active_tts_changed = (
         tts_provider_switched or
         active_tts_provider in tts_providers_changed or
-        omnivoice_device_changed
+        omnivoice_device_changed or
+        omnivoice_cpp_device_changed
     )
 
     if active_tts_changed:
@@ -611,6 +623,14 @@ def save_config():
                     except Exception as e:
                         print(f"[Settings] Error unloading OmniVoice: {e}")
 
+                if existing_tts_provider == 'omnivoice_cpp':
+                    try:
+                        from services.omnivoice_cpp_engine import unload as unload_omnivoice_cpp
+                        unload_omnivoice_cpp()
+                        print("[Settings] Unloaded OmniVoice (Vulkan) worker")
+                    except Exception as e:
+                        print(f"[Settings] Error unloading OmniVoice (Vulkan): {e}")
+
                 # Disconnect Inworld WebSocket before clearing its cache
                 if existing_tts_provider == 'inworld':
                     try:
@@ -660,6 +680,21 @@ def save_config():
                     except Exception as e:
                         print(f"[Settings] Error starting OmniVoice preload: {e}")
 
+                elif new_tts_provider == 'omnivoice_cpp':
+                    try:
+                        from services import omnivoice_cpp_engine
+                        if omnivoice_cpp_engine.is_available():
+                            import threading
+                            def preload_omnivoice_cpp():
+                                try:
+                                    omnivoice_cpp_engine.warm_up()
+                                    print("[Settings] OmniVoice (Vulkan) worker preloaded")
+                                except Exception as e:
+                                    print(f"[Settings] OmniVoice (Vulkan) preload failed: {e}")
+                            threading.Thread(target=preload_omnivoice_cpp, daemon=True).start()
+                    except Exception as e:
+                        print(f"[Settings] Error starting OmniVoice (Vulkan) preload: {e}")
+
                 # Connect Inworld WebSocket (if switching to Inworld)
                 elif new_tts_provider == 'inworld':
                     try:
@@ -706,6 +741,27 @@ def save_config():
                     threading.Thread(target=preload_omnivoice_after_gpu_change, daemon=True).start()
             except Exception as e:
                 print(f"[Settings] Error reloading OmniVoice after GPU change: {e}")
+
+        if omnivoice_cpp_device_changed and not tts_provider_switched:
+            print(f"[Settings] OmniVoice (Vulkan) GPU changed: {existing_omnivoice_cpp_device} -> {new_omnivoice_cpp_device}")
+            try:
+                from services import tts
+                from services import omnivoice_cpp_engine
+                omnivoice_cpp_engine.unload()
+                tts.clear_provider_cache('omnivoice_cpp')
+                print("[Settings] Unloaded OmniVoice (Vulkan) worker for GPU change")
+
+                if omnivoice_cpp_engine.is_available():
+                    import threading
+                    def preload_omnivoice_cpp_after_gpu_change():
+                        try:
+                            omnivoice_cpp_engine.warm_up()
+                            print("[Settings] OmniVoice (Vulkan) worker restarted after GPU change")
+                        except Exception as e:
+                            print(f"[Settings] OmniVoice (Vulkan) restart after GPU change failed: {e}")
+                    threading.Thread(target=preload_omnivoice_cpp_after_gpu_change, daemon=True).start()
+            except Exception as e:
+                print(f"[Settings] Error restarting OmniVoice (Vulkan) after GPU change: {e}")
 
         # Handle language change - clear ALL provider caches
         if language_changed:
@@ -1393,6 +1449,107 @@ def get_client_logs():
         return jsonify({"error": str(e), "content": ""}), 500
 
 
+def _get_omnivoice_cpp_gpu_status(settings, requested_device=None):
+    """GPU status for the omnivoice_cpp (ggml/Vulkan) provider.
+
+    Vulkan enumeration has no VRAM telemetry, so the VRAM fields stay None.
+    Includes dll_present/models_present so the UI can show install state.
+    """
+    configured_device = settings.get('tts', {}).get('omnivoice_cpp', {}).get('device', 'auto')
+    server_device = requested_device or configured_device or 'auto'
+
+    result = {
+        "cuda_available": False,
+        "vram_free_gb": None,
+        "vram_total_gb": None,
+        "vram_used_gb": None,
+        "model_loaded": False,
+        "model_on_gpu": False,
+        "server_device": server_device,
+        "selected_device": configured_device or 'auto',
+        "selected_gpu_index": None,
+        "gpu_name": None,
+        "gpus": [],
+        "dll_present": False,
+        "models_present": False,
+    }
+
+    try:
+        from utils.vulkan_gpu_info import detect_vulkan_gpus
+        gpus = detect_vulkan_gpus(log=False)
+        result["gpus"] = [
+            {
+                "index": gpu["index"],
+                "device": gpu["device"],
+                "name": gpu["name"],
+                "device_type": gpu["device_type"],
+                "vram_total_gb": None,
+                "vram_free_gb": None,
+                "vram_used_gb": None,
+            }
+            for gpu in gpus
+        ]
+
+        selected_gpu = next((gpu for gpu in gpus if gpu["device"] == server_device), None)
+        if selected_gpu is None and gpus:
+            selected_gpu = gpus[0]
+        if selected_gpu is not None:
+            result["selected_gpu_index"] = selected_gpu["index"]
+            result["gpu_name"] = selected_gpu["name"]
+    except Exception as e:
+        print(f"[Config] Error enumerating Vulkan GPUs: {e}")
+
+    try:
+        from services import omnivoice_cpp_engine
+        result["dll_present"] = bool(omnivoice_cpp_engine.dll_present())
+        result["models_present"] = bool(omnivoice_cpp_engine.models_present())
+        result["model_loaded"] = bool(omnivoice_cpp_engine.is_loaded())
+        result["model_on_gpu"] = result["model_loaded"]
+    except Exception as e:
+        print(f"[Config] Error reading omnivoice_cpp engine status: {e}")
+
+    return jsonify(result)
+
+
+@config_bp.route('/api/tts/omnivoice-cpp/restart-worker', methods=['POST'])
+def restart_omnivoice_cpp_worker():
+    """Restart the OmniVoice (Vulkan) worker so device changes take effect.
+
+    GGML_BACKEND is read at worker start, so a GPU change requires a full
+    worker restart: unload, clear the cached provider, then warm up again.
+    """
+    try:
+        from services import tts
+        from services import omnivoice_cpp_engine
+    except Exception as e:
+        return jsonify({"status": "error", "error": f"omnivoice_cpp engine unavailable: {e}"}), 500
+
+    try:
+        omnivoice_cpp_engine.unload()
+        tts.clear_provider_cache('omnivoice_cpp')
+        print("[Config] OmniVoice (Vulkan) worker unloaded for manual restart")
+    except Exception as e:
+        print(f"[Config] Error unloading OmniVoice (Vulkan) worker: {e}")
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+    warming_up = False
+    try:
+        if omnivoice_cpp_engine.is_available():
+            import threading
+            def warmup_omnivoice_cpp_after_restart():
+                try:
+                    omnivoice_cpp_engine.warm_up()
+                    print("[Config] OmniVoice (Vulkan) worker restarted")
+                except Exception as e:
+                    print(f"[Config] OmniVoice (Vulkan) warm-up after restart failed: {e}")
+            threading.Thread(target=warmup_omnivoice_cpp_after_restart, daemon=True).start()
+            warming_up = True
+    except Exception as e:
+        print(f"[Config] Error starting OmniVoice (Vulkan) warm-up: {e}")
+
+    return jsonify({"status": "ok", "warming_up": warming_up})
+
+
 @config_bp.route('/api/tts/vram-status', methods=['GET'])
 def get_vram_status():
     """
@@ -1423,6 +1580,8 @@ def get_vram_status():
     settings = load_settings(raw=True)
     provider = settings.get('tts', {}).get('provider', 'inworld')
     requested_device = request.args.get('device')
+    if provider == 'omnivoice_cpp' or request.args.get('provider') == 'omnivoice_cpp':
+        return _get_omnivoice_cpp_gpu_status(settings, requested_device)
     if provider == 'omnivoice':
         configured_device = settings.get('tts', {}).get('omnivoice', {}).get('device', 'auto')
         server_device = requested_device or configured_device or 'auto'

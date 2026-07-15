@@ -46,6 +46,9 @@ def get_provider():
         elif provider_name == 'omnivoice_api':
             from .omnivoice_api import OmniVoiceApiProvider
             _providers[provider_name] = OmniVoiceApiProvider()
+        elif provider_name == 'omnivoice_cpp':
+            from .omnivoice_cpp import OmniVoiceCppProvider
+            _providers[provider_name] = OmniVoiceCppProvider()
         else:
             from .inworld import InworldProvider
             _providers[provider_name] = InworldProvider()
@@ -295,6 +298,9 @@ def clear_provider_cache(provider_name=None):
         elif provider_name == 'omnivoice_api':
             from .omnivoice_api import clear_voice_cache
             clear_voice_cache()
+        elif provider_name == 'omnivoice_cpp':
+            from .omnivoice_cpp import clear_voice_cache
+            clear_voice_cache()
     else:
         print("[TTS] Clearing all cached providers")
         _providers.clear()
@@ -324,6 +330,11 @@ def clear_provider_cache(provider_name=None):
             clear_voice_cache()
         except ImportError:
             pass
+        try:
+            from .omnivoice_cpp import clear_voice_cache
+            clear_voice_cache()
+        except ImportError:
+            pass
 
 
 def is_available() -> bool:
@@ -347,6 +358,12 @@ def is_available() -> bool:
     elif provider == 'omnivoice_api':
         omni_api = tts_settings.get('omnivoice_api', {})
         return bool((omni_api.get('api_url') or '').strip())
+    elif provider == 'omnivoice_cpp':
+        try:
+            from services.omnivoice_cpp_engine import is_available as _cpp_available
+            return _cpp_available()
+        except Exception:
+            return False
 
     return False
 

@@ -98,6 +98,16 @@ const TTS_PROVIDERS = {
             { id: "apply_smoothing_eq", type: "toggle", label: "Apply Smoothing EQ", default: true }
         ]
     },
+    omnivoice_cpp: {
+        label: "OmniVoice (Vulkan)",
+        description: "Local OmniVoice running on ggml/Vulkan. Works on any Vulkan-capable GPU (NVIDIA, AMD, Intel) — no CUDA required.",
+        fields: [
+            { id: "first_sentence_steps", type: "range", label: "First Sentence Steps", hint: "Fewer steps on the first sentence for faster time-to-first-audio.", min: 8, max: 64, step: 4, default: 24 },
+            { id: "num_steps", type: "range", label: "Default Steps", hint: "More steps = higher quality but slower. 32 is recommended.", min: 8, max: 64, step: 4, default: 32 },
+            { id: "guidance_scale", type: "range", label: "Style Guidance (CFG)", hint: "Controls how closely the model follows its style conditioning. Higher = more expressive but less stable.", min: 0.0, max: 10.0, step: 0.1, default: 2.0 },
+            { id: "apply_smoothing_eq", type: "toggle", label: "Apply Smoothing EQ", default: true }
+        ]
+    },
     omnivoice_api: {
         label: "OmniVoice API (Remote)",
         description: "Run OmniVoice on another computer using the standalone omnivoice-api server. Sonorus uses local reference files and stores cloned voices on the remote server.",
@@ -651,6 +661,7 @@ function switchProvider(category, providerId) {
         updateVramMonitoring();
         updateRamMonitoring();
         updateOmniVoicePanel();
+        updateOmniVoiceCppPanel();
     }
 
     refreshSetupStateFromConfig();
@@ -1215,6 +1226,128 @@ async function fetchOmniVoiceResources(modelLoaded) {
         }
     } catch (e) {
         console.error('[OmniVoice] Resource fetch failed:', e);
+    }
+}
+
+// ============================================
+// OmniVoice (Vulkan) Setup & Monitoring
+// ============================================
+let omnivoiceCppStatusInterval = null;
+let _omnivoiceCppSavedDevice = null;
+
+function updateOmniVoiceCppPanel() {
+    const provider = config.tts?.provider;
+    const panel = document.getElementById('omnivoiceCppSetup');
+    if (provider !== 'omnivoice_cpp') {
+        if (panel) panel.style.display = 'none';
+        if (omnivoiceCppStatusInterval) {
+            clearInterval(omnivoiceCppStatusInterval);
+            omnivoiceCppStatusInterval = null;
+        }
+        return;
+    }
+    if (panel) panel.style.display = 'block';
+    fetchOmniVoiceCppStatus();
+    if (!omnivoiceCppStatusInterval) {
+        omnivoiceCppStatusInterval = setInterval(fetchOmniVoiceCppStatus, 5000);
+    }
+}
+
+async function fetchOmniVoiceCppStatus() {
+    try {
+        const resp = await fetch('/api/tts/vram-status?provider=omnivoice_cpp');
+        const data = await resp.json();
+        renderOmniVoiceCppPanel(data);
+    } catch (e) {
+        console.error('[OmniVoiceCpp] Status check failed:', e);
+    }
+}
+
+function renderOmniVoiceCppPanel(data) {
+    const gpus = Array.isArray(data.gpus) ? data.gpus : [];
+    // selected_device reflects the saved settings on the server — use it as
+    // the baseline for the "restart needed" notice.
+    _omnivoiceCppSavedDevice = data.selected_device || 'auto';
+
+    // Runtime install-state hint (installer comes in a later update)
+    const hintGroup = document.getElementById('omnivoiceCppRuntimeHint');
+    const hintText = document.getElementById('omnivoiceCppRuntimeHintText');
+    if (hintGroup && hintText) {
+        const missing = [];
+        if (!data.dll_present) missing.push('the omnivoice.cpp runtime');
+        if (!data.models_present) missing.push('the GGUF voice models');
+        if (missing.length > 0) {
+            hintText.textContent = 'Not installed yet: ' + missing.join(' and ') + '. The installer will be available in a future update.';
+            hintGroup.style.display = 'block';
+        } else {
+            hintGroup.style.display = 'none';
+        }
+    }
+
+    renderOmniVoiceCppGpuPicker(gpus);
+    updateOmniVoiceCppRestartNotice();
+}
+
+function renderOmniVoiceCppGpuPicker(gpus) {
+    const select = document.getElementById('omnivoiceCppGpuSelect');
+    if (!select) return;
+
+    const configured = config.tts?.omnivoice_cpp?.device || 'auto';
+    select.innerHTML = '';
+
+    const autoOpt = document.createElement('option');
+    autoOpt.value = 'auto';
+    autoOpt.textContent = 'Auto (best device)';
+    select.appendChild(autoOpt);
+
+    for (const gpu of gpus) {
+        const opt = document.createElement('option');
+        opt.value = gpu.device;
+        opt.textContent = `GPU ${gpu.index}: ${gpu.name}`;
+        select.appendChild(opt);
+    }
+
+    select.value = gpus.some(g => g.device === configured) ? configured : 'auto';
+}
+
+function updateOmniVoiceCppGpu(device) {
+    if (!device) return;
+    updateProviderSetting('tts', 'omnivoice_cpp', 'device', device);
+    updateOmniVoiceCppRestartNotice();
+}
+
+function updateOmniVoiceCppRestartNotice() {
+    const notice = document.getElementById('omnivoiceCppRestartNotice');
+    if (!notice) return;
+    const current = config.tts?.omnivoice_cpp?.device || 'auto';
+    const changed = _omnivoiceCppSavedDevice !== null && current !== _omnivoiceCppSavedDevice;
+    notice.style.display = changed ? 'block' : 'none';
+}
+
+async function restartOmniVoiceCppWorker() {
+    const btn = document.getElementById('omnivoiceCppRestartBtn');
+    const status = document.getElementById('omnivoiceCppRestartStatus');
+    if (btn) btn.disabled = true;
+    if (status) status.textContent = 'Restarting TTS worker...';
+    try {
+        const resp = await fetch('/api/tts/omnivoice-cpp/restart-worker', { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok && data.status === 'ok') {
+            if (status) {
+                status.textContent = data.warming_up
+                    ? 'Worker restarting in the background.'
+                    : 'Worker stopped. It will start on the next voice request.';
+            }
+            showToast('TTS worker restarted');
+        } else {
+            if (status) status.textContent = '';
+            showToast(data.error || 'Restart failed', 'error');
+        }
+    } catch (e) {
+        if (status) status.textContent = '';
+        showToast('Restart failed: ' + e.message, 'error');
+    } finally {
+        if (btn) btn.disabled = false;
     }
 }
 
@@ -2431,6 +2564,7 @@ function isCurrentTtsConfigured() {
         ttsProvider === 'pocket' ||
         ttsProvider === 'neutts' ||
         ttsProvider === 'omnivoice' ||
+        ttsProvider === 'omnivoice_cpp' ||
         (ttsProvider === 'omnivoice_api' && Boolean(config.tts?.omnivoice_api?.api_url)) ||
         Boolean(config.tts?.[ttsProvider]?.api_key)
     );
@@ -4008,6 +4142,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Initialize OmniVoice panel if selected
     updateOmniVoicePanel();
+
+    // Initialize OmniVoice (Vulkan) panel if selected
+    updateOmniVoiceCppPanel();
 
     // Initialize reasoning toggles for model inputs (after config loaded)
     if (window.ReasoningToggle) {
