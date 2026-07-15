@@ -1,6 +1,6 @@
 # OmniVoice (Vulkan) implementation record and maintenance plan
 
-**Status:** implemented and clean-install tested through `9f49b62` on Sonorus **1.0.8 pre-release 5**.
+**Status:** implemented and clean-install tested through `1f72c9d` on Sonorus **1.0.8 pre-release 5**.
 
 **Audience:** the Sonorus maintainer or a future contributor changing the native runtime,
 installer, or provider integration. This document started as an implementation plan; it now
@@ -30,13 +30,16 @@ dc421a4  Add OmniVoice Vulkan installer and setup UI
 90daf02  Harden OmniVoice Vulkan packaging
 fcde0fe  Temporarily restore issue #3 safe ports for testing
 9f49b62  Keep Prepare Voices action visible before STT setup
+1f72c9d  Revert the temporary issue #3 safe-port workaround before handoff
 ```
 
 The pre-release 5 tree replaced the pre-release 4 package wholesale. Most local fixes that
 the maintainer had already incorporated upstream were not carried forward. The provider
 and two setup bugfixes were reapplied because pre-release 5 still needed them. The issue
-#3 port workaround was restored later when testing showed that pre-release 5 publishes a
-dynamic Python socket port but leaves the Lua client hardcoded to 8173.
+#3 port workaround was restored temporarily when testing showed that pre-release 5
+publishes a dynamic Python socket port but leaves the Lua client hardcoded to 8173. It was
+reverted before handoff so this branch does not mix that separate networking issue into the
+OmniVoice provider change.
 
 ---
 
@@ -152,7 +155,8 @@ Runtime checks reject truncated DLLs and unexpanded LFS pointer stubs. Orphaned
 available/loadable STT provider rather than only a non-`none` setting. The action remains
 visible but disabled before STT setup so the required next step is discoverable. The clean
 package and empty-model-directory UI workflow were exercised successfully through
-`9f49b62`; optional batch sidecar preparation remains to be tested.
+`9f49b62`. The Canary batch subsequently created 173 sidecars, continued past two empty
+STT results, and retried only those two unresolved clips.
 
 ---
 
@@ -279,12 +283,12 @@ audio and holds the resulting RVQ data only in the current worker's cache.
 | LFS/runtime bundle integrity | Verified on pre-5 | `git lfs fsck`; five valid PE DLLs; two exact MIT notices |
 | Fresh batch model install | Verified on pre-5 | Clean package began without GGUFs and downloaded both through the UI-launched batch |
 | UI model install/status | Verified on pre-5 | Installer launched and final ready state was reached |
-| Prepare Voices through STT | Pending | Remove one `.txt`; test ready and misconfigured STT; inspect atomic sidecar |
-| Prepare action discoverability | Fixed; retest pending | Disabled action remains visible until STT is configured (`9f49b62`) |
+| Prepare Voices through STT | Verified with two persistent clip failures | Canary wrote 173 sidecars atomically; Bragbor and Bully1 returned no text, and retry targeted only those two |
+| Prepare action discoverability | Verified | Disabled action was visible before STT setup and enabled after Canary configuration (`9f49b62`) |
 | Lazy first-use transcript | Verified on pre-5 | Canary created a missing transcript during gameplay in 533 ms |
 | Long in-game pre-release 5 dialogue | Verified | `Vulkan2` / R9700 conversations completed successfully |
 | Pre-release 5 device change / barge-in | Pending | Repeat device switching and third-character interruption |
-| Issue #3 safe-port workaround | Verified for testing | HTTP 5400 and matched socket 8420 bypassed occupied/reserved ports |
+| Issue #3 safe-port workaround | Verified locally, then reverted | HTTP 5400 and matched socket 8420 unblocked testing; `1f72c9d` removes the workaround from the handoff branch |
 | Other vendors / CPU fallback | Pending | Test Intel/NVIDIA Vulkan and CPU behavior |
 
 Do not promote a pending item to verified merely because the equivalent core path passed on
@@ -308,9 +312,10 @@ acceptance run.
    revision. Pin a revision if upstream model replacement becomes a compatibility risk.
 7. **Worker cache:** RVQ voice encodings are in memory and must be rebuilt after restart.
 8. **Device telemetry:** names/order are available, but VRAM totals/free memory are null.
-9. **Testing:** optional batch STT preparation, pre-release 5 device-change/barge-in, broader
-   GPU vendors, and CPU fallback remain unverified.
-10. **Networking:** `fcde0fe` is intentionally a fixed-port test workaround. The durable
+9. **Testing:** investigate the two reference clips that returned no Canary transcript;
+   pre-release 5 device-change/barge-in, broader GPU vendors, and CPU fallback remain
+   unverified.
+10. **Networking:** the fixed-port test workaround was reverted in `1f72c9d`. The durable
    upstream fix should make Lua consume the dynamically published socket port and should
    handle HTTP port-5000 collisions without requiring users to set environment variables.
 

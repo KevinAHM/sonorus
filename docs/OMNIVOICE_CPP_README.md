@@ -15,16 +15,17 @@ dc421a4  Add OmniVoice Vulkan installer and setup UI
 90daf02  Harden OmniVoice Vulkan packaging
 fcde0fe  Temporarily restore issue #3 safe ports for testing
 9f49b62  Keep Prepare Voices action visible before STT setup
+1f72c9d  Revert the temporary issue #3 safe-port workaround before handoff
 ```
 
 Pre-release 5 was imported wholesale rather than layering the old pre-release 4 fix stack
 over it. Most fixes already incorporated upstream were dropped. The two setup bugs in §8
-were still present in pre-release 5 and remain part of this branch. Commit `fcde0fe`
-temporarily restores the issue #3 safe-port workaround because pre-release 5 fixes only
-the Python half of the dynamic socket handoff; its Lua client still hardcodes port 8173.
+were still present in pre-release 5 and remain part of this branch. The issue #3 safe-port
+workaround was used to unblock local acceptance testing, then reverted before handoff so
+this branch leaves pre-release 5 networking unchanged.
 
 `docs/OMNIVOICE_CPP_PLAN.md` records the resolved design and acceptance status. This file
-describes what is actually present through `9f49b62`.
+describes what is actually present through `1f72c9d`.
 
 ---
 
@@ -42,7 +43,7 @@ and so on may identify devices from any vendor.
 
 ## 2. Implementation diff against the pre-release 5 import
 
-The following is the code/package delta through `9f49b62`, excluding these two handoff
+The following is the code/package delta through `1f72c9d`, excluding these two handoff
 documents:
 
 | Path | Change | Purpose |
@@ -59,10 +60,8 @@ documents:
 | `.gitignore` | +12/-1 | Ignore generated models while admitting the runtime DLLs and notices |
 | `omnivoice_cpp/bin/*.dll` | five LFS objects | Bundled native runtime; exact list in §4 |
 | `omnivoice_cpp/licenses/*.LICENSE` | two new files | Exact upstream omnivoice.cpp and ggml MIT notices |
-| `server.py`, setup routes | +7/-6 | Temporary HTTP-port 5400 workaround and matching generated URLs |
-| `socket_client.lua` | +3/-1 | Temporary fixed socket 8420 matching the Python server |
 
-Total relative to `8defc25`: **2,660 insertions and 10 deletions** across 21 paths.
+Total relative to `8defc25`: **2,650 insertions and 3 deletions** across 17 paths.
 
 `utils/settings.py` and `services/tts/__init__.py` contain mixed CRLF/LF endings upstream.
 Their changes were kept byte-minimal (+1 and +17); editors that normalize the files can
@@ -313,14 +312,14 @@ The optional voice-preparation action now remains visible before STT setup. It i
 and labeled **Configure STT to Prepare Voices** until a loadable provider is selected,
 rather than disappearing while the warning tells the user to configure STT.
 
-### Temporary pre-release 5 networking workaround
+### Pre-release 5 networking finding (not included in this branch)
 
 Pre-release 5 creates an automatic Python socket port and publishes `lua_socket.port`, but
 the shipped `socket_client.lua` never reads that file and still connects to hardcoded port
-8173. Its HTTP server also still defaults to commonly occupied port 5000. For the current
-test branch, `fcde0fe` restores the reporter's known-safe defaults: HTTP 5400 and a matched
-Python/Lua socket on 8420. This should be presented to the maintainer as a temporary
-workaround until the dynamic port-file handoff is completed on the Lua side.
+8173. Its HTTP server also still defaults to commonly occupied port 5000. A temporary local
+workaround using HTTP 5400 and a matched Python/Lua socket on 8420 unblocked acceptance
+testing, but commit `1f72c9d` reverted it before handoff. The maintainer should complete the
+dynamic port-file handoff on the Lua side and decide how to handle HTTP port-5000 collisions.
 
 ---
 
@@ -344,7 +343,7 @@ yet been repeated end-to-end on the final pre-release 5 packaging branch:
 Test system: RTX 5080 for the game, Radeon AI PRO R9700 32 GB for TTS, Ryzen 9 9950X3D,
 Windows 11. Device enumeration was `Vulkan0` RTX 5080, `Vulkan1` AMD iGPU, `Vulkan2` R9700.
 
-### Verified on the final pre-release 5 branch through `9f49b62`
+### Verified on the final pre-release 5 branch through `1f72c9d`
 
 - The provider was reapplied against the wholesale pre-release 5 tree with a clean diff.
 - Python compilation succeeds for the engine, provider, Vulkan utility, and config routes.
@@ -356,18 +355,22 @@ Windows 11. Device enumeration was `Vulkan0` RTX 5080, `Vulkan1` AMD iGPU, `Vulk
 - A clean package with no GGUFs installed all five DLLs and both notices successfully.
 - The config UI launched the models-only installer, downloaded both GGUFs, and reached the
   ready state on the clean installation.
-- The temporary HTTP 5400/socket 8420 workaround allowed the server and Lua client to run
-  on a system where port 5000 was occupied and 8173 was Windows-reserved.
+- A temporary local HTTP 5400/socket 8420 workaround allowed acceptance testing on a system
+  where port 5000 was occupied and 8173 was Windows-reserved. That workaround is not part
+  of the handoff branch.
 - `Vulkan2` selected the Radeon AI PRO R9700 and completed long in-game conversations on
   pre-release 5 successfully.
 - Canary STT exercised the lazy first-use path for a missing sidecar in gameplay and
   produced a transcript successfully (logged inference time: 533 ms).
+- The visible Prepare Voices action enabled after Canary STT configuration. Its batch run
+  atomically created 173 transcript sidecars and continued past two empty STT results. A
+  retry correctly attempted only `Bragbor_reference_15s.wav` and
+  `Bully1_reference_15s.wav`; both still returned no transcript.
 
 ### Still requires acceptance testing
 
-- Prepare at least one reference with no `.txt` through a configured and loadable STT
-  provider; confirm batch progress, atomic sidecar creation, and partial-failure behavior.
-- Confirm the now-visible disabled action enables automatically after STT configuration.
+- Investigate why Canary returns no text for the Bragbor and Bully1 reference clips, or
+  confirm that the clips contain no usable speech and should remain without sidecars.
 - Repeat device switching and third-character barge-in on the pre-release 5 branch.
 - Test vendors/configurations beyond the R9700/RTX 5080 system, including CPU fallback.
 
