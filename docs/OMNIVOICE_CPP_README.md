@@ -243,7 +243,14 @@ Windows 11. Enumeration on this box: `Vulkan0` = RTX 5080, `Vulkan1` = AMD iGPU,
   per sentence in ~1.2 s wall (RTF ≈ 0.4)** — comfortably inside conversational latency,
   with the NVIDIA idle.
 - Config UI: provider switch, GPU picker, and Test Voice all working in the live server.
+- **In-game, full play sessions:** long conversations run flawlessly, including interrupts /
+  barge-in from a third character mid-line. Output quality is a clear step up from Pocket.
+  With TTS pinned to the second GPU the pacing feels real-time with no noticeable delay —
+  at least with the player-voice option on, since speaking the typed input gives the NPC's
+  line time to generate. The NVIDIA stayed free for the game throughout.
 
-**Not yet tested:** full in-game conversation, barge-in/interrupt handling, and first-time
-voice cloning through the STT transcript path (references on the test box already had
-transcripts). Multi-GPU offload was verified at the worker level, not across a play session.
+**Not yet verified:** first-time voice cloning through the STT transcript path. The sidecar
+`<Name>_reference_15s.txt` transcripts are shared with the torch provider (same
+`voice_references/`, same `ensure_voice_reference_transcript`), so where they already existed
+from prior OmniVoice use, this provider never exercised the generation path. That path is
+unchanged from the torch provider either way.
