@@ -348,10 +348,9 @@ def _is_tts_activity_active():
 # Global conversation state
 conv_state = ConversationState()
 
-# Temporary issue #3 workaround: keep Python and the in-game Lua client on the
-# same known-safe port. Pre-release 5 publishes an auto-selected port, but its
-# Lua client still hardcodes 8173 and never reads the published port file.
-lua_socket = LuaSocketServer(port=int(os.getenv("SONORUS_SOCKET_PORT", "8420")))
+# Global socket server instance. Port 0 lets Windows choose a currently bindable
+# port; SONORUS_SOCKET_PORT remains available as an explicit troubleshooting override.
+lua_socket = LuaSocketServer(port=int(os.getenv("SONORUS_SOCKET_PORT", "0")))
 
 # Wire up socket with external modules
 if INPUT_CAPTURE_AVAILABLE:
@@ -5199,7 +5198,7 @@ def main():
     except Exception as e:
         print(f"[Server] Warning: Could not set up log file: {e}")
 
-    port = int(os.getenv("SONORUS_SERVER_PORT", "5400"))
+    port = int(os.getenv("SONORUS_SERVER_PORT", "5000"))
 
     # Initialize runtime databases
     # dialogue_db init deferred to first player handshake via PlayerContext

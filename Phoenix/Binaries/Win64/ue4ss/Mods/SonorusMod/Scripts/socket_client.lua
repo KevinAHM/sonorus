@@ -24,9 +24,7 @@ end
 local SocketClient = {}
 local client = nil
 local buffer = ""
--- Temporary issue #3 workaround. Keep this synchronized with the Python
--- SONORUS_SOCKET_PORT default until the dynamic port-file handoff is complete.
-local SERVER_PORT = 8420
+local SERVER_PORT = 8173
 
 -- Send queue to prevent interleaving (Lua callbacks can interleave)
 local sendQueue = {}
