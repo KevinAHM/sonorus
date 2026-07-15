@@ -1,6 +1,6 @@
 # OmniVoice (Vulkan) implementation record and maintenance plan
 
-**Status:** implemented through `90daf02` on Sonorus **1.0.8 pre-release 5**.
+**Status:** implemented and clean-install tested through `9f49b62` on Sonorus **1.0.8 pre-release 5**.
 
 **Audience:** the Sonorus maintainer or a future contributor changing the native runtime,
 installer, or provider integration. This document started as an implementation plan; it now
@@ -28,11 +28,15 @@ The final branch history is:
 9f9c59f  Reapply omnivoice_cpp provider on pre-release 5
 dc421a4  Add OmniVoice Vulkan installer and setup UI
 90daf02  Harden OmniVoice Vulkan packaging
+fcde0fe  Temporarily restore issue #3 safe ports for testing
+9f49b62  Keep Prepare Voices action visible before STT setup
 ```
 
-The pre-release 5 tree replaced the pre-release 4 package wholesale. Local fixes that the
-maintainer had already incorporated upstream were not carried forward. The provider and
-the two setup bugfixes were reapplied because pre-release 5 still needed them.
+The pre-release 5 tree replaced the pre-release 4 package wholesale. Most local fixes that
+the maintainer had already incorporated upstream were not carried forward. The provider
+and two setup bugfixes were reapplied because pre-release 5 still needed them. The issue
+#3 port workaround was restored later when testing showed that pre-release 5 publishes a
+dynamic Python socket port but leaves the Lua client hardcoded to 8173.
 
 ---
 
@@ -134,7 +138,7 @@ amplitude visemes and applies interruption epochs. Long conversations and third-
 barge-in worked in the earlier in-game test. Forced alignment remains a possible later
 enhancement, not a requirement for lipsync.
 
-### Phase 4 — Packaging and setup UX: implemented; clean-user test pending
+### Phase 4 — Packaging and setup UX: implemented; clean-user model install verified
 
 - Five native DLLs (72.40 MiB total) are bundled through LFS.
 - Two GGUFs (1.30 GiB total) are downloaded through the embedded Python.
@@ -145,9 +149,10 @@ enhancement, not a requirement for lipsync.
 
 Runtime checks reject truncated DLLs and unexpanded LFS pointer stubs. Orphaned
 `installing` markers become retryable errors, and voice preparation requires an actually
-available/loadable STT provider rather than only a non-`none` setting. The package and UI
-are code-complete through `90daf02`, but the full empty-model-directory
-workflow has not yet been exercised as a clean user.
+available/loadable STT provider rather than only a non-`none` setting. The action remains
+visible but disabled before STT setup so the required next step is discoverable. The clean
+package and empty-model-directory UI workflow were exercised successfully through
+`9f49b62`; optional batch sidecar preparation remains to be tested.
 
 ---
 
@@ -272,11 +277,14 @@ audio and holds the resulting RVQ data only in the current worker's cache.
 | Reapply against pre-release 5 | Verified statically | Clean feature diff from `8defc25` |
 | Python and JavaScript syntax | Verified on pre-5 | `py_compile`; `node --check` |
 | LFS/runtime bundle integrity | Verified on pre-5 | `git lfs fsck`; five valid PE DLLs; two exact MIT notices |
-| Fresh batch model install | Pending | Delete/move GGUFs and run batch as a clean user |
-| UI model install/status | Pending | Confirm console, polling, retry/resume, 2/2 ready |
+| Fresh batch model install | Verified on pre-5 | Clean package began without GGUFs and downloaded both through the UI-launched batch |
+| UI model install/status | Verified on pre-5 | Installer launched and final ready state was reached |
 | Prepare Voices through STT | Pending | Remove one `.txt`; test ready and misconfigured STT; inspect atomic sidecar |
-| Lazy first-use transcript | Pending | Exercise a voice with no existing sidecar |
-| Full in-game pre-release 5 retest | Pending | Long dialogue, device change, barge-in |
+| Prepare action discoverability | Fixed; retest pending | Disabled action remains visible until STT is configured (`9f49b62`) |
+| Lazy first-use transcript | Verified on pre-5 | Canary created a missing transcript during gameplay in 533 ms |
+| Long in-game pre-release 5 dialogue | Verified | `Vulkan2` / R9700 conversations completed successfully |
+| Pre-release 5 device change / barge-in | Pending | Repeat device switching and third-character interruption |
+| Issue #3 safe-port workaround | Verified for testing | HTTP 5400 and matched socket 8420 bypassed occupied/reserved ports |
 | Other vendors / CPU fallback | Pending | Test Intel/NVIDIA Vulkan and CPU behavior |
 
 Do not promote a pending item to verified merely because the equivalent core path passed on
@@ -300,8 +308,11 @@ acceptance run.
    revision. Pin a revision if upstream model replacement becomes a compatibility risk.
 7. **Worker cache:** RVQ voice encodings are in memory and must be rebuilt after restart.
 8. **Device telemetry:** names/order are available, but VRAM totals/free memory are null.
-9. **Testing:** clean installer, STT preparation, final pre-release 5 gameplay, broader GPU
-   vendors, and CPU fallback remain the release gate.
+9. **Testing:** optional batch STT preparation, pre-release 5 device-change/barge-in, broader
+   GPU vendors, and CPU fallback remain unverified.
+10. **Networking:** `fcde0fe` is intentionally a fixed-port test workaround. The durable
+   upstream fix should make Lua consume the dynamically published socket port and should
+   handle HTTP port-5000 collisions without requiring users to set environment variables.
 
 Optional later enhancements:
 
