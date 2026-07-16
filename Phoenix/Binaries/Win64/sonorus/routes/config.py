@@ -1541,6 +1541,42 @@ def _read_omnivoice_cpp_install_state():
         return ""
 
 
+def _omnivoice_cpp_download_active(window_seconds=180):
+    """Detect model-download activity not owned by this server process.
+
+    Covers the installer bat being run manually and downloads that survive a
+    server restart: hf_hub_download appends to *.incomplete files under
+    MODEL_DIR/.cache, and each finished model file keeps a fresh mtime.
+    """
+    import time
+    from services import omnivoice_cpp_engine
+
+    candidates = [
+        omnivoice_cpp_engine.MODEL_DIR / omnivoice_cpp_engine.MODEL_FILENAME,
+        omnivoice_cpp_engine.MODEL_DIR / omnivoice_cpp_engine.TOKENIZER_FILENAME,
+    ]
+    cache_dir = omnivoice_cpp_engine.MODEL_DIR / ".cache"
+    if cache_dir.is_dir():
+        try:
+            candidates.extend(cache_dir.rglob("*.incomplete"))
+        except OSError:
+            pass
+
+    now = time.time()
+    for path in candidates:
+        try:
+            if path.is_file() and now - path.stat().st_mtime < window_seconds:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+# Cached count for the status poll; a full voice_references scan (including a
+# read of every .txt sidecar) is too heavy to run on every poll tick.
+_untranscribed_voices_cache = {"at": 0.0, "count": 0}
+
+
 def _omnivoice_cpp_stt_available():
     """Check STT configuration and confirm the selected provider can load."""
     try:
@@ -1581,6 +1617,11 @@ def get_omnivoice_cpp_status():
     elif process_running:
         install_state = "installing"
         install_message = "Downloading OmniVoice (Vulkan) models..."
+    elif marker_state == "installing" and _omnivoice_cpp_download_active():
+        # Installer launched manually (or the server restarted mid-download):
+        # no process handle, but the download is demonstrably progressing.
+        install_state = "installing"
+        install_message = "Downloading OmniVoice (Vulkan) models..."
     elif marker_state == "error" or (process_exit_code is not None and process_exit_code != 0):
         install_state = "error"
         install_message = "Model download failed. Check the installer window and try again."
@@ -1594,6 +1635,12 @@ def get_omnivoice_cpp_status():
     current_model = next((name for name in model_files if name not in completed_models), "")
     stt_configured = _omnivoice_cpp_stt_available()
 
+    import time
+    now = time.monotonic()
+    if now - _untranscribed_voices_cache["at"] > 10.0:
+        _untranscribed_voices_cache["count"] = len(_collect_untranscribed_voices())
+        _untranscribed_voices_cache["at"] = now
+
     return jsonify({
         "dll_present": omnivoice_cpp_engine.dll_present(),
         "runtime_present": omnivoice_cpp_engine.runtime_present(),
@@ -1606,7 +1653,7 @@ def get_omnivoice_cpp_status():
             "current": current_model,
             "message": install_message,
         },
-        "voices_needing_transcripts": len(_collect_untranscribed_voices()),
+        "voices_needing_transcripts": _untranscribed_voices_cache["count"],
         "stt_configured": stt_configured,
         "voice_progress": dict(_omnivoice_cpp_voice_progress),
     })
@@ -1627,6 +1674,10 @@ def install_omnivoice_cpp_models():
         }), 400
     if omnivoice_cpp_engine.models_present():
         return jsonify({"status": "already_installed"}), 200
+    if _read_omnivoice_cpp_install_state() == "installing" and _omnivoice_cpp_download_active():
+        # A manually launched installer is already downloading - don't start
+        # a second one that would race it for the same files.
+        return jsonify({"status": "installing"}), 202
 
     sonorus_dir = Path(__file__).resolve().parent.parent
     bat_path = sonorus_dir / "install_omnivoice_cpp.bat"
@@ -2128,6 +2179,7 @@ def _prepare_omnivoice_cpp_voices(voices):
             "error": "" if failed == 0 else f"{failed} voice reference(s) could not be transcribed.",
         })
         print(f"[OmniVoiceCpp Setup] Done. Transcribed: {succeeded}, Failed: {failed}")
+        _untranscribed_voices_cache["at"] = 0.0
     except Exception as exc:
         _omnivoice_cpp_voice_progress.update({
             "status": "error",

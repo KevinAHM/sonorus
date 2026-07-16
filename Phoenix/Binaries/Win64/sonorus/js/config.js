@@ -1233,6 +1233,7 @@ async function fetchOmniVoiceResources(modelLoaded) {
 // OmniVoice (Vulkan) Setup & Monitoring
 // ============================================
 let omnivoiceCppStatusInterval = null;
+let omnivoiceCppPollMs = 0;
 let _omnivoiceCppSavedDevice = null;
 
 function updateOmniVoiceCppPanel() {
@@ -1243,14 +1244,20 @@ function updateOmniVoiceCppPanel() {
         if (omnivoiceCppStatusInterval) {
             clearInterval(omnivoiceCppStatusInterval);
             omnivoiceCppStatusInterval = null;
+            omnivoiceCppPollMs = 0;
         }
         return;
     }
     if (panel) panel.style.display = 'block';
     fetchOmniVoiceCppStatus();
-    if (!omnivoiceCppStatusInterval) {
-        omnivoiceCppStatusInterval = setInterval(fetchOmniVoiceCppStatus, 3000);
-    }
+    _setOmniVoiceCppPoll(3000);
+}
+
+function _setOmniVoiceCppPoll(ms) {
+    if (omnivoiceCppPollMs === ms && omnivoiceCppStatusInterval) return;
+    omnivoiceCppPollMs = ms;
+    if (omnivoiceCppStatusInterval) clearInterval(omnivoiceCppStatusInterval);
+    omnivoiceCppStatusInterval = setInterval(fetchOmniVoiceCppStatus, ms);
 }
 
 async function fetchOmniVoiceCppStatus() {
@@ -1305,6 +1312,12 @@ function renderOmniVoiceCppPanel(data) {
 
     renderOmniVoiceCppGpuPicker(gpus);
     updateOmniVoiceCppRestartNotice();
+
+    // Poll fast only while something is actually in flight; idle panels
+    // (everything installed, or waiting on user action) tick slowly.
+    const installBusy = (data.install_progress || {}).status === 'installing';
+    const voiceBusy = (data.voice_progress || {}).status === 'processing';
+    _setOmniVoiceCppPoll(installBusy || voiceBusy ? 3000 : 15000);
 }
 
 function renderOmniVoiceCppInstall(data, runtimeReady, modelsReady) {
@@ -1399,6 +1412,16 @@ function renderOmniVoiceCppGpuPicker(gpus) {
     if (!select) return;
 
     const configured = config.tts?.omnivoice_cpp?.device || 'auto';
+    const desiredValue = gpus.some(g => g.device === configured) ? configured : 'auto';
+    const signature = JSON.stringify(gpus.map(g => [g.device, g.name]));
+
+    // Rebuilding the options collapses the dropdown if the user has it open —
+    // skip while neither the device list nor the selection has changed.
+    if (select.dataset.gpuSignature === signature && select.value === desiredValue) {
+        return;
+    }
+
+    select.dataset.gpuSignature = signature;
     select.innerHTML = '';
 
     const autoOpt = document.createElement('option');
@@ -1413,7 +1436,7 @@ function renderOmniVoiceCppGpuPicker(gpus) {
         select.appendChild(opt);
     }
 
-    select.value = gpus.some(g => g.device === configured) ? configured : 'auto';
+    select.value = desiredValue;
 }
 
 function updateOmniVoiceCppGpu(device) {

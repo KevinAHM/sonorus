@@ -75,7 +75,9 @@ goto :finish
 
 :failed
 echo.
-if /I not "%~1"=="--no-pause" pause
+:: Always pause on failure - even when launched from the config UI with
+:: --no-pause - so the error stays readable instead of the window closing.
+pause
 exit /b 1
 
 :finish
