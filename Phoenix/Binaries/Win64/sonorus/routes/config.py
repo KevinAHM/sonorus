@@ -1545,8 +1545,9 @@ def _omnivoice_cpp_download_active(window_seconds=180):
     """Detect model-download activity not owned by this server process.
 
     Covers the installer bat being run manually and downloads that survive a
-    server restart: hf_hub_download appends to *.incomplete files under
-    MODEL_DIR/.cache, and each finished model file keeps a fresh mtime.
+    server restart: downloads append to *.incomplete files (under
+    MODEL_DIR/.cache or beside a direct release asset), and each finished
+    model file keeps a fresh mtime.
     """
     import time
     from services import omnivoice_cpp_engine
@@ -1554,6 +1555,8 @@ def _omnivoice_cpp_download_active(window_seconds=180):
     candidates = [
         omnivoice_cpp_engine.MODEL_DIR / omnivoice_cpp_engine.MODEL_FILENAME,
         omnivoice_cpp_engine.MODEL_DIR / omnivoice_cpp_engine.TOKENIZER_FILENAME,
+        omnivoice_cpp_engine.MODEL_DIR / omnivoice_cpp_engine.UPSCALER_FILENAME,
+        omnivoice_cpp_engine.MODEL_DIR / (omnivoice_cpp_engine.UPSCALER_FILENAME + ".incomplete"),
     ]
     cache_dir = omnivoice_cpp_engine.MODEL_DIR / ".cache"
     if cache_dir.is_dir():
@@ -1595,10 +1598,11 @@ def get_omnivoice_cpp_status():
     model_files = [
         omnivoice_cpp_engine.MODEL_FILENAME,
         omnivoice_cpp_engine.TOKENIZER_FILENAME,
+        omnivoice_cpp_engine.UPSCALER_FILENAME,
     ]
     completed_models = [
         name for name in model_files
-        if (omnivoice_cpp_engine.MODEL_DIR / name).is_file()
+        if omnivoice_cpp_engine.model_file_ready(name)
     ]
     models_present = omnivoice_cpp_engine.models_present()
     marker_state = _read_omnivoice_cpp_install_state()
@@ -1630,7 +1634,7 @@ def get_omnivoice_cpp_status():
         install_message = "A previous model download did not finish. Start the installer again to retry."
     else:
         install_state = "idle"
-        install_message = "The two GGUF models have not been downloaded."
+        install_message = "The three GGUF models have not been downloaded."
 
     current_model = next((name for name in model_files if name not in completed_models), "")
     stt_configured = _omnivoice_cpp_stt_available()

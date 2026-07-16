@@ -7,12 +7,13 @@ process-manager pattern as omnivoice_engine.py / pocket_tts_onnx.py, but with
 no torch anywhere: the worker talks to omnivoice.dll via ctypes, so it runs
 on any Vulkan GPU (or CPU) without CUDA.
 
-The ctypes structs below mirror omnivoice.h (OV_ABI_VERSION 3) field for
-field.  Defaults are always populated via ov_init_default_params /
+The ctypes structs below mirror omnivoice.h (OV_ABI_VERSION 4) field for
+field.  Defaults are always populated via ov_init_default_params_v4 /
 ov_tts_default_params rather than hand-filled.
 """
 import ctypes as C
 import gc
+import hashlib
 import os
 import queue as _queue_mod
 import time
@@ -33,7 +34,18 @@ from utils.settings import load_settings
 # ============================================================================
 
 HF_REPO_ID = "Serveurperso/OmniVoice-GGUF"
+# The AudioVAE is produced separately from the two upstream OmniVoice GGUFs.
+# Environment overrides keep development/private mirrors testable without
+# changing the distributed source.
+UPSCALER_HF_REPO_ID = os.environ.get("SONORUS_OMNIVOICE_UPSCALER_REPO", "")
+UPSCALER_URL = os.environ.get(
+    "SONORUS_OMNIVOICE_UPSCALER_URL",
+    "https://github.com/Jrjy3/omnivoice.cpp/releases/download/"
+    "voxcpm2-audiovae-v1/voxcpm2-audiovae-f16.gguf",
+)
 SAMPLE_RATE = 24_000  # OmniVoice native sample rate (codec output)
+OUTPUT_SAMPLE_RATE = 48_000  # VoxCPM2 AudioVAE upscaled output
+OV_ABI_VERSION = 4
 
 _SONORUS_ROOT = Path(__file__).resolve().parent.parent
 BIN_DIR = _SONORUS_ROOT / "omnivoice_cpp" / "bin"
@@ -41,6 +53,9 @@ MODEL_DIR = _SONORUS_ROOT / "omnivoice_cpp" / "models"
 
 MODEL_FILENAME = "omnivoice-base-Q8_0.gguf"
 TOKENIZER_FILENAME = "omnivoice-tokenizer-F32.gguf"
+UPSCALER_FILENAME = "voxcpm2-audiovae-f16.gguf"
+UPSCALER_EXPECTED_BYTES = 187_868_032
+UPSCALER_SHA256 = "a5fb091c0a95172bdee2ee7230335dac7d3dc318d77ca100f095d023cabd5d97"
 _DLL_NAMES = ("omnivoice.dll", "libomnivoice.dll")
 RUNTIME_DLL_FILENAMES = (
     "ggml.dll",
@@ -56,6 +71,7 @@ _RUNTIME_MIN_BYTES = {
     "ggml-cpu.dll": 128 * 1024,
     "ggml-vulkan.dll": 1024 * 1024,
 }
+_upscaler_validation_cache: dict[tuple[str, int, int], bool] = {}
 
 
 def _serialized_worker_io(func):
@@ -108,11 +124,42 @@ def runtime_present() -> bool:
     return not missing_runtime_files()
 
 
+def _is_valid_upscaler_model(path: Path) -> bool:
+    """Verify the separately hosted AudioVAE asset by exact size and SHA-256."""
+    try:
+        stat = path.stat()
+        if not path.is_file() or stat.st_size != UPSCALER_EXPECTED_BYTES:
+            return False
+        cache_key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+        cached = _upscaler_validation_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        digest = hashlib.sha256()
+        with path.open("rb") as model_file:
+            for chunk in iter(lambda: model_file.read(4 * 1024 * 1024), b""):
+                digest.update(chunk)
+        valid = digest.hexdigest().lower() == UPSCALER_SHA256
+        _upscaler_validation_cache.clear()
+        _upscaler_validation_cache[cache_key] = valid
+        return valid
+    except OSError:
+        return False
+
+
+def model_file_ready(filename: str) -> bool:
+    """Return whether one expected model file is usable by this integration."""
+    path = MODEL_DIR / filename
+    if filename == UPSCALER_FILENAME:
+        return _is_valid_upscaler_model(path)
+    return filename in (MODEL_FILENAME, TOKENIZER_FILENAME) and path.is_file()
+
+
 def models_present() -> bool:
-    """Check if both GGUF models have been downloaded."""
+    """Check if all inference and 48 kHz upscaler GGUF models are present."""
     return (
-        (MODEL_DIR / MODEL_FILENAME).is_file()
-        and (MODEL_DIR / TOKENIZER_FILENAME).is_file()
+        model_file_ready(MODEL_FILENAME)
+        and model_file_ready(TOKENIZER_FILENAME)
+        and model_file_ready(UPSCALER_FILENAME)
     )
 
 
@@ -127,7 +174,7 @@ def is_available() -> bool:
 
 def download_models(progress_cb=None):
     """
-    Download the two GGUF models from HuggingFace into MODEL_DIR.
+    Download the three GGUF models from their configured sources into MODEL_DIR.
 
     Args:
         progress_cb: Optional callback(current, total, message) for progress.
@@ -141,10 +188,10 @@ def download_models(progress_cb=None):
         ) from exc
 
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    filenames = [MODEL_FILENAME, TOKENIZER_FILENAME]
+    filenames = [MODEL_FILENAME, TOKENIZER_FILENAME, UPSCALER_FILENAME]
     total = len(filenames)
 
-    for index, filename in enumerate(filenames):
+    for index, filename in enumerate((MODEL_FILENAME, TOKENIZER_FILENAME)):
         if progress_cb:
             progress_cb(index, total, f"Downloading {filename}...")
         if (MODEL_DIR / filename).is_file():
@@ -154,13 +201,89 @@ def download_models(progress_cb=None):
         hf_hub_download(repo_id=HF_REPO_ID, filename=filename, local_dir=str(MODEL_DIR))
         print(f"[OmniVoiceCpp] Downloaded {filename}")
 
+    upscaler_path = MODEL_DIR / UPSCALER_FILENAME
+    if progress_cb:
+        progress_cb(2, total, f"Downloading {UPSCALER_FILENAME}...")
+    if _is_valid_upscaler_model(upscaler_path):
+        print(f"[OmniVoiceCpp] Model already present: {UPSCALER_FILENAME}")
+    else:
+        if upscaler_path.is_file():
+            print(f"[OmniVoiceCpp] Removing invalid {UPSCALER_FILENAME}")
+            upscaler_path.unlink()
+        if UPSCALER_HF_REPO_ID:
+            print(f"[OmniVoiceCpp] Downloading {UPSCALER_FILENAME} "
+                  f"from {UPSCALER_HF_REPO_ID}...")
+            hf_hub_download(
+                repo_id=UPSCALER_HF_REPO_ID,
+                filename=UPSCALER_FILENAME,
+                local_dir=str(MODEL_DIR),
+            )
+            print(f"[OmniVoiceCpp] Downloaded {UPSCALER_FILENAME}")
+        elif UPSCALER_URL:
+            _download_upscaler_url(UPSCALER_URL, upscaler_path)
+        else:
+            raise RuntimeError(
+                "The VoxCPM2 AudioVAE download source is not configured. Set "
+                "UPSCALER_HF_REPO_ID or UPSCALER_URL before packaging, or set "
+                "SONORUS_OMNIVOICE_UPSCALER_REPO/SONORUS_OMNIVOICE_UPSCALER_URL "
+                "for a development install."
+            )
+
+    if not _is_valid_upscaler_model(upscaler_path):
+        upscaler_path.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"Integrity check failed for {UPSCALER_FILENAME}; expected "
+            f"{UPSCALER_EXPECTED_BYTES} bytes and SHA-256 {UPSCALER_SHA256}"
+        )
+
     if progress_cb:
         progress_cb(total, total, "OmniVoice.cpp models ready")
     print(f"[OmniVoiceCpp] Models ready in {MODEL_DIR}")
 
 
+def _download_upscaler_url(url: str, destination: Path) -> None:
+    """Download a direct release asset, retaining a resumable partial file."""
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    partial = destination.with_name(destination.name + ".incomplete")
+    offset = partial.stat().st_size if partial.is_file() else 0
+    headers = {"User-Agent": "Sonorus-OmniVoiceCpp-Installer"}
+    if offset:
+        headers["Range"] = f"bytes={offset}-"
+
+    print(f"[OmniVoiceCpp] Downloading {destination.name} from release asset...")
+    try:
+        response = urlopen(Request(url, headers=headers), timeout=60)
+    except HTTPError as exc:
+        if exc.code == 416 and offset:
+            partial.unlink(missing_ok=True)
+            return _download_upscaler_url(url, destination)
+        raise
+
+    with response:
+        status = getattr(response, "status", response.getcode())
+        append = bool(offset and status == 206)
+        expected_chunk = response.headers.get("Content-Length")
+        expected_size = (offset if append else 0) + int(expected_chunk) if expected_chunk else None
+        with partial.open("ab" if append else "wb") as output:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                output.write(chunk)
+
+    if expected_size is not None and partial.stat().st_size != expected_size:
+        raise RuntimeError(
+            f"Incomplete download for {destination.name}: "
+            f"received {partial.stat().st_size} of {expected_size} bytes"
+        )
+    partial.replace(destination)
+    print(f"[OmniVoiceCpp] Downloaded {destination.name}")
+
+
 # ============================================================================
-# ctypes ABI (mirrors omnivoice.h, OV_ABI_VERSION 3)
+# ctypes ABI (mirrors omnivoice.h, OV_ABI_VERSION 4)
 # ============================================================================
 
 # enum ov_status
@@ -190,6 +313,7 @@ class OvInitParams(C.Structure):
         ("codec_path", C.c_char_p),
         ("use_fa", C.c_bool),
         ("clamp_fp16", C.c_bool),
+        ("upscaler_path", C.c_char_p),
     ]
 
 
@@ -247,8 +371,15 @@ def _bind_dll(lib):
     lib.ov_version.argtypes = []
     lib.ov_last_error.restype = C.c_char_p
     lib.ov_last_error.argtypes = []
-    lib.ov_init_default_params.restype = None
-    lib.ov_init_default_params.argtypes = [C.POINTER(OvInitParams)]
+    try:
+        init_defaults_v4 = lib.ov_init_default_params_v4
+    except AttributeError as exc:
+        raise RuntimeError(
+            "The bundled omnivoice.dll does not expose ov_init_default_params_v4; "
+            "install the ABI v4 runtime required for 48 kHz upscaling"
+        ) from exc
+    init_defaults_v4.restype = None
+    init_defaults_v4.argtypes = [C.POINTER(OvInitParams)]
     lib.ov_init.restype = C.c_void_p          # opaque struct ov_context *
     lib.ov_init.argtypes = [C.POINTER(OvInitParams)]
     lib.ov_free.restype = None
@@ -280,7 +411,7 @@ def _omnivoice_cpp_worker_main(
 
     *config* keys:
         device, num_steps, guidance_scale, seed,
-        bin_dir, model_path, codec_path
+        bin_dir, model_path, codec_path, upscaler_path
     """
     try:
         import numpy as np
@@ -325,14 +456,21 @@ def _omnivoice_cpp_worker_main(
         # --------------------------------------------------------------
         model_path = str(config["model_path"]).encode("utf-8")
         codec_path = str(config["codec_path"]).encode("utf-8")
+        upscaler_path = str(config["upscaler_path"]).encode("utf-8")
 
         init_params = OvInitParams()
-        lib.ov_init_default_params(C.byref(init_params))
+        lib.ov_init_default_params_v4(C.byref(init_params))
+        if init_params.abi_version != OV_ABI_VERSION:
+            raise RuntimeError(
+                "Incompatible omnivoice.dll ABI "
+                f"({init_params.abi_version}; Sonorus requires {OV_ABI_VERSION} for 48 kHz upscaling)"
+            )
         init_params.model_path = model_path
         init_params.codec_path = codec_path
+        init_params.upscaler_path = upscaler_path
 
         print(f"[OmniVoiceCpp] Loading models from {config['model_path']}...")
-        response_queue.put({"type": "loading", "message": "Loading OmniVoice GGUF models..."})
+        response_queue.put({"type": "loading", "message": "Loading OmniVoice and 48 kHz upscaler GGUF models..."})
         ctx = lib.ov_init(C.byref(init_params))
         if not ctx:
             raise RuntimeError(f"ov_init failed: {_last_error()}")
@@ -475,6 +613,17 @@ def _omnivoice_cpp_worker_main(
                             "OmniVoice generated empty audio "
                             f"(text_len={len(text)}, voice={Path(voice_path).name})"
                         )
+                    output_sample_rate = int(out.sample_rate)
+                    output_channels = int(out.channels)
+                    if output_sample_rate != OUTPUT_SAMPLE_RATE:
+                        raise ValueError(
+                            "OmniVoice returned an inconsistent sample rate "
+                            f"({output_sample_rate} Hz; expected {OUTPUT_SAMPLE_RATE} Hz with the upscaler)"
+                        )
+                    if output_channels != 1:
+                        raise ValueError(
+                            f"OmniVoice returned {output_channels} channels; expected mono audio"
+                        )
                     samples = np.ctypeslib.as_array(out.samples, shape=(out.n_samples,)).copy()
                 finally:
                     lib.ov_audio_free(C.byref(out))
@@ -488,13 +637,13 @@ def _omnivoice_cpp_worker_main(
                     )
 
                 elapsed = (time.time() - t_start) * 1000
-                duration = len(pcm_bytes) / (2 * SAMPLE_RATE)
+                duration = len(pcm_bytes) / (2 * output_sample_rate)
                 print(f"[OmniVoiceCpp] Synthesized {duration:.2f}s in {elapsed:.0f}ms")
 
                 response_queue.put({
                     "type": "done",
                     "audio": pcm_bytes,
-                    "sample_rate": SAMPLE_RATE,
+                    "sample_rate": output_sample_rate,
                 })
 
             except Exception as exc:
@@ -745,6 +894,11 @@ class OmniVoiceCppProcessManager:
             if not pcm_bytes:
                 print("[OmniVoiceCpp] Synthesis returned empty audio")
                 return (False, 0)
+            response_sample_rate = int(resp.get("sample_rate", 0))
+            if response_sample_rate != OUTPUT_SAMPLE_RATE:
+                print("[OmniVoiceCpp] Synthesis returned an inconsistent sample rate "
+                      f"({response_sample_rate} Hz; expected {OUTPUT_SAMPLE_RATE} Hz)")
+                return (False, 0)
             on_chunk(pcm_bytes, None)
             return (True, len(pcm_bytes))
 
@@ -840,6 +994,7 @@ def _get_omnivoice_cpp_config() -> Dict[str, Any]:
         "bin_dir": str(BIN_DIR),
         "model_path": str(MODEL_DIR / MODEL_FILENAME),
         "codec_path": str(MODEL_DIR / TOKENIZER_FILENAME),
+        "upscaler_path": str(MODEL_DIR / UPSCALER_FILENAME),
     }
 
 

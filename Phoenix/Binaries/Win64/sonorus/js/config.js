@@ -100,7 +100,7 @@ const TTS_PROVIDERS = {
     },
     omnivoice_cpp: {
         label: "OmniVoice (Vulkan)",
-        description: "Local OmniVoice running on ggml/Vulkan. Works on any Vulkan-capable GPU (NVIDIA, AMD, Intel) — no CUDA required.",
+        description: "Local OmniVoice with 48 kHz AudioVAE upscaling running on ggml/Vulkan. Works on any Vulkan-capable GPU (NVIDIA, AMD, Intel) — no CUDA required.",
         fields: [
             { id: "first_sentence_steps", type: "range", label: "First Sentence Steps", hint: "Fewer steps on the first sentence for faster time-to-first-audio.", min: 8, max: 64, step: 4, default: 24 },
             { id: "num_steps", type: "range", label: "Default Steps", hint: "More steps = higher quality but slower. 32 is recommended.", min: 8, max: 64, step: 4, default: 32 },
@@ -1344,7 +1344,7 @@ function renderOmniVoiceCppInstall(data, runtimeReady, modelsReady) {
     if (hint) {
         hint.textContent = progress.status === 'error'
             ? progress.message
-            : 'Downloads two GGUF models (approximately 1.3 GB). Existing partial downloads are resumed.';
+            : 'Downloads three GGUF models (approximately 1.5 GB), including the 48 kHz AudioVAE upscaler. Existing partial downloads are resumed.';
         hint.style.color = progress.status === 'error' ? 'var(--error)' : '';
     }
     if (progressBox) progressBox.style.display = installing ? 'block' : 'none';

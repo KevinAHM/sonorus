@@ -4,8 +4,8 @@ OmniVoice.cpp TTS Provider
 Thin provider wrapper that implements BaseTTSProvider and delegates to the
 omnivoice.cpp engine module (omnivoice_cpp_engine.py) for subprocess-based
 inference. This is the native (llama.cpp-style) backend counterpart to the
-torch OmniVoice provider — it produces 24 kHz audio directly and has NO
-48 kHz upscaler in the path.
+torch OmniVoice provider. Its native 24 kHz output is reconstructed at 48 kHz
+through the VoxCPM2 AudioVAE upscaler before playback.
 
 Follows the same architecture as the torch OmniVoice provider — the base class
 speak_streaming() handles the full pipeline (voice resolution, audio buffering,
@@ -163,7 +163,7 @@ class OmniVoiceCppProvider(BaseTTSProvider):
     Features:
     - Local native inference via subprocess (isolated from Flask)
     - Voice cloning from reference files with pretokenization
-    - 24kHz native sample rate (no upscaler in this path)
+    - 48kHz output through the VoxCPM2 AudioVAE upscaler
     - Models loaded by the omnivoice.cpp engine backend
     """
 
@@ -187,8 +187,8 @@ class OmniVoiceCppProvider(BaseTTSProvider):
         }
 
     def get_sample_rate(self) -> int:
-        """Native 24 kHz output — there is no upscaler in this path."""
-        return 24_000
+        """Return the VoxCPM2 AudioVAE output sample rate."""
+        return 48_000
 
     def get_buffer_seconds(self) -> float:
         return 1.0
@@ -375,7 +375,7 @@ class OmniVoiceCppProvider(BaseTTSProvider):
         """
         import random
         import time
-        from services.omnivoice_cpp_engine import _get_manager, SAMPLE_RATE
+        from services.omnivoice_cpp_engine import _get_manager, OUTPUT_SAMPLE_RATE
         from services.omnivoice_engine import _resolve_voice
         from .voice_utils import compute_reference_hash
         from utils.text_utils import preprocess_text
@@ -385,8 +385,7 @@ class OmniVoiceCppProvider(BaseTTSProvider):
         first_sentence_steps = config.get("first_sentence_steps", 24)
         base_cfg = config.get("guidance_scale", 2.0)
         seed = config.get("seed", 42)
-        # Native output — no upscaler, so the effective rate is the 24 kHz source.
-        effective_sr = SAMPLE_RATE
+        effective_sr = OUTPUT_SAMPLE_RATE
         eq_on_chunk = _wrap_omnivoice_eq(on_chunk) if config.get("apply_smoothing_eq", True) else on_chunk
 
         # Per-NPC temperature modifier → CFG boost (upward only, clamped to 10)

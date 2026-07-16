@@ -3,7 +3,7 @@ setlocal
 :: ============================================
 :: OmniVoice (Vulkan) Models Installer
 :: ============================================
-:: Downloads the two GGUF models used by the
+:: Downloads the three GGUF models used by the
 :: bundled omnivoice.cpp/ggml runtime.
 :: ============================================
 
@@ -51,7 +51,7 @@ if errorlevel 1 (
 
 >"%STATUS_FILE%" echo installing
 
-echo Downloading approximately 1.3 GB from Hugging Face.
+echo Downloading approximately 1.5 GB from the model hosts.
 echo Existing and partially downloaded files will be reused.
 echo.
 

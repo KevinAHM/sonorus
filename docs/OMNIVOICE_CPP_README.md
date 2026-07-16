@@ -6,6 +6,12 @@ of torch/CUDA. It supports Vulkan devices from AMD, Intel, and NVIDIA, including
 a second GPU for TTS so the game can keep the primary GPU's VRAM. The existing torch
 `omnivoice` and hosted `omnivoice_api` providers remain available.
 
+The branch also ports the optional VoxCPM2 AudioVAE to the same native
+backend. Sonorus now requires ABI v4 and uses the VAE to turn OmniVoice's native 24 kHz
+decode into 48 kHz output before playback. This follow-up has native parity/performance
+coverage but has **not** yet been tested in game; the pre-release 5 gameplay results below
+remain historical 24 kHz results.
+
 The implementation is based on **Sonorus 1.0.8 pre-release 5**:
 
 ```text
@@ -16,6 +22,9 @@ dc421a4  Add OmniVoice Vulkan installer and setup UI
 fcde0fe  Temporarily restore issue #3 safe ports for testing
 9f49b62  Keep Prepare Voices action visible before STT setup
 1f72c9d  Revert the temporary issue #3 safe-port workaround before handoff
+51856bb  docs: record clean pre5 acceptance results
+ccb575d  docs: record final OmniVoice acceptance
+2dc4ee1  Fix review findings in OmniVoice (Vulkan) installer/status flow
 ```
 
 Pre-release 5 was imported wholesale rather than layering the old pre-release 4 fix stack
@@ -24,8 +33,9 @@ were still present in pre-release 5 and remain part of this branch. The issue #3
 workaround was used to unblock local acceptance testing, then reverted before handoff so
 this branch leaves pre-release 5 networking unchanged.
 
-`docs/OMNIVOICE_CPP_PLAN.md` records the resolved design and acceptance status. This file
-describes what is actually present through `1f72c9d`.
+`docs/OMNIVOICE_CPP_PLAN.md` records the original provider design. This file describes the
+provider through `2dc4ee1` plus the 48 kHz follow-up implemented here and in companion
+omnivoice.cpp commit `b29e1ee`.
 
 ---
 
@@ -48,20 +58,22 @@ documents:
 
 | Path | Change | Purpose |
 |---|---:|---|
-| `services/omnivoice_cpp_engine.py` | +898 | ABI-v3 ctypes binding, persistent spawn worker, validated availability checks, model download |
+| `services/omnivoice_cpp_engine.py` | +898 plus 48 kHz follow-up | ABI-v4 ctypes binding, persistent spawn worker, three-model download, 48 kHz validation |
 | `services/tts/omnivoice_cpp.py` | +537 | Sonorus provider, sentence streaming, cloning, CFG/EQ settings |
 | `utils/vulkan_gpu_info.py` | +256 | Shared Vulkan/ggml device enumeration |
 | `routes/config.py` | +444/-2 | GPU lifecycle, installer/status/voice-prep routes, setup-flag bugfix |
 | `js/config.js` | +290 | Provider controls, model/voice progress, GPU picker, restart, local-provider and action-visibility fixes |
 | `config.html` | +55 | OmniVoice (Vulkan) setup panel |
-| `install_omnivoice_cpp.bat` | +83 | Models-only installer for the embedded Python |
+| `install_omnivoice_cpp.bat` | +83 plus 48 kHz follow-up | Three-model installer for the embedded Python |
 | `services/tts/__init__.py` | +17 | Provider registration, cache clearing, availability |
 | `utils/settings.py` | +1 | `tts.omnivoice_cpp` defaults |
 | `.gitignore` | +12/-1 | Ignore generated models while admitting the runtime DLLs and notices |
 | `omnivoice_cpp/bin/*.dll` | five LFS objects | Bundled native runtime; exact list in §4 |
 | `omnivoice_cpp/licenses/*.LICENSE` | two new files | Exact upstream omnivoice.cpp and ggml MIT notices |
 
-Total relative to `8defc25`: **2,650 insertions and 3 deletions** across 17 paths.
+The **2,650 insertions and 3 deletions** figure is the historical delta through `1f72c9d`.
+The 48 kHz follow-up additionally changes six Sonorus code/UI paths and the companion
+omnivoice.cpp runtime; use the final commit diff for the release total.
 
 `utils/settings.py` and `services/tts/__init__.py` contain mixed CRLF/LF endings upstream.
 Their changes were kept byte-minimal (+1 and +17); editors that normalize the files can
@@ -85,9 +97,9 @@ worker process
     |- set GGML_BACKEND before loading any ggml DLL
     |- add omnivoice_cpp/bin to the Windows DLL search path
     |- ctypes.CDLL("omnivoice.dll")
-    |- ov_init(...) once; keep the model resident
+    |- ov_init(..., upscaler_path) once; keep all three models resident
     |- ov_extract_voice_ref(...) once per voice per worker; cache RVQ codes
-    `- ov_synthesize(...) -> float PCM -> 24 kHz int16 -> on_chunk(pcm, None)
+    `- ov_synthesize(...) -> buffered 48 kHz float PCM -> int16 -> provider playback callback
 ```
 
 The native DLL never loads into the Flask process. A spawned worker isolates it and owns
@@ -95,13 +107,19 @@ the model. Request/response access is serialized so simultaneous player/NPC synt
 cannot interleave responses. `BaseTTSProvider.speak()` continues to own playback, spatial
 audio, archives, interruption epochs, and amplitude-based visemes.
 
+Sonorus binds `ov_init_default_params_v4` explicitly. The DLL also retains the legacy
+`ov_init_default_params` export, which writes only the ABI-v3 struct prefix, so older
+dynamically linked consumers cannot have a new tail field written past their allocation.
+The VAE receives native float PCM directly after OmniVoice's existing post-processing,
+avoiding the PCM16 file round trip used by the torch integration.
+
 The installation path is deliberately separate from synthesis:
 
 ```text
 five DLLs bundled in the mod
     +
 install_omnivoice_cpp.bat or POST /install-models
-    -> huggingface_hub downloads two GGUFs into omnivoice_cpp/models
+    -> downloads three GGUFs into omnivoice_cpp/models
     -> GET /status reports readiness
 
 optional POST /prepare-voices
@@ -123,11 +141,15 @@ These are the complete production runtime DLLs. They live in
 | `ggml-vulkan.dll` | 73,998,848 | 70.57 |
 | `ggml-cpu.dll` | 833,024 | 0.79 |
 | `ggml-base.dll` | 656,896 | 0.63 |
-| `omnivoice.dll` | 360,960 | 0.34 |
+| `omnivoice.dll` | 394,752 | 0.38 |
 | `ggml.dll` | 68,608 | 0.07 |
-| **Total** | **75,918,336** | **72.40** |
+| **Total** | **75,952,128** | **72.43** |
 
-`omnivoice-tts.exe` is useful for native debugging but is ignored and **not shipped**.
+The table records the packaged ABI-v4 build from companion commit `b29e1ee`; its
+`omnivoice.dll` SHA-256 is
+`3147a51e0b84da400d0926989222c1fdaa82290a3fb4745791372b4ed07722a7`.
+`omnivoice-tts.exe`
+and `omnivoice-upscale.exe` are useful for native debugging but are ignored and **not shipped**.
 The package also includes exact upstream MIT notices at
 `omnivoice_cpp/licenses/omnivoice.cpp.LICENSE` and
 `omnivoice_cpp/licenses/ggml.LICENSE`.
@@ -138,18 +160,36 @@ Studio, CMake, or the Vulkan SDK.
 
 ### Downloaded models
 
-The installer downloads these files from
-[`Serveurperso/OmniVoice-GGUF`](https://huggingface.co/Serveurperso/OmniVoice-GGUF) into
-`omnivoice_cpp/models/`:
+The installer downloads the first two files from
+[`Serveurperso/OmniVoice-GGUF`](https://huggingface.co/Serveurperso/OmniVoice-GGUF) and the
+VAE from the release source described below into `omnivoice_cpp/models/`:
 
 | File | Bytes | MiB |
 |---|---:|---:|
 | `omnivoice-base-Q8_0.gguf` | 656,395,008 | 625.99 |
 | `omnivoice-tokenizer-F32.gguf` | 734,300,704 | 700.28 |
-| **Total** | **1,390,695,712** | **1,326.27** |
+| `voxcpm2-audiovae-f16.gguf` | 187,868,032 | 179.17 |
+| **Total** | **1,578,563,744** | **1,505.44** |
 
-Keep the tokenizer at F32; quantizing the RVQ chain reduces cloning quality. The models
+Keep the tokenizer at F32; quantizing the RVQ chain reduces cloning quality. The AudioVAE
+uses mixed F16/F32 weights and records source SHA-256
+`2f3ab19e167a9a31985194fb9843d0460b7424ef127e8559e2aedc5e45e9c2f6`. The converted
+asset SHA-256 is
+`a5fb091c0a95172bdee2ee7230335dac7d3dc318d77ca100f095d023cabd5d97`. The three models
 are generated/runtime content and remain gitignored.
+
+The VAE is derived from [OpenBMB/VoxCPM2](https://huggingface.co/openbmb/VoxCPM2),
+Apache-2.0. Its VAE-only converter and graph mapping were informed by
+[CrispASR](https://github.com/CrispStrobe/CrispASR), MIT; CrispASR is not bundled or loaded
+at runtime. The converter and exact mapping contract live in the companion omnivoice.cpp
+repository under `tools/convert-voxcpm2-audiovae.py` and
+`docs/VOXCPM2_AUDIOVAE_TOOLING.md`.
+
+The VAE is hosted as the
+[`voxcpm2-audiovae-v1` prerelease asset](https://github.com/Jrjy3/omnivoice.cpp/releases/tag/voxcpm2-audiovae-v1).
+The direct downloader supports resuming a partial `.incomplete` file and accepts the final
+asset only when both its exact size and SHA-256 match. The release URL was exercised from
+a fresh temporary directory after upload.
 
 ### Installer behavior
 
@@ -161,19 +201,20 @@ Users may run `Phoenix/Binaries/Win64/sonorus/install_omnivoice_cpp.bat` directl
    sizes and the PE `MZ` signature;
 3. checks that the core `huggingface_hub` requirement is installed;
 4. calls `omnivoice_cpp_engine.download_models()`;
-5. reuses complete files and Hugging Face's cache/partial-download support;
+5. reuses complete files, Hugging Face's cache, and the VAE release asset's resumable
+   `.incomplete` download;
 6. records `installing`, `complete`, or `error` in
    `data/.omnivoice_cpp_install_status`.
 
 The UI launches the same batch file in a visible console and polls every three seconds.
-The web panel reports file-level progress (0/2, 1/2, 2/2); Hugging Face byte progress is
+The web panel reports file-level progress (0/3 through 3/3); byte progress is
 shown in the installer console. There is no pip, torch, CUDA, or FFmpeg installation step.
 If the server finds an `installing` marker without its tracked installer process, it reports
 a retryable error instead of leaving the button permanently disabled after a crash or
 power loss.
 
-`is_available()` becomes true only when all five runtime DLLs pass the size/PE checks and
-both GGUFs exist.
+`is_available()` becomes true only when all five runtime DLLs pass the size/PE checks,
+both upstream OmniVoice GGUFs exist, and the VAE passes its exact size/SHA-256 check.
 An incomplete DLL bundle is reported as an update/reinstall error rather than starting a
 download that could never run.
 
@@ -189,7 +230,7 @@ One 72.40 MiB runtime revision uses about 0.71% of the free storage allowance. U
 not consume LFS bandwidth, but each changed binary revision stores the complete new file,
 and each download is charged to the repository owner's bandwidth. A 10 GiB bandwidth
 allowance is roughly 141 complete runtime fetches if no other LFS objects are downloaded.
-This is why the DLLs should be rebuilt and committed deliberately and the 1.30 GiB models
+This is why the DLLs should be rebuilt and committed deliberately and the roughly 1.47 GiB models
 must remain outside LFS. GitHub Free/Pro's 2 GB per-file limit also easily accommodates
 the largest DLL; see [GitHub's LFS file-size limits](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-git-large-file-storage).
 
@@ -236,9 +277,9 @@ native worker.
 
 ## 6. Building or updating the native runtime
 
-The current runtime was built from `https://github.com/Jrjy3/omnivoice.cpp` at `98a5d5f`
-(forked from `ServeurpersoCom/omnivoice.cpp`), with ggml submodule `9e2947f`. Both the fork
-and upstream project are MIT licensed.
+The current runtime was built from `https://github.com/Jrjy3/omnivoice.cpp` branch
+`voxcpm2-upscaler` at `b29e1ee` (based on fork commit `98a5d5f`, with ggml submodule
+`9e2947f`). Both the fork and upstream project are MIT licensed.
 
 Prerequisites: Visual Studio 2022 with Desktop development with C++, CMake, Git, and the
 LunarG Vulkan SDK.
@@ -246,14 +287,17 @@ LunarG Vulkan SDK.
 ```bat
 git clone --recurse-submodules https://github.com/Jrjy3/omnivoice.cpp
 cd omnivoice.cpp
+git checkout voxcpm2-upscaler
 call "<VS install>\VC\Auxiliary\Build\vcvars64.bat"
 cmake -B build -DGGML_VULKAN=ON -DOMNIVOICE_SHARED=ON
 cmake --build build --config Release -j %NUMBER_OF_PROCESSORS%
 ```
 
-`-DOMNIVOICE_SHARED=ON` is mandatory for ctypes. Copy only the five DLLs listed in §4 from
+`-DOMNIVOICE_SHARED=ON` is mandatory for ctypes. The 48 kHz integration also requires the
+ABI-v4 branch (`OV_ABI_VERSION == 4` and `ov_init_params.upscaler_path`). Copy
+only the five DLLs listed in §4 from
 the Release output, verify them together, and commit them once through LFS. Do not commit
-the CLI or either GGUF. Avoid normalizing unrelated source-file line endings when updating
+the CLI tools or any GGUF. Avoid normalizing unrelated source-file line endings when updating
 the Python integration.
 
 ---
@@ -288,16 +332,19 @@ so ggml enumeration is authoritative once the bundle exists.
 
 | Capability | Torch `omnivoice` | `omnivoice_cpp` |
 |---|---|---|
-| Native output | 48 kHz through torch AudioVAE upscaler | 24 kHz native |
+| Native output | 48 kHz through torch AudioVAE upscaler | 24 kHz codec -> native VoxCPM2 AudioVAE -> 48 kHz |
 | Smoothing EQ | yes | yes, reuses `_wrap_omnivoice_eq` |
 | Word timings | none; amplitude visemes | same |
 | Voice input | reference audio + `.txt`; persistent `.tokens.pt` | same audio/`.txt`; worker-memory RVQ cache |
 | Runtime | torch/CUDA | ctypes/ggml/Vulkan, CPU fallback possible |
 | Language | torch path's language handling | ABI supports empty/`en`/`zh`; provider currently passes auto |
 
-The missing torch upscaler can produce a slight timbre difference. It is expected, not a
-bug. Sentence-level one-shot synthesis is the streaming boundary; the ABI does not expose
-incremental audio chunks.
+The C++ VAE follows the same learned 24 -> 16 -> 48 kHz reconstruction path as the torch
+provider and runs on the already selected GGML backend. Inputs are bounded to 6.4-second
+payloads with 1.6 seconds of causal history, then stitched by discarding historical output.
+Sonorus uses buffered `ov_synthesize` once per sentence. ABI-v4 native `on_chunk` callbacks
+remain unsupported while an upscaler is loaded; this does not affect Sonorus's existing
+sentence queue, which forwards the completed 48 kHz sentence to playback.
 
 Two setup fixes are included because both bugs remain in the pre-release 5 base:
 
@@ -367,11 +414,36 @@ Windows 11. Device enumeration was `Vulkan0` RTX 5080, `Vulkan1` AMD iGPU, `Vulk
   retry correctly attempted only `Bragbor_reference_15s.wav` and
   `Bully1_reference_15s.wav`; both still returned no transcript.
 
+### Verified for the 48 kHz native follow-up
+
+- The VAE-only converter strictly mapped 312 source tensors to 233 GGUF tensors, folded 75
+  weight-normalisation pairs, omitted the unused `fc_logvar`, and produced an exact
+  187,868,032-byte mixed F16/F32 model.
+- CPU output versus authoritative PyTorch float32: cosine **0.9999996**.
+- Vulkan output versus the same reference: cosine **0.9999625**.
+- Radeon AI PRO R9700 / `Vulkan2` (warmed): 17.28 seconds of VAE output in
+  **1.023-1.040 seconds**, **RTF 0.059-0.060**.
+- Full bounded-chunk/seam output versus whole-utterance PyTorch: cosine **0.9999720**, with
+  exact output length and no numerical seam failure.
+- Full native cloned-TTS smoke test produced 5.88 seconds of mono 48 kHz audio; TTS took
+  1.869 seconds and the VAE post-step took 0.388 seconds on `Vulkan2`.
+- ABI v4 rejects an incompatible DLL, eagerly loads the VAE on the selected backend, and
+  requires 48 kHz output in the Sonorus worker.
+- The published VAE asset downloaded successfully and passed the packaged exact-size and
+  SHA-256 validation.
+
+These are standalone/native runtime and Python integration tests. They do **not** replace
+the historical pre-release 5 gameplay tests and must not be described as an in-game 48 kHz
+validation.
+
 ### Still requires acceptance testing
 
 - Investigate why Canary returns no text for the Bragbor and Bully1 reference clips, or
   confirm that the clips contain no usable speech and should remain without sidecars.
 - Repeat device switching and third-character barge-in on the pre-release 5 branch.
+- Run the complete three-model UI/batch installation from a clean game installation, then
+  test in-game 48 kHz conversations, interruption,
+  barge-in, device switching, and an audible A/B against both 24 kHz C++ and torch OmniVoice.
 - Test vendors/configurations beyond the R9700/RTX 5080 system, including CPU fallback.
 
 ---
@@ -381,7 +453,11 @@ Windows 11. Device enumeration was `Vulkan0` RTX 5080, `Vulkan1` AMD iGPU, `Vulk
 - The ABI exposes only auto, English, and Chinese language hints; Sonorus currently passes
   auto rather than mapping its language codes.
 - `speed` is read for shape parity with torch OmniVoice but is not applied.
-- Output is native 24 kHz with no torch AudioVAE upscaler.
+- The AudioVAE is mandatory for Sonorus's `omnivoice_cpp` availability and output is 48 kHz;
+  the underlying codec remains 24 kHz. The native public ABI still supports 24 kHz when
+  `upscaler_path` is NULL, but this provider does not use that fallback.
+- ABI-v4 `on_chunk` streaming cannot be used while the VAE is loaded; Sonorus buffers one
+  sentence natively and then forwards it through the existing playback callback.
 - There are no word timings; lipsync uses amplitude visemes and interrupt trimming cannot
   use word-level boundaries from this provider.
 - Vulkan enumeration has no cross-vendor VRAM telemetry, so the UI reports device names
