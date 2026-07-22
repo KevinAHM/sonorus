@@ -1,5 +1,6 @@
-# Sonorus - AI Conversations
-[Join us on Discord!](https://discord.gg/YXhJy3pA7b)
+# Sonorus - AI Conversations for Hogwarts Legacy
+[Discord](https://discord.gg/YXhJy3pA7b)
+[Nexus Mods](https://www.nexusmods.com/hogwartslegacy/mods/2409)
 
 ---
 
