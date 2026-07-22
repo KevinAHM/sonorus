@@ -18,7 +18,13 @@
     margin-bottom: 0;
 }
 
-.input-with-toggle input[type="text"] {
+.input-with-toggle .awesomplete {
+    flex: 1;
+    display: block;
+}
+
+.input-with-toggle input[type="text"],
+.input-with-toggle .awesomplete > input[type="text"] {
     flex: 1;
     border-top-right-radius: 0;
     border-bottom-right-radius: 0;

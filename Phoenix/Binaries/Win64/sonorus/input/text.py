@@ -52,6 +52,10 @@ VK_RMENU = 0xA5  # Right Alt
 
 VK_MODIFIERS = {VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN,
                 VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU}
+VK_SHIFT_KEYS = {VK_SHIFT, VK_LSHIFT, VK_RSHIFT}
+VK_CTRL_KEYS = {VK_CONTROL, VK_LCONTROL, VK_RCONTROL}
+VK_ALT_KEYS = {VK_MENU, VK_LMENU, VK_RMENU}
+VK_WIN_KEYS = {VK_LWIN, VK_RWIN}
 
 
 def is_key_pressed(vk):
@@ -59,7 +63,7 @@ def is_key_pressed(vk):
     return (user32.GetAsyncKeyState(vk) & 0x8000) != 0
 
 
-def vk_to_char(vk):
+def vk_to_char(vk, shift_pressed=None):
     """Convert virtual key code to character using current keyboard state."""
     # Get current keyboard state
     keyboard_state = (ctypes.c_ubyte * 256)()
@@ -67,8 +71,14 @@ def vk_to_char(vk):
         return None
 
     # In low-level hooks, GetKeyboardState may be stale.
-    # Manually set/clear shift state from GetAsyncKeyState (physical key state)
-    if is_key_pressed(VK_SHIFT) or is_key_pressed(VK_LSHIFT) or is_key_pressed(VK_RSHIFT):
+    # Manually set/clear shift state from the hook-tracked modifier state.
+    if shift_pressed is None:
+        shift_pressed = (
+            is_key_pressed(VK_SHIFT)
+            or is_key_pressed(VK_LSHIFT)
+            or is_key_pressed(VK_RSHIFT)
+        )
+    if shift_pressed:
         keyboard_state[VK_SHIFT] = 0x80
         keyboard_state[VK_LSHIFT] = 0x80
         keyboard_state[VK_RSHIFT] = 0x80
@@ -115,6 +125,7 @@ class ChatInputCapture:
         self._hotkey_held = False  # True while hotkey is physically held (KEYDOWN to KEYUP)
         self._prompt_mode = False  # True = director prompt mode, False = normal chat mode
         self._hold_timer = None  # Timer for hold detection (cancelled on keyup)
+        self._modifiers_down = set()
 
     # Hotkey name to VK code mapping (must match config.html dropdown options)
     HOTKEY_VK_MAP = {
@@ -144,6 +155,20 @@ class ChatInputCapture:
         )
         self.listener.start()
         print(f"[InputCapture] Started - hotkey: {self.hotkey_name}")
+
+    def _modifier_pressed(self, keys):
+        return any(vk in self._modifiers_down for vk in keys)
+
+    def _update_modifier_state(self, vk, is_down):
+        if vk not in VK_MODIFIERS:
+            return
+        if is_down:
+            self._modifiers_down.add(vk)
+        else:
+            self._modifiers_down.discard(vk)
+
+    def _reset_modifier_state(self):
+        self._modifiers_down.clear()
 
     def _open_chat_with_mode(self, mode):
         """Open chat input with specified mode. Called from timer or keyup.
@@ -195,18 +220,36 @@ class ChatInputCapture:
         - Hold (>= 500ms): Opens chat with "Prompt: " after 500ms (no need to release)
         """
         vk = data.vkCode
-
-        # Always let modifier keys through untouched
-        if vk in VK_MODIFIERS:
-            return
+        if msg in (WM_KEYDOWN, WM_SYSKEYDOWN):
+            self._update_modifier_state(vk, True)
+        elif msg in (WM_KEYUP, WM_SYSKEYUP):
+            self._update_modifier_state(vk, False)
 
         # Check modifier states directly from Windows
-        alt_pressed = is_key_pressed(VK_MENU) or is_key_pressed(VK_LMENU) or is_key_pressed(VK_RMENU)
-        win_pressed = is_key_pressed(VK_LWIN) or is_key_pressed(VK_RWIN)
-        ctrl_pressed = is_key_pressed(VK_CONTROL) or is_key_pressed(VK_LCONTROL) or is_key_pressed(VK_RCONTROL)
+        alt_pressed = self._modifier_pressed(VK_ALT_KEYS) or is_key_pressed(VK_MENU) or is_key_pressed(VK_LMENU) or is_key_pressed(VK_RMENU)
+        win_pressed = self._modifier_pressed(VK_WIN_KEYS) or is_key_pressed(VK_LWIN) or is_key_pressed(VK_RWIN)
+        ctrl_pressed = self._modifier_pressed(VK_CTRL_KEYS) or is_key_pressed(VK_CONTROL) or is_key_pressed(VK_LCONTROL) or is_key_pressed(VK_RCONTROL)
+        shift_pressed = self._modifier_pressed(VK_SHIFT_KEYS) or is_key_pressed(VK_SHIFT) or is_key_pressed(VK_LSHIFT) or is_key_pressed(VK_RSHIFT)
 
         # Always let Alt/Win combos through (system shortcuts)
         if alt_pressed or win_pressed:
+            return
+
+        # While chat is active, swallow modifier presses/releases too so they do
+        # not leak into the game as sprint/aim/etc. binds.
+        if vk in VK_MODIFIERS:
+            if self.active:
+                if not is_game_window_active():
+                    with self._lock:
+                        if self.active:
+                            self.active = False
+                            self._deactivate_time = time.time()
+                            self._reset_modifier_state()
+                            self.text_buffer = ""
+                            print("[InputCapture] Closed (game lost focus)")
+                            self._send_update()
+                    return
+                self.listener.suppress_event()
             return
 
         # === HANDLE KEYUP ===
@@ -226,6 +269,20 @@ class ChatInputCapture:
                     if self._open_chat_with_mode("chat"):
                         print(f"[InputCapture] Quick tap ({held_duration*1000:.0f}ms) -> chat mode")
 
+                self.listener.suppress_event()
+                return
+
+            if self.active:
+                if not is_game_window_active():
+                    with self._lock:
+                        if self.active:
+                            self.active = False
+                            self._deactivate_time = time.time()
+                            self._reset_modifier_state()
+                            self.text_buffer = ""
+                            print("[InputCapture] Closed (game lost focus)")
+                            self._send_update()
+                    return
                 self.listener.suppress_event()
             return
 
@@ -275,6 +332,7 @@ class ChatInputCapture:
                 if self.active:
                     self.active = False
                     self._deactivate_time = time.time()
+                    self._reset_modifier_state()
                     self.text_buffer = ""
                     print("[InputCapture] Closed (game lost focus)")
                     self._send_update()
@@ -303,7 +361,7 @@ class ChatInputCapture:
                 self._handle_paste()
             else:
                 # Convert VK to character (handles shift for !@# etc.)
-                char = vk_to_char(vk)
+                char = vk_to_char(vk, shift_pressed=shift_pressed)
                 if char:
                     self.text_buffer += char
                     self._send_update()
@@ -331,6 +389,7 @@ class ChatInputCapture:
         text = self.text_buffer.strip()
         self.active = False
         self._deactivate_time = time.time()
+        self._reset_modifier_state()
         if text:
             mode_name = "prompt" if self._prompt_mode else "chat"
             print(f"[InputCapture] Submit ({mode_name}): {text}")
@@ -345,6 +404,7 @@ class ChatInputCapture:
     def _cancel(self):
         self.active = False
         self._deactivate_time = time.time()
+        self._reset_modifier_state()
         self.text_buffer = ""
         self._prompt_mode = False
         self._hotkey_down_time = None
@@ -360,6 +420,7 @@ class ChatInputCapture:
             with self._lock:
                 self.active = False
                 self._deactivate_time = time.time()
+                self._reset_modifier_state()
                 self.text_buffer = ""
                 self._prompt_mode = False
                 self._hotkey_down_time = None

@@ -9,9 +9,57 @@ local Utils = {}
 
 local UEHelpers = require('UEHelpers.UEHelpers')
 local Cache = require('Utils.Cache')
+local LocationRegistry = require('Utils.LocationRegistry')
 local active_intervals = {}
 local interval_id_counter = 0
 local interval_loop_handle = nil  -- Single global loop handle
+
+_G.GamePauseState = _G.GamePauseState or {
+    isPaused = true,
+    hasBPEvent = false,
+    updatedAt = 0,
+}
+_G.GamePauseState.isPaused = _G.GamePauseState.isPaused ~= false
+_G.LastKnownPauseState = (_G.LastKnownPauseState == nil) and true or _G.LastKnownPauseState
+
+local function ReadPauseEventValue(...)
+    local args = {...}
+    for i = #args, 1, -1 do
+        local value = args[i]
+        if type(value) == "boolean" then
+            return value
+        end
+        if type(value) == "table" then
+            if value.IsGamePaused ~= nil then return value.IsGamePaused == true end
+            if value.isGamePaused ~= nil then return value.isGamePaused == true end
+            if value.ReturnValue ~= nil then return value.ReturnValue == true end
+        end
+    end
+    return nil
+end
+
+if RegisterCustomEvent and not _G.GamePauseChangedRegistered then
+    _G.GamePauseChangedRegistered = true
+    RegisterCustomEvent("GamePauseChanged", function(...)
+        local paused = ReadPauseEventValue(...)
+        if paused == nil then
+            if _G.DevPrint then
+                _G.DevPrint("[Pause] GamePauseChanged received without IsGamePaused output")
+            end
+            return
+        end
+
+        _G.GamePauseState.isPaused = paused
+        _G.GamePauseState.hasBPEvent = true
+        _G.GamePauseState.updatedAt = os.clock()
+        if _G.DevPrint then
+            _G.DevPrint("[Pause] GamePauseChanged IsGamePaused=" .. tostring(paused))
+        end
+    end)
+elseif not RegisterCustomEvent and not _G.GamePauseChangedUnavailableLogged then
+    _G.GamePauseChangedUnavailableLogged = true
+    print("[Sonorus] RegisterCustomEvent unavailable; pause falls back to Utils.IsGamePaused polling")
+end
 
 
 ---Checks if a string contains a substring
@@ -73,78 +121,12 @@ function Utils.PrintUEVersion()
     print('UNREAL VERSION: ' .. tostring(UnrealVersion:GetMajor()) .. '.' .. tostring(UnrealVersion:GetMinor()))
 end
 
----Creates a repeating timer that executes a callback function at regular intervals
----@param callback function The function to execute repeatedly
----@param delay_seconds number Time in seconds between executions
----@return number interval_id Unique identifier for this interval (use with ClearInterval)
----@example
---- ```lua
---- -- Create a timer that prints every 2 seconds
---- local my_timer = Utils.SetInterval(function()
----     print('Every 5 seconds')
---- end, 2)
---- ```
----@note Consider using LoopInGameThreadWithDelay directly for new code
-function Utils.SetInterval(callback, delay_seconds)
-    local cron = require('cron')
-
-    -- Generate unique ID for this interval
-    interval_id_counter = interval_id_counter + 1
-    local interval_id = interval_id_counter
-
-    -- Create the clock using the provided callback and delay
-    local clock_from_cron = cron.every(delay_seconds, callback)
-
-    -- Store it so we can clear it later
-    active_intervals[interval_id] = clock_from_cron
-
-    -- Start single global update loop on first SetInterval call
-    if not interval_loop_handle then
-        interval_loop_handle = LoopInGameThreadWithDelay(100, function()
-            -- Update all active intervals
-            for id, timer in pairs(active_intervals) do
-                if timer then
-                    timer:update(0.1)
-                end
-            end
-        end)
-        print("Background update loop started")
-    end
-
-    -- Return the ID so it can be cleared later
-    return interval_id
-end
-
-
-
----Stops a repeating timer created with SetInterval
----@param interval_id number The ID returned by SetInterval
----@return boolean success True if interval was found and cleared, false otherwise
----@example
---- ```lua
---- -- Stop the timer when CAPS_LOCK is pressed
---- RegisterKeyBind(Key.CAPS_LOCK, {}, function()
----     Utils.ClearInterval(my_timer)
---- end)
---- ```
-function Utils.ClearInterval(interval_id)
-    if active_intervals[interval_id] then
-        active_intervals[interval_id] = nil
-        print("Cleared interval " .. interval_id)
-        return true
-    end
-    return false
-end
-
 ---Gets the player's house from UIManager
 ---@return string house The player's house name (e.g., "Hufflepuff", "Gryffindor")
 function Utils.GetPlayerHouse()
     local house = ""
 
-    local uiManager = nil
-    pcall(function()
-        uiManager = FindFirstOf("UIManager")
-    end)
+    local uiManager = Cache.Get("UIManager", function() return FindFirstOf("UIManager") end)
 
     if not uiManager then
         print("[Sonorus] GetPlayerHouse: UIManager not found")
@@ -191,10 +173,7 @@ function Utils.GetPlayerName()
     local firstName = ""
     local lastName = ""
 
-    local uiManager = nil
-    pcall(function()
-        uiManager = FindFirstOf("UIManager")
-    end)
+    local uiManager = Cache.Get("UIManager", function() return FindFirstOf("UIManager") end)
 
     if not uiManager then
         return firstName, lastName, ""
@@ -256,9 +235,47 @@ end
 ---Checks if the game is paused or a UI menu is shown
 ---@return boolean paused True if game is paused or UI is shown
 function Utils.IsGamePaused()
+    _G.GamePauseState = _G.GamePauseState or {
+        isPaused = true,
+        hasBPEvent = false,
+        updatedAt = 0,
+    }
+
+    if not _G.SonorusState.playerLoaded then
+        print("[Utils] IsGamePaused: Player not loaded, returning true")
+        return true
+    end
+
+    local modActor = _G.SonorusState and _G.SonorusState.sonorusModActor
+    if modActor and Utils.SafeIsValid(modActor) then
+        local method = modActor.IsGamePaused
+        if method then
+            local out = {}
+            local ok, result = pcall(function()
+                return method(modActor, out)
+            end)
+            if ok then
+                if type(result) == "boolean" then
+                    _G.GamePauseState.isPaused = result
+                    return result
+                end
+                local paused = out.IsGamePaused
+                if paused == nil then paused = out.isGamePaused end
+                if paused == nil then paused = out.ReturnValue end
+                if paused ~= nil then
+                    paused = paused == true
+                    _G.GamePauseState.isPaused = paused
+                    return paused
+                end
+            else
+                print("[Utils] ModActor:IsGamePaused error: " .. tostring(result))
+            end
+        end
+    end
+
     local uiManager = Utils.GetUIManager()
     if not uiManager then
-        return false
+        return _G.GamePauseState.isPaused ~= false
     end
 
     local paused = false
@@ -266,6 +283,7 @@ function Utils.IsGamePaused()
         paused = uiManager:InPauseMode() or uiManager:GetIsUIShown()
     end)
 
+    _G.GamePauseState.isPaused = paused == true
     return paused
 end
 
@@ -291,7 +309,18 @@ function Utils.GetZoneLocation()
 
     -- Get HUD (auto-invalidates dependents if HUD changed)
     local hud = Cache.Get("HUD", function()
-        return FindFirstOf("PhoenixHUDWidget")
+        -- Multiple HUD widgets can exist (zombies from loading screens).
+        -- Only the active one is in the viewport.
+        local all = FindAllOf("PhoenixHUDWidget")
+        if all then
+            for _, w in ipairs(all) do
+                local inVP = false
+                pcall(function() inVP = w:IsInViewport() end)
+                if inVP then return w end
+            end
+            return all[1]  -- fallback if none report InViewport
+        end
+        return nil
     end)
     if not hud then return zone end
 
@@ -317,7 +346,18 @@ function Utils.GetCurrentMission()
 
     -- Get HUD (auto-invalidates dependents if HUD changed)
     local hud = Cache.Get("HUD", function()
-        return FindFirstOf("PhoenixHUDWidget")
+        -- Multiple HUD widgets can exist (zombies from loading screens).
+        -- Only the active one is in the viewport.
+        local all = FindAllOf("PhoenixHUDWidget")
+        if all then
+            for _, w in ipairs(all) do
+                local inVP = false
+                pcall(function() inVP = w:IsInViewport() end)
+                if inVP then return w end
+            end
+            return all[1]  -- fallback if none report InViewport
+        end
+        return nil
     end)
     if not hud then return mission end
 
@@ -326,6 +366,11 @@ function Utils.GetCurrentMission()
         return hud:GetMissionBanner()
     end, "HUD")
     if not banner then return mission end
+
+    -- If steps aren't showing, the banner is stale (quest completed, no new quest tracked)
+    local stepsShowing = false
+    pcall(function() stepsShowing = banner.MissionStepsShowing end)
+    if not stepsShowing then return mission end
 
     -- Cache text widgets (depend on MissionBanner)
     local titleWidget = Cache.GetProp("MissionTitle", "MissionBanner", "StepTitleText")
@@ -373,7 +418,8 @@ function Utils.GetCompanionNameAndId()
         local companionMgr = staticData and staticData.companionManager
         if not companionMgr then return end
 
-        local companionPawn = companionMgr:GetPrimaryCompanionPawn()
+        local companionPawn = nil
+        pcall(function() companionPawn = companionMgr:GetPrimaryCompanionPawn() end)
         if not companionPawn then return end
 
         voiceId = Utils.GetActorVoiceId(companionPawn, staticData)
@@ -411,7 +457,8 @@ function Utils.GetCompanionDistance(staticData)
         local companionMgr = staticData and staticData.companionManager
         if not player or not companionMgr then return end
 
-        local companionPawn = companionMgr:GetPrimaryCompanionPawn()
+        local companionPawn = nil
+        pcall(function() companionPawn = companionMgr:GetPrimaryCompanionPawn() end)
         if not companionPawn or not Utils.SafeIsValid(companionPawn) then return end
 
         local playerLoc = player:K2_GetActorLocation()
@@ -566,13 +613,16 @@ end
 ---@return table|nil companionInfo Table with hasCompanion, companionId, companionInStealth, companionIsSwimming, companionIsOnBroom or nil
 function Utils.GetCompanionInfo(staticData, isPlayerOnBroom, isPlayerInStealth, IsCompanionOnBroom, GetNearbyNPCs)
     local companionMgr = staticData and staticData.companionManager
-    if not companionMgr then return nil end
+    if not companionMgr or not Utils.SafeIsValid(companionMgr) then return nil end
 
     local companionPawn = companionMgr:GetPrimaryCompanionPawn()
     if companionPawn and Utils.SafeIsValid(companionPawn) then
+        local isForcedWaiting = Utils.IsCompanionForcedWaiting(companionPawn, companionMgr)
+
         -- Valid companion
         local info = {
-            hasCompanion = true,
+            hasCompanion = not isForcedWaiting,
+            companionForcedWaiting = isForcedWaiting,
             companionInStealth = isPlayerInStealth,
             companionIsSwimming = false,
             companionIsOnBroom = false,
@@ -616,6 +666,7 @@ function Utils.GetCompanionInfo(staticData, isPlayerOnBroom, isPlayerInStealth, 
                 if isFlying then
                     return {
                         hasCompanion = true,
+                        companionForcedWaiting = false,
                         companionId = npcEntry.name,
                         companionIsOnBroom = true,
                         companionInStealth = isPlayerInStealth,
@@ -626,6 +677,36 @@ function Utils.GetCompanionInfo(staticData, isPlayerOnBroom, isPlayerInStealth, 
         end
     end
 
+    return nil
+end
+
+---Get a fresh actor reference from the engine, bypassing all Lua caches.
+---Uses PopulationManager → GetScheduledEntityFromName → GetFlesh.
+---@param voiceId string The NPC's voice ID (e.g. "SebastianSallow"), or "player"
+---@return userdata|nil actor Fresh actor reference, or nil
+function Utils.GetFreshActorByVoiceId(voiceId)
+    if not voiceId or voiceId == "" then return nil end
+    if voiceId == "player" then
+        local player = nil
+        pcall(function() player = FindFirstOf("Biped_Player") end)
+        if player and Utils.SafeIsValid(player) then return player end
+        return nil
+    end
+
+    local staticData = Cache.GetStaticData()
+    local popManager = staticData and staticData.populationManager
+    if not popManager or not Utils.SafeIsValid(popManager) then return nil end
+
+    local actor = nil
+    pcall(function()
+        local se = popManager:GetScheduledEntityFromName(voiceId)
+        if se and se:IsValid() and se:CurrentlyInFlesh() then
+            actor = se:GetFlesh()
+        end
+    end)
+    if actor and Utils.SafeIsValid(actor) then
+        return actor
+    end
     return nil
 end
 
@@ -676,29 +757,90 @@ function Utils.GetNPCScheduleInfo(voiceId, staticData)
             local locKey = nil
             pcall(function() locKey = out.LocationKey:ToString() end)
 
-            if locKey and locKey ~= "" and GetLocationDisplayName then
-                info.locationName = GetLocationDisplayName(locKey)
-                -- Also try to get description
-                if _G.Locations then
-                    local entry = _G.Locations[locKey]
-                    if not entry then
-                        local bestLen = 0
-                        for key, value in pairs(_G.Locations) do
-                            if #key > bestLen and locKey:sub(1, #key) == key then
-                                bestLen = #key
-                                entry = value
-                            end
-                        end
-                    end
-                    if entry and type(entry) == "table" and entry.desc then
-                        info.locationDesc = entry.desc
-                    end
-                end
+            if locKey and locKey ~= "" then
+                info.locationName = LocationRegistry.ResolveDisplayName(locKey)
+                info.locationDesc = LocationRegistry.GetDescription(locKey)
             end
         end
     end)
 
     return info
+end
+
+--- Lightweight NPC proximity scan — distance only, no camera/LOS/screen checks.
+--- Uses globals set by logic.lua: GetCachedNPCs, GetStaticCache, IsSignificantNPC.
+---@param maxDistance number Max distance in UE units
+---@return table[] Array of {name: string, distance: number}
+function Utils.ScanNearbyLean(maxDistance)
+    maxDistance = maxDistance or 10000
+    local result = {}
+
+    if not _G.SonorusState or not _G.SonorusState.playerLoaded then
+        return result
+    end
+
+    local staticData = _G.GetStaticCache and _G.GetStaticCache()
+    if not staticData then return result end
+
+    local player = staticData.player
+    if not player then return result end
+
+    local playerLoc = nil
+    pcall(function() playerLoc = player:K2_GetActorLocation() end)
+    if not playerLoc then return result end
+
+    local npcs = _G.GetCachedNPCs and _G.GetCachedNPCs()
+    if not npcs then return result end
+
+    local playerFullName = staticData.playerFullName
+    local SafeIsValid = Utils.SafeIsValid
+
+    for _, npc in pairs(npcs) do
+        if SafeIsValid(npc) then
+            local fullName = nil
+            pcall(function() fullName = npc:GetFullName() end)
+            if fullName and fullName ~= playerFullName then
+                local npcLoc = nil
+                pcall(function() npcLoc = npc:K2_GetActorLocation() end)
+                if npcLoc then
+                    local dx = npcLoc.X - playerLoc.X
+                    local dy = npcLoc.Y - playerLoc.Y
+                    local dz = npcLoc.Z - playerLoc.Z
+                    local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+                    if dist <= maxDistance then
+                        local npcId = Utils.GetActorVoiceId(npc, staticData) or "Unknown"
+                        if _G.IsSignificantNPC and _G.IsSignificantNPC(npcId) then
+                            table.insert(result, {
+                                name = npcId,
+                                distance = math.floor(dist)
+                            })
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return result
+end
+
+--- Returns the absolute yaw angle (degrees) between an actor's facing direction and a target position.
+--- 0 = facing directly at target, 180 = facing away.
+---@param actorPos FVector Position of the actor
+---@param actorRot FRotator Rotation of the actor
+---@param targetPos FVector Position of the target
+---@return number angle Absolute yaw angle in degrees
+function Utils.GetAngleToTarget(actorPos, actorRot, targetPos)
+    local dx = targetPos.X - actorPos.X
+    local dy = targetPos.Y - actorPos.Y
+    local dist = math.sqrt(dx * dx + dy * dy)
+    if dist < 1 then return 0 end
+    local angleToTarget = math.atan(dy, dx) * 180 / math.pi
+    local yaw = actorRot.Yaw or 0
+    local diff = angleToTarget - yaw
+    while diff > 180 do diff = diff - 360 end
+    while diff < -180 do diff = diff + 360 end
+    return math.abs(diff)
 end
 
 return Utils

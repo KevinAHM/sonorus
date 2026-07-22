@@ -19,8 +19,45 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from .base import BaseTTSProvider, VoiceCache
 from .voice_utils import parse_hashed_voice_name
+from .elevenlabs import update_voice_usage, get_lru_voice, remove_voice_usage
 from utils.text_utils import localize_audio_tags
 from .inworld_ws import InworldWebSocket, WS_AVAILABLE, WS_ENDPOINT
+
+# Canonical tags that Inworld TTS supports (audio tags produce audible sounds).
+INWORLD_AUDIO_TAGS = {'laugh', 'sigh', 'breathe', 'cough', 'clear_throat', 'yawn'}
+
+# Variant -> base form mapping (LLM may emit [laughs], [sighing], etc.)
+_TAG_NORMALIZE = {
+    'laughs': 'laugh', 'laughing': 'laugh',
+    'sighs': 'sigh', 'sighing': 'sigh',
+    'breathes': 'breathe', 'breathing': 'breathe',
+    'coughs': 'cough', 'coughing': 'cough',
+    'clears throat': 'clear_throat', 'clearing throat': 'clear_throat',
+    'yawns': 'yawn', 'yawning': 'yawn',
+    'afraid': 'fearful',
+}
+
+_BRACKET_TAG_RE = re.compile(r'\[([^\]]+)\]')
+
+
+def _filter_inworld_tags(text: str) -> str:
+    """Strip unsupported bracket tags, normalize variants to base form.
+
+    [laughs] -> [laugh], [sighing] -> [sigh], [whisper] -> stripped, etc.
+    """
+    allowed = INWORLD_AUDIO_TAGS
+
+    def _replace(m):
+        tag = m.group(1).lower().strip()
+        # Normalize variant to base form
+        tag = _TAG_NORMALIZE.get(tag, tag)
+        if tag in allowed:
+            return f'[{tag}]'
+        return ''
+
+    filtered = _BRACKET_TAG_RE.sub(_replace, text)
+    return re.sub(r'  +', ' ', filtered).strip()
+
 
 # Parent directory (sonorus/) since this module is in services/tts/
 SONORUS_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -70,9 +107,12 @@ def _get_inworld_config():
     # Always use game language (from setup) to prevent sync issues
     language = settings.get('setup', {}).get('language', 'EN_US')
 
+    # Avoid "localhost" — DNS/IPv6 resolution can add seconds of latency.
+    api_url = inworld_settings.get('api_url', "").strip() or "https://api.inworld.ai"
+    api_url = api_url.replace("://localhost", "://127.0.0.1")
+
     return {
-        "api_url": inworld_settings.get('api_url', "").strip() or "https://api.inworld.ai",
-        "workspace_id": inworld_settings.get('workspace_id', ""),
+        "api_url": api_url,
         "api_key": inworld_settings.get('api_key', ""),
         "language": language,
         "sample_rate": int(inworld_settings.get('sample_rate', 48000)),
@@ -159,13 +199,8 @@ class InworldVoiceCache(VoiceCache):
             Exception: With specific error message for API failures
         """
         config = _get_inworld_config()
-        workspace = config["workspace_id"]
         api_url = config["api_url"].rstrip('/')
         self._default_lang = config["language"]
-
-        if not workspace:
-            print("[Inworld] No workspace ID configured")
-            raise Exception("Inworld workspace ID not configured. Set it in TTS settings.")
 
         url = f"{api_url}/voices/v1/voices"
 
@@ -175,7 +210,7 @@ class InworldVoiceCache(VoiceCache):
         }
 
         try:
-            print(f"[Inworld] Loading voices from {workspace}...")
+            print("[Inworld] Loading voices from API key workspace...")
             response = requests.get(url, headers=headers, timeout=30)
 
             if response.status_code == 401:
@@ -184,11 +219,11 @@ class InworldVoiceCache(VoiceCache):
 
             if response.status_code == 403:
                 print(f"[Inworld] API error: 403 Forbidden")
-                raise Exception("Inworld API key does not have access to this workspace. Check that your API key is valid for this workspace ID.")
+                raise Exception("Inworld API key does not have access to the Voice API. Check that your API key has Voice API read/write access.")
 
             if response.status_code == 404:
-                print(f"[Inworld] API error: 404 Not Found")
-                raise Exception(f"Inworld workspace '{workspace}' not found. Check your workspace ID in TTS settings.")
+                print(f"[Inworld] API error: 404 Not Found", url)
+                raise Exception("Inworld Voice API endpoint not found. Check your API URL in TTS settings.")
 
             if response.status_code != 200:
                 print(f"[Inworld] API error: {response.status_code} {response.reason}")
@@ -202,12 +237,16 @@ class InworldVoiceCache(VoiceCache):
             # Track duplicates for logging
             duplicates = {}  # key -> list of (display_name, hash)
 
-            # Filter to only voices belonging to the configured workspace
-            workspace_prefix = f"{workspace}__"
-            workspace_voices = [v for v in voices if v.get("voiceId", "").startswith(workspace_prefix)]
+            # The short Voice API path derives the workspace from the API key.
+            # Keep only user-created voices and ignore built-in/system voices.
+            workspace_voices = [
+                v for v in voices
+                if v.get("source") == "IVC"
+                or (not v.get("source") and "__" in v.get("voiceId", ""))
+            ]
             skipped = len(voices) - len(workspace_voices)
             if skipped > 0:
-                print(f"[Inworld] Filtered out {skipped} voices from other workspaces")
+                print(f"[Inworld] Ignored {skipped} built-in/system voices")
 
             for voice in workspace_voices:
                 display_name = voice.get("displayName", "")
@@ -336,6 +375,7 @@ class InworldProvider(BaseTTSProvider):
     def __init__(self):
         self._ws: Optional[InworldWebSocket] = None
         self._ws_lock = __import__('threading').Lock()
+        self._last_synthesis_error = ""
 
     @property
     def name(self) -> str:
@@ -350,7 +390,7 @@ class InworldProvider(BaseTTSProvider):
         return _get_inworld_config()
 
     def get_sample_rate(self) -> int:
-        return 48000  # Fixed for Inworld
+        return _get_inworld_config()["sample_rate"]
 
     def get_default_language(self) -> Optional[str]:
         return self.get_config().get("language", "EN_US")
@@ -358,16 +398,47 @@ class InworldProvider(BaseTTSProvider):
     def get_voice_cache(self) -> VoiceCache:
         return _get_voice_cache()
 
+    def on_voice_used(self, voice: Dict) -> None:
+        """Track voice usage for LRU deletion."""
+        display_name = voice.get("displayName", "")
+        tags = voice.get("tags", [])
+        if "auto-cloned" in tags and display_name:
+            update_voice_usage("inworld", display_name)
+
+    def _record_synthesis_error(self, error: str) -> None:
+        self._last_synthesis_error = error or ""
+
+    def should_reclone_after_synthesis_failure(self, voice_id: str) -> bool:
+        error = (self._last_synthesis_error or "").lower()
+        if not error:
+            return False
+        return (
+            "unknown voice" in error
+            or "invalid voice" in error
+            or (voice_id and voice_id.lower() in error and "not found" in error)
+        )
+
     # ─── WebSocket lifecycle ───────────────────────────────────────────
+
+    @staticmethod
+    def _ws_supported() -> bool:
+        """WebSocket is only supported on the base Inworld API URL."""
+        config = _get_inworld_config()
+        api_url = config.get('api_url', '').rstrip('/')
+        return api_url in ('', 'https://api.inworld.ai')
 
     def connect_websocket(self, log: bool = False):
         """
         Establish persistent WebSocket connection to Inworld TTS API.
         Call this when Inworld is selected as the TTS provider.
         Safe to call multiple times (idempotent).
+        Skipped when api_url is not the base Inworld API (use HTTP :stream instead).
         """
         if not WS_AVAILABLE:
             print("[Inworld] WebSocket unavailable (websocket-client not installed)")
+            return False
+
+        if not self._ws_supported():
             return False
 
         with self._ws_lock:
@@ -415,10 +486,86 @@ class InworldProvider(BaseTTSProvider):
             return True
         return self.connect_websocket()
 
+    def _delete_oldest_cloned_voice(self) -> bool:
+        """
+        Delete the least recently used cloned voice to make room for a new one.
+        Returns True if a voice was deleted, False otherwise.
+        """
+        try:
+            config = self.get_config()
+            api_url = config["api_url"].rstrip('/')
+
+            # Fetch current voices from API
+            headers = {
+                "Authorization": _get_auth_header(),
+                "Content-Type": "application/json",
+            }
+            response = requests.get(f"{api_url}/voices/v1/voices", headers=headers, timeout=30)
+            if response.status_code != 200:
+                print(f"[Inworld] Failed to list voices for LRU deletion: {response.status_code}")
+                return False
+
+            voices = response.json().get("voices", [])
+
+            # Filter to our auto-cloned voices only
+            cloned_voices = {}
+            for voice in voices:
+                tags = voice.get("tags", [])
+                if "auto-cloned" in tags:
+                    cloned_voices[voice.get("displayName", "")] = voice
+
+            if not cloned_voices:
+                print("[Inworld] No cloned voices to delete")
+                return False
+
+            lru_name = get_lru_voice("inworld", list(cloned_voices.keys()))
+            if not lru_name or lru_name not in cloned_voices:
+                print("[Inworld] Could not determine LRU voice")
+                return False
+
+            target = cloned_voices[lru_name]
+            voice_id = target.get("voiceId", "")
+
+            print(f"[Inworld] Deleting least recently used voice: {lru_name} ({voice_id})")
+
+            if not self.delete_voice(voice_id):
+                print(f"[Inworld] Failed to delete LRU voice: {lru_name}")
+                return False
+
+            # Remove from cache
+            cache = self.get_voice_cache()
+            original_name, detected_lang, _ = parse_hashed_voice_name(lru_name)
+            cache_key = cache._make_cache_key(original_name, detected_lang or cache._default_lang)
+            if cache_key in cache._voices:
+                del cache._voices[cache_key]
+            if voice_id in cache._by_id:
+                del cache._by_id[voice_id]
+
+            remove_voice_usage("inworld", lru_name)
+
+            el = _get_event_logger()
+            if el:
+                el.log_voice_clone_event(
+                    character_name=lru_name,
+                    language="unknown",
+                    reference_filename="",
+                    voice_id=voice_id,
+                    status="deleted",
+                    error="Auto-deleted least recently used voice (plan limit reached)"
+                )
+
+            print(f"[Inworld] Deleted LRU voice: {lru_name}")
+            return True
+
+        except Exception as e:
+            print(f"[Inworld] Failed to delete LRU voice: {e}")
+            return False
+
     def clone_voice(self, display_name: str, reference_wav_path: str,
                     lang: Optional[str] = None) -> Optional[Dict]:
         """
         Clone a voice from a reference WAV file.
+        If the voice limit is reached, auto-deletes the least recently used clone and retries.
 
         Args:
             display_name: Name for the cloned voice (e.g., "SebastianSallow")
@@ -429,14 +576,9 @@ class InworldProvider(BaseTTSProvider):
             Voice dict on success, None on failure
         """
         config = self.get_config()
-        workspace = config["workspace_id"]
         api_url = config["api_url"].rstrip('/')
         if lang is None:
             lang = config["language"]
-
-        if not workspace:
-            print("[Inworld] No workspace ID configured")
-            return None
 
         if not os.path.exists(reference_wav_path):
             print(f"[Inworld] Reference file not found: {reference_wav_path}")
@@ -466,36 +608,29 @@ class InworldProvider(BaseTTSProvider):
             "Content-Type": "application/json",
         }
 
-        try:
+        def attempt_clone():
             file_size = os.path.getsize(reference_wav_path)
             print(f"[Inworld] Cloning voice: {display_name} (game: {lang} -> inworld: {inworld_lang}), file size: {file_size / 1024:.1f} KB...")
-            response = requests.post(url, json=payload, headers=headers, timeout=180)
+            resp = requests.post(url, json=payload, headers=headers, timeout=180)
 
-            if response.status_code != 200:
-                error_msg = f"HTTP {response.status_code}"
-                error_body = response.text[:300] if response.text else ""
-                print(f"[Inworld] Clone error: {error_msg}")
-                if error_body:
-                    print(f"[Inworld] Details: {error_body}")
-                el = _get_event_logger()
-                if el:
-                    el.log_voice_clone_event(
-                        character_name=display_name,
-                        language=lang,
-                        reference_filename=os.path.basename(reference_wav_path),
-                        status="error",
-                        error=f"{error_msg}: {error_body}"
-                    )
-                return None
+            if resp.status_code != 200:
+                error_msg = f"HTTP {resp.status_code}"
+                error_body = resp.text[:300] if resp.text else ""
+                return None, error_msg, error_body
 
-            data = response.json()
+            data = resp.json()
             voice = data.get("voice", {})
             voice_id = voice.get("voiceId", "")
-
             if voice_id:
-                print(f"[Inworld] Voice cloned: {display_name} -> {voice_id}")
+                return voice, None, None
+            return None, "Missing voiceId in response", ""
 
-                # Log voice clone event
+        try:
+            voice, error_msg, error_body = attempt_clone()
+
+            if voice:
+                voice_id = voice.get("voiceId", "")
+                print(f"[Inworld] Voice cloned: {display_name} -> {voice_id}")
                 el = _get_event_logger()
                 if el:
                     el.log_voice_clone_event(
@@ -505,23 +640,67 @@ class InworldProvider(BaseTTSProvider):
                         voice_id=voice_id,
                         status="success"
                     )
-
-                # NOTE: Do NOT add to cache here - base class handles it with correct key
-                # (we clone as "PlayerMale_DE_DE" but cache under "PlayerMale" + lang)
-
                 return voice
-            else:
-                print(f"[Inworld] Clone response missing voiceId")
+
+            # Check if it's a voice limit error
+            full_error = f"{error_msg}: {error_body}".lower()
+            is_limit_error = any(phrase in full_error for phrase in [
+                "voice limit", "maximum", "limit reached", "quota",
+                "too many voices", "voice_limit", "max_voices", "clone limit",
+                "exceeded", "resource_exhausted",
+            ])
+
+            if is_limit_error:
+                print(f"[Inworld] Voice limit reached, attempting to delete LRU voice...")
                 el = _get_event_logger()
                 if el:
                     el.log_voice_clone_event(
                         character_name=display_name,
                         language=lang,
                         reference_filename=os.path.basename(reference_wav_path),
-                        status="error",
-                        error="Missing voiceId in response"
+                        status="warning",
+                        error=f"Voice limit reached: {error_msg}. Attempting to delete LRU voice."
                     )
-                return None
+
+                if self._delete_oldest_cloned_voice():
+                    print(f"[Inworld] Retrying clone after deletion...")
+                    voice, retry_error_msg, retry_error_body = attempt_clone()
+
+                    if voice:
+                        voice_id = voice.get("voiceId", "")
+                        print(f"[Inworld] Voice cloned after LRU deletion: {display_name} -> {voice_id}")
+                        el = _get_event_logger()
+                        if el:
+                            el.log_voice_clone_event(
+                                character_name=display_name,
+                                language=lang,
+                                reference_filename=os.path.basename(reference_wav_path),
+                                voice_id=voice_id,
+                                status="success",
+                                error="Succeeded after auto-deleting LRU voice"
+                            )
+                        return voice
+                    else:
+                        error_msg = retry_error_msg or error_msg
+                        error_body = retry_error_body or error_body
+                        print(f"[Inworld] Clone still failed after deletion: {error_msg}")
+                else:
+                    print(f"[Inworld] Could not delete LRU voice")
+
+            # All paths that didn't return — log the error
+            print(f"[Inworld] Clone error: {error_msg}")
+            if error_body:
+                print(f"[Inworld] Details: {error_body}")
+            el = _get_event_logger()
+            if el:
+                el.log_voice_clone_event(
+                    character_name=display_name,
+                    language=lang,
+                    reference_filename=os.path.basename(reference_wav_path),
+                    status="error",
+                    error=f"{error_msg}: {error_body}"
+                )
+            return None
 
         except requests.exceptions.Timeout:
             print(f"[Inworld] Clone timed out after 180s")
@@ -644,14 +823,16 @@ class InworldProvider(BaseTTSProvider):
             'model_id': model_id,
             'temperature': temperature,
             'speaking_rate': speaking_rate,
+            'sample_rate': config.get('sample_rate', 48000),
             'language': language,
             'localize_tags': localize_tags,
             'api_url': config.get('api_url', 'https://api.inworld.ai').rstrip('/'),
         }
 
     def _localize_text(self, text: str, language: str, localize_tags: bool) -> str:
-        """Apply audio tag localization for non-English languages."""
-        text = re.sub(r'  +', ' ', text).strip()
+        """Filter unsupported tags, then localize audio tags for non-English."""
+        # Strip any bracket tags Inworld doesn't support
+        text = _filter_inworld_tags(text)
         if localize_tags and not language.startswith('EN'):
             original = text
             text = localize_audio_tags(text, language)
@@ -675,6 +856,7 @@ class InworldProvider(BaseTTSProvider):
         Returns:
             True on success, False on error
         """
+        self._record_synthesis_error("")
         params = self._resolve_tts_params(speaker_id)
         text = self._localize_text(text, params['language'], params['localize_tags'])
 
@@ -716,6 +898,7 @@ class InworldProvider(BaseTTSProvider):
         Returns:
             True on success, False on error
         """
+        self._record_synthesis_error("")
         params = self._resolve_tts_params(speaker_id)
 
         # Detect multi-voice by peeking at the first item from the generator.
@@ -754,33 +937,40 @@ class InworldProvider(BaseTTSProvider):
             print(f"[Inworld] Voice ID: {voice_id}")
             try:
                 if has_multi_voice:
-                    return self._ws.synthesize_sentences_multi_voice(
+                    success = self._ws.synthesize_sentences_multi_voice(
                         sentences=localized_gen(),
                         default_voice_id=voice_id,
                         model_id=params['model_id'],
                         temperature=params['temperature'],
                         on_chunk=on_chunk,
                         speaker_id=speaker_id,
-                        sample_rate=48000,
+                        sample_rate=params['sample_rate'],
                         speed=params['speaking_rate'],
                         on_sentence_flushed=on_sentence_flushed,
                         abort_check=abort_check,
                         on_voice_switch=on_voice_switch,
                     )
+                    if not success:
+                        self._record_synthesis_error(getattr(self._ws, "last_error", ""))
+                    return success
                 else:
-                    return self._ws.synthesize_sentences(
+                    success = self._ws.synthesize_sentences(
                         sentences=localized_gen(),
                         voice_id=voice_id,
                         model_id=params['model_id'],
                         temperature=params['temperature'],
                         on_chunk=on_chunk,
                         speaker_id=speaker_id,
-                        sample_rate=48000,
+                        sample_rate=params['sample_rate'],
                         speed=params['speaking_rate'],
                         on_sentence_flushed=on_sentence_flushed,
                         abort_check=abort_check
                     )
+                    if not success:
+                        self._record_synthesis_error(getattr(self._ws, "last_error", ""))
+                    return success
             except Exception as e:
+                self._record_synthesis_error(str(e))
                 print(f"[Inworld] WebSocket sentence streaming failed: {e}")
                 import traceback
                 traceback.print_exc()
@@ -820,7 +1010,7 @@ class InworldProvider(BaseTTSProvider):
                     temperature=params['temperature'],
                     on_chunk=on_chunk,
                     speaker_id=speaker_id,
-                    sample_rate=48000,
+                    sample_rate=params['sample_rate'],
                     speed=params['speaking_rate']
                 )
             else:
@@ -831,7 +1021,7 @@ class InworldProvider(BaseTTSProvider):
                     temperature=params['temperature'],
                     on_chunk=on_chunk,
                     speaker_id=speaker_id,
-                    sample_rate=48000,
+                    sample_rate=params['sample_rate'],
                     speed=params['speaking_rate']
                 )
 
@@ -854,6 +1044,7 @@ class InworldProvider(BaseTTSProvider):
 
             return success
         except Exception as e:
+            self._record_synthesis_error(str(e))
             print(f"[Inworld] WebSocket synthesis error: {e}, falling back to HTTP")
             return self._synthesize_via_http(text, voice_id, on_chunk, speaker_id, params)
 
@@ -870,7 +1061,7 @@ class InworldProvider(BaseTTSProvider):
             "modelId": params['model_id'],
             "audioConfig": {
                 "audioEncoding": "LINEAR16",
-                "sampleRateHertz": 48000,
+                "sampleRateHertz": params['sample_rate'],
                 "speakingRate": params['speaking_rate'],
             },
             "temperature": params['temperature'],
@@ -891,7 +1082,9 @@ class InworldProvider(BaseTTSProvider):
 
             if response.status_code != 200:
                 print(f"[Inworld] HTTP Error: {response.status_code}")
-                print(f"[Inworld] Body: {response.text[:500]}")
+                error_body = response.text[:500]
+                self._record_synthesis_error(error_body)
+                print(f"[Inworld] Body: {error_body}")
                 return False
 
             chunks_received = 0
@@ -910,6 +1103,7 @@ class InworldProvider(BaseTTSProvider):
 
                     if "error" in data:
                         print(f"[Inworld] Stream error: {data['error']}")
+                        self._record_synthesis_error(str(data['error']))
                         return False
 
                     result = data.get("result", {})
@@ -1006,6 +1200,7 @@ class InworldProvider(BaseTTSProvider):
             return chunks_received > 0
 
         except requests.exceptions.RequestException as e:
+            self._record_synthesis_error(str(e))
             print(f"[Inworld] Request failed: {e}")
             el = _get_event_logger()
             if el:
@@ -1019,6 +1214,7 @@ class InworldProvider(BaseTTSProvider):
                 )
             return False
         except Exception as e:
+            self._record_synthesis_error(str(e))
             print(f"[Inworld] Synthesis failed: {e}")
             import traceback
             traceback.print_exc()

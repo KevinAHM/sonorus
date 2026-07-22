@@ -220,38 +220,63 @@ set "DST=!GAME_PATH!\Phoenix"
 :: --- Check what Sonorus files exist ---
 set "FOUND_ANYTHING=0"
 
+set "SONORUS_PATH=!DST!\Binaries\!BIN_DIR!\sonorus"
 set "MODS_PATH=!DST!\Binaries\!BIN_DIR!\ue4ss\Mods\SonorusMod"
 set "PAKS_PATH=!DST!\Content\Paks\LogicMods"
-set "PAK_FOLDER=!PAKS_PATH!\sonorusblueprintmod"
-set "PAK_FILE=!PAKS_PATH!\sonorusblueprintmod.pak"
-set "UCAS_FILE=!PAKS_PATH!\sonorusblueprintmod.ucas"
-set "UTOC_FILE=!PAKS_PATH!\sonorusblueprintmod.utoc"
+set "PAK_FOLDER=!PAKS_PATH!\SonorusMod"
+set "PAK_FILE=!PAKS_PATH!\SonorusMod.pak"
+set "UCAS_FILE=!PAKS_PATH!\SonorusMod.ucas"
+set "UTOC_FILE=!PAKS_PATH!\SonorusMod.utoc"
+set "LEGACY_PAK_FOLDER=!PAKS_PATH!\sonorusblueprintmod"
+set "LEGACY_PAK_FILE=!PAKS_PATH!\sonorusblueprintmod.pak"
+set "LEGACY_UCAS_FILE=!PAKS_PATH!\sonorusblueprintmod.ucas"
+set "LEGACY_UTOC_FILE=!PAKS_PATH!\sonorusblueprintmod.utoc"
 
 echo  Sonorus files found:
 echo.
+if exist "!SONORUS_PATH!" (
+    echo    - sonorus  ^(Binaries\!BIN_DIR!\sonorus^)
+    set "FOUND_ANYTHING=1"
+)
 if exist "!MODS_PATH!" (
     echo    - SonorusMod  ^(ue4ss\Mods\SonorusMod^)
     set "FOUND_ANYTHING=1"
 )
 if exist "!PAK_FOLDER!" (
-    echo    - sonorusblueprintmod folder  ^(LogicMods\sonorusblueprintmod^)
+    echo    - SonorusMod folder  ^(LogicMods\SonorusMod^)
     set "FOUND_ANYTHING=1"
 )
 if exist "!PAK_FILE!" (
-    echo    - sonorusblueprintmod.pak
+    echo    - SonorusMod.pak
     set "FOUND_ANYTHING=1"
 )
 if exist "!UCAS_FILE!" (
-    echo    - sonorusblueprintmod.ucas
+    echo    - SonorusMod.ucas
     set "FOUND_ANYTHING=1"
 )
 if exist "!UTOC_FILE!" (
-    echo    - sonorusblueprintmod.utoc
+    echo    - SonorusMod.utoc
+    set "FOUND_ANYTHING=1"
+)
+if exist "!LEGACY_PAK_FOLDER!" (
+    echo    - legacy sonorusblueprintmod folder  ^(LogicMods\sonorusblueprintmod^)
+    set "FOUND_ANYTHING=1"
+)
+if exist "!LEGACY_PAK_FILE!" (
+    echo    - legacy sonorusblueprintmod.pak
+    set "FOUND_ANYTHING=1"
+)
+if exist "!LEGACY_UCAS_FILE!" (
+    echo    - legacy sonorusblueprintmod.ucas
+    set "FOUND_ANYTHING=1"
+)
+if exist "!LEGACY_UTOC_FILE!" (
+    echo    - legacy sonorusblueprintmod.utoc
     set "FOUND_ANYTHING=1"
 )
 
 if !FOUND_ANYTHING! equ 0 (
-    echo    (none)
+    echo    ^(none^)
     echo.
     echo  Sonorus does not appear to be installed here.
     echo.
@@ -309,6 +334,19 @@ echo.
 
 set "ERRORS=0"
 
+if exist "!SONORUS_PATH!" (
+    echo  Removing sonorus folder...
+    rmdir /S /Q "!SONORUS_PATH!" 2>nul
+    if exist "!SONORUS_PATH!" (
+        timeout /t 2 /nobreak >nul
+        rmdir /S /Q "!SONORUS_PATH!" 2>nul
+        if exist "!SONORUS_PATH!" (
+            echo  WARNING: Could not remove sonorus folder.
+            set "ERRORS=1"
+        )
+    )
+)
+
 if exist "!MODS_PATH!" (
     echo  Removing SonorusMod...
     rmdir /S /Q "!MODS_PATH!" 2>nul
@@ -319,37 +357,73 @@ if exist "!MODS_PATH!" (
 )
 
 if exist "!PAK_FOLDER!" (
-    echo  Removing sonorusblueprintmod folder...
+    echo  Removing SonorusMod folder from LogicMods...
     rmdir /S /Q "!PAK_FOLDER!" 2>nul
     if exist "!PAK_FOLDER!" (
-        echo  WARNING: Could not remove sonorusblueprintmod folder.
+        echo  WARNING: Could not remove SonorusMod folder from LogicMods.
         set "ERRORS=1"
     )
 )
 
 if exist "!PAK_FILE!" (
-    echo  Removing sonorusblueprintmod.pak...
+    echo  Removing SonorusMod.pak...
     del /F /Q "!PAK_FILE!" 2>nul
     if exist "!PAK_FILE!" (
-        echo  WARNING: Could not remove sonorusblueprintmod.pak.
+        echo  WARNING: Could not remove SonorusMod.pak.
         set "ERRORS=1"
     )
 )
 
 if exist "!UCAS_FILE!" (
-    echo  Removing sonorusblueprintmod.ucas...
+    echo  Removing SonorusMod.ucas...
     del /F /Q "!UCAS_FILE!" 2>nul
     if exist "!UCAS_FILE!" (
-        echo  WARNING: Could not remove sonorusblueprintmod.ucas.
+        echo  WARNING: Could not remove SonorusMod.ucas.
         set "ERRORS=1"
     )
 )
 
 if exist "!UTOC_FILE!" (
-    echo  Removing sonorusblueprintmod.utoc...
+    echo  Removing SonorusMod.utoc...
     del /F /Q "!UTOC_FILE!" 2>nul
     if exist "!UTOC_FILE!" (
-        echo  WARNING: Could not remove sonorusblueprintmod.utoc.
+        echo  WARNING: Could not remove SonorusMod.utoc.
+        set "ERRORS=1"
+    )
+)
+
+if exist "!LEGACY_PAK_FOLDER!" (
+    echo  Removing legacy sonorusblueprintmod folder...
+    rmdir /S /Q "!LEGACY_PAK_FOLDER!" 2>nul
+    if exist "!LEGACY_PAK_FOLDER!" (
+        echo  WARNING: Could not remove legacy sonorusblueprintmod folder.
+        set "ERRORS=1"
+    )
+)
+
+if exist "!LEGACY_PAK_FILE!" (
+    echo  Removing legacy sonorusblueprintmod.pak...
+    del /F /Q "!LEGACY_PAK_FILE!" 2>nul
+    if exist "!LEGACY_PAK_FILE!" (
+        echo  WARNING: Could not remove legacy sonorusblueprintmod.pak.
+        set "ERRORS=1"
+    )
+)
+
+if exist "!LEGACY_UCAS_FILE!" (
+    echo  Removing legacy sonorusblueprintmod.ucas...
+    del /F /Q "!LEGACY_UCAS_FILE!" 2>nul
+    if exist "!LEGACY_UCAS_FILE!" (
+        echo  WARNING: Could not remove legacy sonorusblueprintmod.ucas.
+        set "ERRORS=1"
+    )
+)
+
+if exist "!LEGACY_UTOC_FILE!" (
+    echo  Removing legacy sonorusblueprintmod.utoc...
+    del /F /Q "!LEGACY_UTOC_FILE!" 2>nul
+    if exist "!LEGACY_UTOC_FILE!" (
+        echo  WARNING: Could not remove legacy sonorusblueprintmod.utoc.
         set "ERRORS=1"
     )
 )

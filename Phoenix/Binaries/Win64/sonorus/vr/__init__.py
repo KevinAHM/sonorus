@@ -6,7 +6,7 @@ Consumers import from here: ``from vr import is_vr_active, init_vr_tracker``
 """
 import threading
 
-from utils.settings import load_settings
+from utils.settings import load_settings, register_vr_callback
 from vr.manager import VRManager
 
 # Module-level singleton
@@ -42,6 +42,7 @@ def _try_init(lua_socket=None) -> bool:
             manager._stop_conversation_cb = _stop_conv_callback
         _vr_tracker = manager
         _vr_active = True
+        register_vr_callback(is_vr_active)
         return True
     return False
 
@@ -70,7 +71,7 @@ def init_vr_tracker(lua_socket=None) -> VRManager | None:
     if _vr_tracker and _vr_tracker.initialized:
         return _vr_tracker
 
-    settings = load_settings()
+    settings = load_settings(raw=True)
     audio_cfg = settings.get("audio", {})
     if not audio_cfg.get("vr_tracking", True):
         return None
@@ -100,7 +101,7 @@ def set_vr_lua_socket(lua_socket) -> None:
         return
 
     # VR not initialized yet — retry (UEVR may have been injected since startup)
-    settings = load_settings()
+    settings = load_settings(raw=True)
     audio_cfg = settings.get("audio", {})
     if not audio_cfg.get("vr_tracking", True):
         return

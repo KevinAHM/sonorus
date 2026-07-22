@@ -1,9 +1,8 @@
 """
 NPC Long-Term Memory System for Sonorus.
 
-Uses Graphiti with Kuzu embedded graph database to store and retrieve NPC memories.
-Each NPC has their own namespace (group_id) for memory isolation based on earshot.
-Kuzu is an embedded DB requiring no external setup - data is stored locally.
+Uses a lightweight local Cognis fact store for NPC memories.
+Each NPC has their own owner_id for memory isolation based on earshot.
 """
 
 import os
@@ -11,169 +10,384 @@ import json
 import asyncio
 import time
 import string
+import shutil
+import sqlite3
+import tempfile
 import threading
 from datetime import datetime, timezone
 from typing import Optional, Dict, List, Any, ClassVar
-from pydantic import BaseModel, Field
-
-from .settings import load_settings, DATA_DIR, is_dev_mode
-from .kuzu_executor import get_executor, TaskPriority, shutdown_executor
+from .settings import load_settings, DATA_DIR, SONORUS_DIR, is_dev_mode
+from .character_bios import (
+    get_editor_guidance,
+    get_player_static_bio,
+    get_static_bio,
+    is_npc_memory_effectively_enabled,
+)
+from .dialogue import format_combat_summary
 from .profiler import Profiler
 from constants import EPISODE_CONTEXT_WINDOW
+
+
 
 # Get shared profiler instance
 _profiler = Profiler.get("chat_flow")
 
-# Lazy imports for Graphiti (may not be installed)
-_graphiti_available = False
-_graphiti_instance = None
+_memory_data_dir = DATA_DIR
+
+
+def _normalize_openai_compatible_memory_model(model: str, provider: str) -> str:
+    model = (model or "gpt-4.1-nano").strip() or "gpt-4.1-nano"
+    if provider in ("openai", "openrouter") and "gemini" in model.lower():
+        model = "openai/gpt-4.1-nano" if provider == "openrouter" else "gpt-4.1-nano"
+    if provider == "openrouter" and "/" not in model and (
+        model.startswith("gpt-") or model.startswith("o")
+    ):
+        return f"openai/{model}"
+    if provider == "openai" and model.startswith("openai/"):
+        return model.split("/", 1)[1]
+    return model
+
+
+def _get_memory_llm_model(memory_settings: Dict[str, Any], key: str, fallback: str = "gpt-4.1-nano") -> str:
+    settings = load_settings()
+    provider = settings.get("llm", {}).get("provider", "gemini")
+    return _normalize_openai_compatible_memory_model(memory_settings.get(key) or fallback, provider)
+
+
+def _sync_memory_data_dir_from_player_context() -> str:
+    """Keep memory storage aligned with the active player-scoped data directory."""
+    global _memory_data_dir
+
+    try:
+        from . import player_context
+
+        player_data_dir = player_context.get_player_data_dir()
+        if player_data_dir:
+            _memory_data_dir = player_data_dir
+    except Exception:
+        pass
+
+    return _memory_data_dir
+
+
+def get_memory_data_dir() -> str:
+    """Return the active memory data directory."""
+    return _sync_memory_data_dir_from_player_context()
+
+
+def _get_memory_backup_root() -> str:
+    """Return the directory that stores logical memory snapshots and legacy graph exports."""
+    return os.path.join(_sync_memory_data_dir_from_player_context(), "graph_backups")
+
+
+def _get_memory_snapshot_manifest_path(snapshot_dir: str) -> str:
+    """Return the manifest path for a memory snapshot."""
+    return os.path.join(snapshot_dir, "manifest.json")
+
+
+
+
+def _get_memory_snapshot_cognis_dir(snapshot_dir: str) -> str:
+    """Return the Cognis data directory inside a memory snapshot."""
+    return os.path.join(snapshot_dir, "cognis")
+
+
+def _get_memory_snapshot_sqlite_dir(snapshot_dir: str) -> str:
+    """Return the SQLite snapshot directory inside a memory snapshot."""
+    return os.path.join(snapshot_dir, "sqlite")
+
+
+def _get_memory_snapshot_queue_db_path(snapshot_dir: str) -> str:
+    """Return the snapshot path for the memory queue database."""
+    return os.path.join(_get_memory_snapshot_sqlite_dir(snapshot_dir), "memory_queue.db")
+
+
+def _get_chapter_content_dir_path() -> str:
+    """Return the on-disk chapter content directory path."""
+    return os.path.join(_sync_memory_data_dir_from_player_context(), "chapter_content")
+
+
+def _safe_chapter_artifact_name(npc_id: str, chapter_title: str, timestamp: Optional[int] = None) -> str:
+    raw = f"{npc_id}_{timestamp or int(time.time())}_{chapter_title}"
+    safe = "".join(ch if ch.isalnum() else "_" for ch in raw).strip("_")
+    return (safe[:180] or f"{npc_id}_chapter") + ".json"
+
+
+def save_generated_episode_audit(npc_id: str, chapter_title: str, episode_content: str,
+                                 prompt_inputs: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """Persist generated episode prose so bad extracted facts can be audited later."""
+    try:
+        audit_dir = os.path.join(_get_chapter_content_dir_path(), "generated")
+        os.makedirs(audit_dir, exist_ok=True)
+        path = os.path.join(
+            audit_dir,
+            _safe_chapter_artifact_name(npc_id, chapter_title, int(time.time())),
+        )
+        payload = {
+            "npc_id": npc_id,
+            "chapter_title": chapter_title,
+            "created_at": int(time.time()),
+            "episode_content": episode_content,
+            "prompt_inputs": prompt_inputs or {},
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        return path
+    except Exception as e:
+        print(f"[Memory] Warning: could not save generated episode audit for {npc_id}: {e}")
+        return None
+
+
+def _get_current_server_session() -> int:
+    """Best-effort current server session number for today's backup folder."""
+    logs_dir = os.path.join(SONORUS_DIR, "logs")
+    today = datetime.now().strftime("%Y-%m-%d")
+    prefix = f"server_{today}_"
+    latest_session = 1
+
+    if not os.path.isdir(logs_dir):
+        return latest_session
+
+    for name in os.listdir(logs_dir):
+        if not (name.startswith(prefix) and name.endswith(".log")):
+            continue
+        session_text = name[len(prefix):-4]
+        try:
+            latest_session = max(latest_session, int(session_text))
+        except ValueError:
+            continue
+
+    return latest_session
+
+
+def _get_session_backup_root(root_dir: str) -> str:
+    """Return the dated session directory for graph export backups."""
+    date_dir = os.path.join(root_dir, datetime.now().strftime("%Y-%m-%d"))
+    session_dir = os.path.join(date_dir, f"session_{_get_current_server_session()}")
+    os.makedirs(session_dir, exist_ok=True)
+    return session_dir
+
+
+def _sanitize_backup_reason(reason: str) -> str:
+    """Make backup reason filesystem-safe and readable."""
+    safe = ''.join(ch.lower() if ch.isalnum() else '_' for ch in (reason or "backup"))
+    while "__" in safe:
+        safe = safe.replace("__", "_")
+    return safe.strip("_") or "backup"
+
+
+def _make_unique_backup_dir(root_dir: str, reason: str) -> str:
+    """Create a unique export directory path for a logical graph backup."""
+    session_root = _get_session_backup_root(root_dir)
+    ts = datetime.now().strftime("%H%M%S")
+    base_name = f"{ts}_{_sanitize_backup_reason(reason)}"
+    candidate = os.path.join(session_root, base_name)
+    suffix = 1
+    while os.path.exists(candidate):
+        suffix += 1
+        candidate = os.path.join(session_root, f"{base_name}.{suffix}")
+    return candidate
+
+
+def _iter_graph_backup_dirs(root_dir: str) -> List[str]:
+    """Return all concrete export backup directories."""
+    backup_dirs: List[str] = []
+    if not os.path.isdir(root_dir):
+        return backup_dirs
+
+    for date_name in os.listdir(root_dir):
+        date_path = os.path.join(root_dir, date_name)
+        if not os.path.isdir(date_path):
+            continue
+        for session_name in os.listdir(date_path):
+            session_path = os.path.join(date_path, session_name)
+            if not os.path.isdir(session_path):
+                continue
+            for backup_name in os.listdir(session_path):
+                backup_path = os.path.join(session_path, backup_name)
+                if os.path.isdir(backup_path):
+                    backup_dirs.append(backup_path)
+
+    return backup_dirs
+
+
+def _prune_old_graph_backups(root_dir: str, keep: int = 10) -> None:
+    """Keep only the newest logical graph backups."""
+    if keep <= 0 or not os.path.isdir(root_dir):
+        return
+
+    backup_dirs = _iter_graph_backup_dirs(root_dir)
+    backup_dirs.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+    for stale_path in backup_dirs[keep:]:
+        try:
+            shutil.rmtree(stale_path)
+            print(f"[Memory] Pruned old memory backup: {stale_path}")
+        except Exception as e:
+            print(f"[Memory] Failed to prune memory backup '{stale_path}': {e}")
+
+    # Clean up empty session/date folders after pruning.
+    for date_name in os.listdir(root_dir):
+        date_path = os.path.join(root_dir, date_name)
+        if not os.path.isdir(date_path):
+            continue
+        for session_name in os.listdir(date_path):
+            session_path = os.path.join(date_path, session_name)
+            if os.path.isdir(session_path) and not os.listdir(session_path):
+                try:
+                    os.rmdir(session_path)
+                except Exception:
+                    pass
+        if not os.listdir(date_path):
+            try:
+                os.rmdir(date_path)
+            except Exception:
+                pass
+
+
+def _find_latest_graph_backup() -> Optional[str]:
+    """Return the newest logical export backup directory, if any."""
+    root_dir = _get_memory_backup_root()
+    backup_dirs = _iter_graph_backup_dirs(root_dir)
+    if not backup_dirs:
+        return None
+
+    backup_dirs.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+    return backup_dirs[0]
+
+
+def _relative_graph_backup_id(backup_path: str) -> str:
+    """Return a stable backup ID relative to the graph backup root."""
+    return os.path.relpath(backup_path, _get_memory_backup_root()).replace("\\", "/")
+
+
+def _resolve_memory_backup_path(backup_id: str) -> Optional[str]:
+    """Resolve a client-provided memory backup ID to an on-disk directory."""
+    if not backup_id:
+        return None
+
+    root_dir = os.path.abspath(_get_memory_backup_root())
+    candidate = os.path.abspath(os.path.join(root_dir, backup_id.replace("/", os.sep)))
+
+    try:
+        if os.path.commonpath([root_dir, candidate]) != root_dir:
+            return None
+    except ValueError:
+        return None
+
+    if not os.path.isdir(candidate):
+        return None
+
+    manifest_path = _get_memory_snapshot_manifest_path(candidate)
+    if os.path.isfile(manifest_path):
+        return candidate
+
+    legacy_required = ("schema.cypher", "copy.cypher")
+    if all(os.path.exists(os.path.join(candidate, name)) for name in legacy_required):
+        return candidate
+
+    return None
+
+
+def _load_backup_manifest(backup_path: str) -> Dict[str, Any]:
+    """Load a snapshot manifest, or synthesize metadata for legacy graph-only backups."""
+    manifest_path = _get_memory_snapshot_manifest_path(backup_path)
+    if os.path.isfile(manifest_path):
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+            if isinstance(manifest, dict):
+                return manifest
+        except Exception as e:
+            print(f"[Memory] Failed to read backup manifest '{manifest_path}': {e}")
+
+    return {
+        "backup_type": "legacy_graph_export",
+        "version": 0,
+        "includes": {
+            "cognis": False,
+            "graph_export": True,
+            "memory_queue_db": False,
+            "chapters": False,
+            "chapter_content": False,
+            "npc_bios": False,
+        }
+    }
+
+
+def _is_restorable_cognis_backup(manifest: Dict[str, Any]) -> bool:
+    """Return True when this snapshot can be restored into the Cognis backend."""
+    backup_type = manifest.get("backup_type") or "legacy_graph_export"
+    includes = manifest.get("includes", {})
+    if backup_type == "cognis_memory_snapshot":
+        return bool(includes.get("cognis"))
+    if backup_type == "memory_snapshot":
+        return bool(includes.get("cognis"))
+    return False
+
+
+def list_memory_backups() -> List[Dict[str, Any]]:
+    """List restorable Cognis memory snapshots."""
+    backups: List[Dict[str, Any]] = []
+    root_dir = _get_memory_backup_root()
+
+    for backup_path in _iter_graph_backup_dirs(root_dir):
+        rel_id = _relative_graph_backup_id(backup_path)
+        parts = rel_id.split("/")
+        date_part = parts[0] if len(parts) > 0 else ""
+        session_part = parts[1] if len(parts) > 1 else ""
+        backup_name = parts[2] if len(parts) > 2 else os.path.basename(backup_path)
+        time_part, _, reason_part = backup_name.partition("_")
+        reason_label = reason_part.replace("_", " ").strip() if reason_part else backup_name
+        manifest = _load_backup_manifest(backup_path)
+        if not _is_restorable_cognis_backup(manifest):
+            continue
+
+        try:
+            created_at = int(os.path.getmtime(backup_path))
+        except Exception:
+            created_at = 0
+
+        file_names: List[str] = []
+        try:
+            file_names = sorted(os.listdir(backup_path))
+        except Exception:
+            pass
+
+        backup_type = manifest.get("backup_type") or "legacy_graph_export"
+        kind_label = "Cognis Memory Snapshot"
+        backups.append({
+            "backup_id": rel_id,
+            "date": date_part,
+            "session": session_part,
+            "time": time_part,
+            "reason": reason_part,
+            "reason_label": reason_label or "backup",
+            "created_at": created_at,
+            "files": file_names,
+            "backup_type": backup_type,
+            "kind_label": kind_label,
+            "includes": manifest.get("includes", {}),
+        })
+
+    backups.sort(key=lambda item: item.get("created_at", 0), reverse=True)
+    return backups
+
+
+
+# Lightweight memory backend imports.
+_cognis_available = False
+
 
 try:
-    from graphiti_core import Graphiti
-    from graphiti_core.llm_client.config import LLMConfig
-    from graphiti_core.nodes import EpisodeType
-    from graphiti_core.search.search_config_recipes import EDGE_HYBRID_SEARCH_RRF
-    from graphiti_core.search.search_filters import SearchFilters, DateFilter, ComparisonOperator
-    _graphiti_available = True
-
-    # Patch Graphiti's summarize_pair prompt to prevent hallucinations
-    def _patch_graphiti_prompts():
-        """Override Graphiti's default summarization prompts with stricter versions."""
-        try:
-            from graphiti_core.prompts import prompt_library
-            from graphiti_core.prompts.models import Message
-            from graphiti_core.prompts.prompt_helpers import to_prompt_json
-
-            def better_summarize_pair(context):
-                """Improved summarize_pair that preserves factual accuracy."""
-                return [
-                    Message(
-                        role='system',
-                        content='You are a helpful assistant that combines summaries while preserving factual accuracy.',
-                    ),
-                    Message(
-                        role='user',
-                        content=f"""Combine the following two summaries into a single summary.
-
-CRITICAL RULES:
-1. DO NOT change the meaning of facts. "going to do X" ≠ "doing X" ≠ "did X"
-2. DO NOT assume completion of incomplete actions. If something was attempted but not finished, say so.
-3. PRESERVE original tense and intent. Do not upgrade "attempting" to "succeeded".
-4. PRESERVE full names exactly as written. "Nellie Oggspire" stays "Nellie Oggspire", not "Nellie" or "Oggspire". Do not split or shorten names.
-5. If summaries contradict, include both perspectives rather than picking one.
-6. Keep under 250 characters.
-
-Summaries:
-{to_prompt_json(context['node_summaries'])}
-""",
-                    ),
-                ]
-
-            # Monkey-patch the prompt
-            prompt_library.summarize_nodes.summarize_pair.func = better_summarize_pair
-            print("[Memory] Patched Graphiti summarize_pair prompt")
-        except Exception as e:
-            print(f"[Memory] Warning: Could not patch Graphiti prompts: {e}")
-
-    _patch_graphiti_prompts()
-
-except ImportError:
-    print("[Memory] graphiti-core not installed - memory system unavailable")
-    print("[Memory] Install with: pip install graphiti-core")
+    from cognis import Cognis, CognisConfig
+    _cognis_available = True
+except ImportError as e:
+    print(f"[Memory] cognis not installed - memory system unavailable: {e}")
 
 
 # =============================================================================
 # Custom Entity Types for Hogwarts Domain
 # =============================================================================
-
-class Character(BaseModel):
-    """A person in the wizarding world (wizard, witch, goblin, ghost, etc.)."""
-    house: Optional[str] = Field(None, description="Hogwarts house if student/alumni: Gryffindor, Slytherin, Hufflepuff, Ravenclaw")
-    role: Optional[str] = Field(None, description="Role like 'student', 'professor', 'shopkeeper', 'auror', 'dark wizard'")
-    species: Optional[str] = Field(None, description="Species if not human: goblin, house-elf, ghost, portrait")
-
-
-class Creature(BaseModel):
-    """A magical creature (not a person)."""
-    creature_type: Optional[str] = Field(None, description="Type like 'beast', 'dragon', 'troll', 'spider'")
-    danger_level: Optional[str] = Field(None, description="Threat level: harmless, moderate, dangerous, deadly")
-
-
-class Location(BaseModel):
-    """A place in the wizarding world."""
-    region: Optional[str] = Field(None, description="Region: Hogwarts, Hogsmeade, Highlands, Feldcroft, Coastal")
-    location_type: Optional[str] = Field(None, description="Type: shop, classroom, dungeon, ruins, cave, camp")
-
-
-class Quest(BaseModel):
-    """A mission, quest, or objective."""
-    status: Optional[str] = Field(None, description="Status: active, completed, failed, blocked")
-    quest_giver: Optional[str] = Field(None, description="Who gave the quest")
-    objective: Optional[str] = Field(None, description="What needs to be done")
-
-
-class Item(BaseModel):
-    """An item, artifact, or object."""
-    item_type: Optional[str] = Field(None, description="Type: wand, potion, artifact, clothing, book, portrait")
-    magical: Optional[bool] = Field(None, description="Whether the item is magical")
-
-
-class Faction(BaseModel):
-    """A group, organization, or allegiance."""
-    faction_type: Optional[str] = Field(None, description="Type: criminal, school, government, secret")
-    alignment: Optional[str] = Field(None, description="Alignment: friendly, hostile, neutral")
-
-
-# Edge types for relationships between entities
-class Relationship(BaseModel):
-    """Relationship between characters."""
-    sentiment: Optional[str] = Field(None, description="Sentiment: positive, negative, neutral, complicated")
-    context: Optional[str] = Field(None, description="How they know each other")
-
-
-class ParticipatedIn(BaseModel):
-    """Participation in an event, quest, or action."""
-    role: Optional[str] = Field(None, description="Role in the event: leader, participant, observer, victim")
-    outcome: Optional[str] = Field(None, description="What happened as a result")
-
-
-class FeelsAbout(BaseModel):
-    """How a character feels about something."""
-    emotion: Optional[str] = Field(None, description="The emotion: fear, love, hatred, admiration, distrust")
-    reason: Optional[str] = Field(None, description="Why they feel this way")
-
-
-class MemberOf(BaseModel):
-    """Membership in a faction or group."""
-    role: Optional[str] = Field(None, description="Role in the group: member, leader, former member")
-    loyalty: Optional[str] = Field(None, description="Loyalty level: loyal, wavering, secret")
-
-
-# Entity and edge type mappings for Graphiti
-ENTITY_TYPES = {
-    "Character": Character,
-    "Creature": Creature,
-    "Location": Location,
-    "Quest": Quest,
-    "Item": Item,
-    "Faction": Faction,
-}
-
-EDGE_TYPES = {
-    "Relationship": Relationship,
-    "ParticipatedIn": ParticipatedIn,
-    "FeelsAbout": FeelsAbout,
-    "MemberOf": MemberOf,
-}
-
-EDGE_TYPE_MAP = {
-    ("Character", "Character"): ["Relationship", "FeelsAbout"],
-    ("Character", "Creature"): ["FeelsAbout", "ParticipatedIn"],
-    ("Character", "Quest"): ["ParticipatedIn"],
-    ("Character", "Location"): ["ParticipatedIn", "FeelsAbout"],
-    ("Character", "Faction"): ["MemberOf", "FeelsAbout"],
-    ("Character", "Item"): ["ParticipatedIn"],
-}
 
 
 # =============================================================================
@@ -182,14 +396,14 @@ EDGE_TYPE_MAP = {
 
 def game_time_to_datetime(game_date: str, game_time: str = "") -> datetime:
     """
-    Convert game time (1890/12/08, 14:30) to datetime for Graphiti.
+    Convert game time (1890/12/08, 14:30) to a datetime for memory timestamps.
 
     Args:
         game_date: Date string like "1890/12/08" or "Monday, December 8th, 1890"
         game_time: Time string like "14:30" or "2:30 PM"
 
     Returns:
-        datetime object for Graphiti's reference_time
+        datetime object for memory reference time
     """
     try:
         # Try parsing YYYY/MM/DD format first
@@ -241,906 +455,589 @@ def is_valid_timestamp(ts: any) -> bool:
         return False
 
 
+def _get_enabled_long_term_memory_npc_ids(memory_settings: Dict[str, Any]) -> set[str]:
+    """Return the canonical per-NPC allowlist for whitelist-only memory mode."""
+    from .localization import canonicalize_npc_id
+
+    enabled_npcs = set()
+    raw_allowlist = memory_settings.get('npc_long_term_memory', {})
+    if not isinstance(raw_allowlist, dict):
+        return enabled_npcs
+
+    for raw_npc_id, enabled in raw_allowlist.items():
+        if enabled is not True:
+            continue
+        canonical_npc_id = canonicalize_npc_id(raw_npc_id)
+        if canonical_npc_id:
+            enabled_npcs.add(canonical_npc_id)
+
+    return enabled_npcs
+
+
+def get_npc_long_term_memory_status(npc_id: str, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Return whether long-term memory is effectively enabled for one NPC."""
+    from .localization import canonicalize_npc_id
+
+    canonical_npc_id = canonicalize_npc_id(npc_id)
+    if not canonical_npc_id:
+        return {
+            "npc_id": npc_id,
+            "enabled": False,
+            "reason": "missing_npc_id",
+        }
+
+    if settings is None:
+        settings = load_settings()
+
+    memory_settings = settings.get('memory', {})
+    if not memory_settings.get('enabled', True):
+        return {
+            "npc_id": canonical_npc_id,
+            "enabled": False,
+            "reason": "memory_disabled",
+        }
+
+    provider = settings.get('llm', {}).get('provider', 'gemini')
+    if provider not in ('openai', 'openrouter'):
+        return {
+            "npc_id": canonical_npc_id,
+            "enabled": False,
+            "reason": f"unsupported_memory_provider_{provider}",
+        }
+
+    if not memory_settings.get('whitelisted_npcs_only', False):
+        return {
+            "npc_id": canonical_npc_id,
+            "enabled": True,
+            "reason": "global_memory_enabled",
+        }
+
+    enabled_npcs = _get_enabled_long_term_memory_npc_ids(memory_settings)
+    if canonical_npc_id in enabled_npcs:
+        return {
+            "npc_id": canonical_npc_id,
+            "enabled": True,
+            "reason": "npc_whitelisted",
+        }
+
+    return {
+        "npc_id": canonical_npc_id,
+        "enabled": False,
+        "reason": "npc_not_whitelisted",
+    }
+
+
+def is_npc_long_term_memory_enabled(npc_id: str, settings: Optional[Dict[str, Any]] = None) -> bool:
+    """Return True when long-term memory is effectively enabled for this NPC."""
+    return get_npc_long_term_memory_status(npc_id, settings=settings).get("enabled", False)
+
+
+def filter_memory_enabled_npc_ids(npc_ids: List[str], settings: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Filter NPC IDs to those currently eligible for long-term memory, preserving order."""
+    filtered: List[str] = []
+    seen = set()
+
+    for npc_id in npc_ids or []:
+        status = get_npc_long_term_memory_status(npc_id, settings=settings)
+        dedupe_key = status.get("npc_id") or str(npc_id).strip()
+        if not status.get("enabled") or not dedupe_key or dedupe_key in seen:
+            continue
+        filtered.append(npc_id)
+        seen.add(dedupe_key)
+
+    return filtered
+
+
+def should_include_entry_for_npc_chaptering(npc_id: str, entry: Dict, include_cutscene: Optional[bool] = None) -> bool:
+    """
+    Return True if an entry should contribute to chapter detection/summarization for an NPC.
+
+    Rules:
+    - Keep anything spoken by the NPC, except spell/mount utility events.
+    - Keep witnessed real conversation flow, including player turns, AI turns, and
+      targeted third-party NPC dialogue.
+    - Keep witnessed structured events that matter for chapter continuity.
+    - Drop witnessed ambient third-party chatter.
+    """
+    if not npc_id or not isinstance(entry, dict):
+        return False
+
+    if include_cutscene is None:
+        include_cutscene = load_settings().get('memory', {}).get('include_cutscene', True)
+
+    voice_name = entry.get('voiceName', '')
+    entry_type = entry.get('type') or 'dialogue'
+    earshot = entry.get('earshot', [])
+    witnessed = isinstance(earshot, list) and npc_id in earshot
+    target_id = str(entry.get('targetId') or '').strip()
+    target_id_norm = target_id.lower()
+
+    if entry_type == 'cutscene':
+        return include_cutscene and (voice_name == npc_id or witnessed)
+
+    if entry_type in ('spell', 'broom', 'mount', 'mail', 'location'):
+        return False
+
+    if voice_name == npc_id:
+        return True
+
+    if not witnessed:
+        return False
+
+    if entry_type in ('cutscene', 'location', 'combat', 'commitment', 'prompt'):
+        return True
+
+    if entry.get('isPlayer'):
+        return True
+
+    if entry.get('isAIResponse'):
+        return True
+
+    # Non-AI third-party dialogue only counts when it is actually directed at someone.
+    # Rows with empty/Unknown targets are ambient chatter and should not drive chapters.
+    if target_id:
+        return target_id_norm != 'unknown'
+
+    legacy_target = str(entry.get('target') or '').strip().lower()
+    return bool(legacy_target and legacy_target != 'unknown')
+
+
+def count_chapter_candidate_entries_by_npc(history: List[Dict]) -> Dict[str, int]:
+    """Count how many chapter-eligible entries each significant NPC has in shared history."""
+    counts = {}
+    settings = load_settings()
+    include_cutscene = settings.get('memory', {}).get('include_cutscene', True)
+
+    try:
+        from .text_utils import is_significant_npc
+    except Exception:
+        is_significant_npc = None
+
+    for entry in history or []:
+        if not isinstance(entry, dict):
+            continue
+
+        candidate_npcs = set()
+
+        voice_name = entry.get('voiceName')
+        if voice_name and str(voice_name).lower() != 'player':
+            if is_significant_npc is None or is_significant_npc(voice_name):
+                candidate_npcs.add(voice_name)
+
+        earshot = entry.get('earshot', [])
+        if isinstance(earshot, list):
+            for npc_id in earshot:
+                if not npc_id or str(npc_id).lower() == 'player':
+                    continue
+                if is_significant_npc is None or is_significant_npc(npc_id):
+                    candidate_npcs.add(npc_id)
+
+        for npc_id in candidate_npcs:
+            if not is_npc_long_term_memory_enabled(npc_id, settings=settings):
+                continue
+            if should_include_entry_for_npc_chaptering(npc_id, entry, include_cutscene=include_cutscene):
+                counts[npc_id] = counts.get(npc_id, 0) + 1
+
+    return counts
+
+
+def collect_chapter_context_characters(npc_id: str, entries: List[Dict]) -> List[str]:
+    """Collect non-player conversation participants from kept chapter entries only."""
+    try:
+        from .localization import get_display_name
+    except Exception:
+        get_display_name = lambda value: value
+
+    characters = set()
+    npc_id_norm = str(npc_id or '').strip().lower()
+    player_ids = {'player'}
+
+    for entry in entries or []:
+        if not isinstance(entry, dict) or not entry.get('isPlayer'):
+            continue
+
+        voice_name = str(entry.get('voiceName') or '').strip()
+        if voice_name:
+            player_ids.add(voice_name.lower())
+
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+
+        voice_name = str(entry.get('voiceName') or '').strip()
+        voice_norm = voice_name.lower()
+        if voice_name and voice_norm not in player_ids and voice_norm != npc_id_norm:
+            characters.add(get_display_name(voice_name) or voice_name)
+
+        target_id = str(entry.get('targetId') or '').strip()
+        target_norm = target_id.lower()
+        if (
+            not target_id or
+            target_norm in ('unknown', 'player') or
+            target_norm in player_ids
+        ):
+            continue
+
+        if target_norm == npc_id_norm:
+            continue
+
+        characters.add(get_display_name(target_id) or target_id)
+
+    return sorted(characters)
+
+
 def get_chapters_dir() -> str:
     """Get the chapters directory path, creating it if needed."""
-    chapters_dir = os.path.join(DATA_DIR, "chapters")
+    chapters_dir = os.path.join(_memory_data_dir, "chapters")
     os.makedirs(chapters_dir, exist_ok=True)
     return chapters_dir
 
 
-# =============================================================================
-# GraphitiManager - Handles graph database operations
-# =============================================================================
+def _format_episode_chapter_name(episode_name: str) -> str | None:
+    """Convert chapter episode ids like chapter_a_midnight_trek into display text."""
+    if not episode_name.startswith('chapter_'):
+        return None
 
-class GraphitiManager:
-    """Manages Graphiti instance and graph operations."""
+    # Use capwords to avoid uppercasing after apostrophes (e.g., "Ferdinand'S")
+    return string.capwords(episode_name[8:].replace('_', ' '))
+
+
+async def _load_episode_chapter_map(driver: Any, episode_uuids: set[str] | list[str]) -> Dict[str, str]:
+    """Load episode names without touching large/corrupt episodic text columns."""
+    if not episode_uuids:
+        return {}
+
+    uuids = list(dict.fromkeys(episode_uuids))
+    query = """
+        MATCH (e:Episodic)
+        WHERE e.uuid IN $uuids
+        RETURN DISTINCT
+            e.uuid AS uuid,
+            e.name AS name
+    """
+
+    try:
+        records, _, _ = await driver.execute_query(query, uuids=uuids, routing_='r')
+    except UnicodeDecodeError:
+        records = []
+        for episode_uuid in uuids:
+            try:
+                row_records, _, _ = await driver.execute_query(
+                    """
+                    MATCH (e:Episodic {uuid: $uuid})
+                    RETURN e.uuid AS uuid, e.name AS name
+                    """,
+                    uuid=episode_uuid,
+                    routing_='r',
+                )
+                records.extend(row_records)
+            except UnicodeDecodeError as e:
+                print(f"[Memory] Warning: Skipping corrupt episode row {episode_uuid}: {e}")
+
+    episode_to_chapter: Dict[str, str] = {}
+    for record in records:
+        episode_uuid = record.get('uuid')
+        episode_name = record.get('name')
+        if not episode_uuid or not episode_name:
+            continue
+        chapter_name = _format_episode_chapter_name(episode_name)
+        if chapter_name:
+            episode_to_chapter[episode_uuid] = chapter_name
+
+    return episode_to_chapter
+
+
+class CognisMemoryManager:
+    """Legacy manager-compatible facade backed by Cognis flat fact memory."""
 
     _instance = None
-    _lock = None  # Threading lock for concurrent access
+    _lock = threading.Lock()
+    _indices_built: ClassVar[bool] = True
+    _startup_backup_done: ClassVar[bool] = False
 
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._initialized = False
-            cls._lock = threading.Lock()
         return cls._instance
-
-    # Class-level flag to track if indices were built this session
-    _indices_built: ClassVar[bool] = False
 
     def __init__(self):
         if self._initialized:
             return
-
-        self._graphiti = None
-        self._loop = None  # The loop Graphiti was initialized on
-        self._busy = False  # Flag for when Graphiti is doing heavy async work
+        self._cognis = None
+        self._last_added_edges = {}
+        self._busy = False
         self._initialized = True
 
-    def _ensure_loop(self):
-        """Ensure we have an event loop for Graphiti operations.
+    def _get_data_dir(self) -> str:
+        return os.path.join(_sync_memory_data_dir_from_player_context(), "cognis")
 
-        Always creates a dedicated loop rather than risking get_event_loop()
-        returning the main thread's loop or a stale loop from another context.
-        This runs on the KuzuExecutor worker thread which has no event loop.
-        """
-        if self._loop is None or self._loop.is_closed():
-            self._loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self._loop)
-        return self._loop
-
-    def _run_async(self, coro, skip_if_busy: bool = False,
-                    priority: TaskPriority = TaskPriority.NORMAL,
-                    timeout: float = 120.0):
-        """Run async coroutine synchronously through the serialized executor.
-
-        All kuzu/graphiti operations are serialized through KuzuExecutor to prevent
-        concurrent access crashes (kuzu is not thread-safe).
-
-        Args:
-            coro: The coroutine to run
-            skip_if_busy: If True, return None immediately if Graphiti is busy
-            priority: Task priority for the executor queue
-            timeout: Maximum time to wait for the operation
-        """
-        # Skip if Graphiti is busy with heavy operations (like adding episodes)
-        if skip_if_busy and self._busy:
-            print("[Memory] Skipping - Graphiti busy with background operation")
-            return None
-
-        def _execute_async():
-            """Execute the coroutine - runs in the executor's worker thread."""
-            try:
-                loop = self._ensure_loop()
-                return loop.run_until_complete(coro)
-            except RuntimeError as e:
-                if "running" in str(e).lower() or "attached to a different loop" in str(e).lower():
-                    print(f"[Memory] Event loop busy, skipping operation")
-                    return None
-                print(f"[Memory] Runtime error: {e}")
-                return None
-            except Exception as e:
-                print(f"[Memory] Async error: {e}")
-                return None
-
-        # Submit to executor for serialized execution
-        # Note: max_retries=0 because coroutines can only be awaited once
-        executor = get_executor()
-        result = executor.submit(_execute_async, priority=priority, timeout=timeout, max_retries=0)
-
-        if result.success:
-            return result.value
-        elif result.error:
-            print(f"[Memory] Executor error: {result.error}")
-            return None
-        else:
-            return None
+    def _get_config(self):
+        settings = load_settings()
+        memory_settings = settings.get("memory", {})
+        provider = settings.get("llm", {}).get("provider", "gemini")
+        config = CognisConfig()
+        if provider == "openrouter":
+            config.embedding_model = memory_settings.get("embedding_model") or "openai/text-embedding-3-small"
+        elif provider == "openai":
+            config.embedding_model = memory_settings.get("embedding_model") or "text-embedding-3-small"
+        config.llm_model = _normalize_openai_compatible_memory_model(
+            memory_settings.get("graphiti_small_model")
+            or memory_settings.get("graphiti_model")
+            or config.llm_model,
+            provider,
+        )
+        config.enable_immediate_recall = False
+        config.recency_boost_weight = 0.05
+        return config
 
     def init_graphiti(self) -> bool:
-        """Initialize Graphiti with Kuzu driver based on user's LLM provider."""
-        if not _graphiti_available:
-            print("[Memory] Graphiti not available")
+        """Initialize the lightweight local memory store."""
+        if not _cognis_available:
+            print("[Memory] Cognis not available")
             return False
 
-        if self._graphiti is not None:
-            return True
-
-        # Lock prevents multiple threads from submitting redundant init tasks
-        # to the executor (e.g. server.py runs contextual_memory + search_facts
-        # in parallel, both calling init_graphiti before the first completes)
-        with self._lock:
-            if self._graphiti is not None:
-                return True
-
-            executor = get_executor()
-            result = executor.submit(self._init_graphiti_impl, priority=TaskPriority.HIGH, timeout=60.0)
-            return result.value if result.success else False
-
-    @staticmethod
-    def _backup_kuzu_db(kuzu_db_path: str) -> bool:
-        """Backup the Kuzu DB file and WAL after successful init."""
-        # NOTE: Kuzu DB is a single FILE (memory.kuzu), NOT a directory.
-        # WAL file is memory.kuzu.wal. Both are backed up at init (no active writes).
-        import shutil
-        backup_path = kuzu_db_path + ".backup"
-        wal_path = kuzu_db_path + ".wal"
-        wal_backup_path = wal_path + ".backup"
-        try:
-            if os.path.isfile(kuzu_db_path):
-                shutil.copy2(kuzu_db_path, backup_path)
-                if os.path.isfile(wal_path):
-                    shutil.copy2(wal_path, wal_backup_path)
-                print(f"[Memory/Kuzu] Backed up database to {backup_path}")
-                return True
-        except Exception as e:
-            print(f"[Memory/Kuzu] Backup failed: {e}")
-        return False
-
-    def _init_graphiti_impl(self) -> bool:
-        """Implementation of init_graphiti - runs on executor thread."""
-        if self._graphiti is not None:
-            return True
+        settings = load_settings()
+        provider = settings.get("llm", {}).get("provider", "gemini")
+        if provider not in ("openai", "openrouter"):
+            print(f"[Memory] Long-term memory disabled for provider '{provider}' (requires OpenAI or OpenRouter)")
+            return False
 
         try:
-            from graphiti_core.driver.kuzu_driver import KuzuDriver
-
-            settings = load_settings()
-            llm_settings = settings.get('llm', {})
-            memory_settings = settings.get('memory', {})
-            provider = llm_settings.get('provider', 'gemini')
-
-            # Kuzu database path - single FILE, not a directory. WAL file is memory.kuzu.wal.
-            kuzu_db_path = os.path.join(DATA_DIR, "memory.kuzu")
-
-            # Create Kuzu driver
-            kuzu_driver = KuzuDriver(db=kuzu_db_path)
-            # Fix for graphiti-core bug: KuzuDriver doesn't set _database attribute
-            # but graphiti.py expects it when using group_id
-            kuzu_driver._database = ''
-
-            # Load FTS extension and create indices on the kuzu executor thread.
-            # Uses execute_on_thread to maintain thread affinity for all C++ access.
-            def _setup_fts(conn):
-                try:
-                    conn.execute("LOAD EXTENSION FTS;")
-                except Exception:
-                    pass  # Already loaded
-                fts_indices = [
-                    ("Episodic", "episode_content", ['content', 'source', 'source_description']),
-                    ("Entity", "node_name_and_summary", ['name', 'summary']),
-                    ("Community", "community_name", ['name']),
-                    ("RelatesToNode_", "edge_name_and_fact", ['name', 'fact']),
-                ]
-                for table, index_name, columns in fts_indices:
-                    cols_str = str(columns).replace('"', "'")
-                    try:
-                        conn.execute(f"CALL CREATE_FTS_INDEX('{table}', '{index_name}', {cols_str});")
-                        print(f"[Memory/Kuzu] Created FTS index '{index_name}' on {table}")
-                    except Exception as e:
-                        if 'already exists' not in str(e).lower():
-                            print(f"[Memory/Kuzu] FTS index error '{index_name}': {e}")
-
-            kuzu_driver.execute_on_thread(_setup_fts)
-
-            # Models for Graphiti
-            graphiti_model = memory_settings.get('graphiti_model', 'gemini-2.5-flash-lite')
-            graphiti_small_model = memory_settings.get('graphiti_small_model', 'gemini-2.5-flash-lite')
-            reranker_model = memory_settings.get('reranker_model', 'gemini-2.5-flash-lite')
-            max_concurrency = memory_settings.get('max_concurrency', 2)
-
-            # Override Graphiti's global semaphore limit so ALL semaphore_gather calls
-            # (embeddings, reranker, LLM, search, etc.) respect our setting
-            import graphiti_core.helpers as _graphiti_helpers
-            _graphiti_helpers.SEMAPHORE_LIMIT = max_concurrency
-
-            # Import logging wrapper
-            from .graphiti_llm_wrapper import wrap_graphiti_client
-
-            if provider == 'gemini':
-                from graphiti_core.llm_client.gemini_client import GeminiClient
-                from graphiti_core.embedder.gemini import GeminiEmbedder, GeminiEmbedderConfig
-                from graphiti_core.cross_encoder.gemini_reranker_client import GeminiRerankerClient
-                from google.genai import types as gemini_types
-                import llm as llm_module
-
-                api_key = llm_settings.get('gemini', {}).get('api_key', '')
-                if not api_key:
-                    print("[Memory] No Gemini API key configured")
-                    return False
-
-                llm_config = LLMConfig(
-                    api_key=api_key,
-                    model=graphiti_model,
-                    small_model=graphiti_small_model
-                )
-
-                # Get thinking config for Gemini (controls reasoning)
-                reasoning_params = llm_module.get_reasoning_params('gemini', graphiti_model, 8192)
-                thinking_config = gemini_types.ThinkingConfig(**reasoning_params) if reasoning_params else None
-                llm_client = GeminiClient(config=llm_config, thinking_config=thinking_config)
-
-                self._graphiti = Graphiti(
-                    graph_driver=kuzu_driver,
-                    llm_client=wrap_graphiti_client(llm_client, "graphiti_memory"),
-                    embedder=GeminiEmbedder(config=GeminiEmbedderConfig(api_key=api_key)),
-                    cross_encoder=GeminiRerankerClient(config=llm_config),
-                    max_coroutines=max_concurrency
-                )
-
-            elif provider == 'openrouter':
-                from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
-                from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
-                from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
-
-                # Apply monkey-patch for reasoning params
-                from .graphiti_patches import patch_graphiti_reasoning
-                patch_graphiti_reasoning()
-
-                api_key = llm_settings.get('openrouter', {}).get('api_key', '')
-                if not api_key:
-                    print("[Memory] No OpenRouter API key configured")
-                    return False
-
-                # OpenRouter supports embeddings via /api/v1/embeddings endpoint
-                llm_config = LLMConfig(
-                    api_key=api_key,
-                    model=graphiti_model,
-                    small_model=graphiti_small_model,
-                    base_url="https://openrouter.ai/api/v1"
-                )
-                llm_client = OpenAIGenericClient(config=llm_config)
-
-                # Separate config for reranker (uses tiny model)
-                reranker_config = LLMConfig(
-                    api_key=api_key,
-                    model=reranker_model,
-                    base_url="https://openrouter.ai/api/v1"
-                )
-
-                self._graphiti = Graphiti(
-                    graph_driver=kuzu_driver,
-                    llm_client=wrap_graphiti_client(llm_client, "graphiti_memory"),
-                    embedder=OpenAIEmbedder(config=OpenAIEmbedderConfig(
-                        api_key=api_key,
-                        embedding_model="openai/text-embedding-3-small",
-                        base_url="https://openrouter.ai/api/v1"
-                    )),
-                    cross_encoder=OpenAIRerankerClient(config=reranker_config),
-                    max_coroutines=max_concurrency
-                )
-
-            elif provider == 'openai':
-                from graphiti_core.llm_client import OpenAIClient
-                from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
-                from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
-                import llm as llm_module
-
-                openai_settings = llm_settings.get('openai', {})
-                api_key = openai_settings.get('api_key', '')
-                api_url = openai_settings.get('api_url', '') or None  # None = default OpenAI URL
-
-                if not api_key:
-                    print("[Memory] No OpenAI API key configured")
-                    return False
-
-                # When responses API is disabled (custom proxy), patch OpenAIClient
-                # to use chat.completions instead of responses.parse
-                if not llm_module._use_responses_api():
-                    from .graphiti_patches import patch_openai_no_responses_api
-                    patch_openai_no_responses_api()
-
-                llm_config = LLMConfig(
-                    api_key=api_key,
-                    model=graphiti_model,
-                    small_model=graphiti_small_model,
-                    base_url=api_url
-                )
-
-                # Get reasoning effort level for OpenAI (e.g., "minimal", "low", "medium")
-                reasoning_params = llm_module.get_reasoning_params('openai', graphiti_model, 8192)
-                reasoning_effort = reasoning_params.get('reasoning', {}).get('effort', 'minimal') if reasoning_params else 'minimal'
-                llm_client = OpenAIClient(config=llm_config, reasoning=reasoning_effort)
-
-                # Separate config for reranker (uses tiny model)
-                reranker_config = LLMConfig(
-                    api_key=api_key,
-                    model=reranker_model,
-                    base_url=api_url
-                )
-
-                self._graphiti = Graphiti(
-                    graph_driver=kuzu_driver,
-                    llm_client=wrap_graphiti_client(llm_client, "graphiti_memory"),
-                    embedder=OpenAIEmbedder(config=OpenAIEmbedderConfig(
-                        api_key=api_key,
-                        base_url=api_url,
-                        embedding_model="text-embedding-3-small"
-                    )),
-                    cross_encoder=OpenAIRerankerClient(config=reranker_config),
-                    max_coroutines=max_concurrency
-                )
-
-            else:
-                print(f"[Memory] Unsupported LLM provider: {provider}")
+            from . import player_context
+            if not player_context.is_ready():
+                print("[Memory] Player context not ready - deferring memory init")
                 return False
+        except Exception:
+            pass
 
-            print(f"[Memory/Graphiti] Initialized with Kuzu + {provider}")
-            print(f"[Memory/Graphiti] Kuzu DB: {kuzu_db_path}")
-            print(f"[Memory/Graphiti] LLM Model: {graphiti_model}")
-            print(f"[Memory/Graphiti] Max concurrent requests: {max_concurrency}")
-
-            # Build indices and constraints (only once per session)
-            # Note: We're already on the executor thread, so run directly without _run_async
-            if not GraphitiManager._indices_built:
-                print("[Memory/Graphiti] Building indices and constraints...")
-                loop = self._ensure_loop()
-                loop.run_until_complete(self._graphiti.build_indices_and_constraints())
-                GraphitiManager._indices_built = True
-                print("[Memory/Graphiti] Schema setup complete")
-            else:
-                print("[Memory/Graphiti] Schema already built this session")
-
-            # Backup DB after successful init so we can recover from future corruption
-            self._backup_kuzu_db(kuzu_db_path)
-
-            return True
-
-        except ImportError as e:
-            if 'kuzu' in str(e).lower():
-                print("[Memory] kuzu package not installed - run: pip install graphiti-core[kuzu]")
-            else:
-                print(f"[Memory] Import error: {e}")
-            return False
-        except Exception as e:
-            print(f"[Memory] Failed to initialize Graphiti: {e}")
-            import traceback
-            traceback.print_exc()
-            kuzu_db_path = os.path.join(DATA_DIR, "memory.kuzu")
-            backup_path = kuzu_db_path + ".backup"
-            if os.path.exists(backup_path):
-                print(f"[Memory] Memory database may be corrupted. A backup exists at: {backup_path}")
-                print(f"[Memory] To restore: delete '{os.path.basename(kuzu_db_path)}' and its .wal file, rename the .backup files (remove the .backup extension), then restart.")
-            elif os.path.exists(kuzu_db_path):
-                print(f"[Memory] Memory database may be corrupted. No backup available.")
-                print(f"[Memory] To reset: delete '{os.path.basename(kuzu_db_path)}' and its .wal file, then restart.")
-            return False
-
-    async def _add_episode_async(self, npc_id: str, chapter_title: str,
-                                   content: str, reference_time: datetime,
-                                   max_retries: int = 3) -> bool:
-        """Add an episode to the NPC's graph namespace with retry logic."""
-        if self._graphiti is None:
-            return False
-
-        print(f"[Memory/Graphiti] Adding episode '{chapter_title}' for {npc_id}...")
-        print(f"[Memory/Graphiti] Episode content length: {len(content)} chars")
-        print(f"[Memory/Graphiti] Reference time: {reference_time}")
-
-        # Retrieve previous episode UUIDs to override graphiti's default of 10
-        previous_episode_uuids = None
-        try:
-            previous_episodes = await self._graphiti.retrieve_episodes(
-                reference_time=reference_time,
-                last_n=EPISODE_CONTEXT_WINDOW,
-                group_ids=[npc_id],
-                source=EpisodeType.message
-            )
-            previous_episode_uuids = [ep.uuid for ep in previous_episodes]
-            print(f"[Memory/Graphiti] Using {len(previous_episode_uuids)} previous episodes for context (window={EPISODE_CONTEXT_WINDOW})")
-        except Exception as e:
-            print(f"[Memory/Graphiti] Could not retrieve previous episodes, using graphiti default: {e}")
-
-        last_error = None
-        for attempt in range(1, max_retries + 1):
+        with self._lock:
+            if self._cognis is not None:
+                return True
             try:
-                await self._graphiti.add_episode(
-                    name=f"chapter_{chapter_title.replace(' ', '_').lower()}",
-                    episode_body=content,
-                    source=EpisodeType.message,
-                    source_description="NPC dialogue chapter",
-                    reference_time=reference_time,
-                    group_id=npc_id,
-                    entity_types=ENTITY_TYPES,
-                    edge_types=EDGE_TYPES,
-                    edge_type_map=EDGE_TYPE_MAP,
-                    previous_episode_uuids=previous_episode_uuids
+                self._cognis = Cognis(
+                    data_dir=self._get_data_dir(),
+                    owner_id="sonorus",
+                    agent_id="npc_memory",
+                    session_id="sonorus",
+                    config=self._get_config(),
                 )
-                print(f"[Memory/Graphiti] SUCCESS: Episode '{chapter_title}' added to Kuzu")
+                print(f"[Memory/Cognis] Initialized local fact memory: {self._get_data_dir()}")
                 return True
             except Exception as e:
-                last_error = e
-                print(f"[Memory/Graphiti] Attempt {attempt}/{max_retries} failed: {type(e).__name__}: {e}")
-                if attempt < max_retries:
-                    wait_time = attempt * 2  # Exponential backoff: 2s, 4s
-                    print(f"[Memory/Graphiti] Retrying in {wait_time}s...")
-                    await asyncio.sleep(wait_time)
+                print(f"[Memory/Cognis] Failed to initialize: {e}")
+                import traceback
+                traceback.print_exc()
+                self._cognis = None
+                return False
 
-        print(f"[Memory/Graphiti] FAILED after {max_retries} attempts: {last_error}")
-        import traceback
-        traceback.print_exc()
-        return False
+    def close_graphiti(self, timeout: float = 30.0) -> bool:
+        with self._lock:
+            if self._cognis is not None:
+                try:
+                    self._cognis.close()
+                except Exception as e:
+                    print(f"[Memory/Cognis] Error closing: {e}")
+                    return False
+                finally:
+                    self._cognis = None
+            self._busy = False
+        return True
+
+    def export_graph_backup_to_dir(self, export_dir: str, timeout: float = 120.0) -> Optional[str]:
+        """Snapshot the Cognis directory into the legacy graph-export slot."""
+        src = self._get_data_dir()
+        if not os.path.isdir(src):
+            return None
+        try:
+            if os.path.isdir(export_dir):
+                shutil.rmtree(export_dir)
+            shutil.copytree(src, export_dir)
+            return export_dir
+        except Exception as e:
+            print(f"[Memory/Cognis] Snapshot copy failed: {e}")
+            return None
+
+    def export_graph_backup(self, reason: str, timeout: float = 120.0, keep: int = 5) -> Optional[str]:
+        backup_root = _get_memory_backup_root()
+        export_dir = _make_unique_backup_dir(backup_root, reason)
+        result = self.export_graph_backup_to_dir(export_dir, timeout=timeout)
+        if result:
+            _prune_old_graph_backups(backup_root, keep=keep)
+        return result
+
+    def _session_id_for_chapter(self, npc_id: str, chapter_title: str, game_date: str, game_time: str) -> str:
+        raw = f"{npc_id}:{chapter_title}:{game_date}:{game_time}"
+        safe = "".join(ch if ch.isalnum() else "_" for ch in raw).strip("_")
+        return safe[:180] or f"{npc_id}_chapter"
 
     def add_episode(self, npc_id: str, chapter_title: str,
                     content: str, game_date: str, game_time: str = "") -> bool:
-        """Add an episode to the NPC's graph namespace (sync wrapper)."""
+        """Extract and store deduped facts from a closed chapter episode."""
         if not self.init_graphiti():
             return False
 
-        reference_time = game_time_to_datetime(game_date, game_time)
+        session_id = self._session_id_for_chapter(npc_id, chapter_title, game_date, game_time)
+        event_time = game_time_to_datetime(game_date, game_time) if game_date else None
+        episode = (
+            f"NPC memory episode for {npc_id}\n"
+            f"Chapter: {chapter_title}\n"
+            f"Game date: {game_date} {game_time}\n\n"
+            f"{content}"
+        ).strip()
 
-        # Set busy flag to prevent concurrent memory operations during heavy async work
         self._busy = True
         try:
-            return self._run_async(
-                self._add_episode_async(npc_id, chapter_title, content, reference_time)
-            ) or False
+            result = self._cognis.add(
+                [{"role": "user", "content": episode}],
+                owner_id=npc_id,
+                agent_id="npc_memory",
+                session_id=session_id,
+                event_time=event_time,
+            )
+            memories = result.get("memories", []) if isinstance(result, dict) else []
+            self._last_added_edges[npc_id] = [
+                self._memory_to_edge(memory)
+                for memory in memories
+                if memory.get("content")
+            ]
+            count = len(memories)
+            print(f"[Memory/Cognis] Added episode '{chapter_title}' for {npc_id}: {count} new/updated facts")
+            return bool(result and result.get("success"))
+        except Exception as e:
+            print(f"[Memory/Cognis] Failed to add episode for {npc_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
         finally:
             self._busy = False
 
-    async def _get_graph_data_async(self, npc_id: str) -> Dict[str, Any]:
-        """Retrieve all entities and relationships for an NPC."""
-        if self._graphiti is None:
-            return {"edges": [], "entity_count": 0}
-
-        try:
-            from graphiti_core.edges import EntityEdge
-            from graphiti_core.nodes import EntityNode
-
-            driver = self._graphiti.driver
-
-            # Get all edges for this NPC's group directly (more reliable than search)
-            try:
-                edge_list = await EntityEdge.get_by_group_ids(driver, [npc_id])
-            except Exception as e:
-                # GroupsEdgesNotFoundError means no edges yet
-                if "NotFoundError" in type(e).__name__:
-                    return {"edges": [], "entity_count": 0}
-                raise
-
-            # Collect unique node UUIDs
-            node_uuids = set()
-            for edge in edge_list:
-                node_uuids.add(edge.source_node_uuid)
-                node_uuids.add(edge.target_node_uuid)
-
-            # Get nodes to build UUID -> name and UUID -> type mappings
-            uuid_to_name = {}
-            uuid_to_type = {}
-            if node_uuids:
-                try:
-                    nodes = await EntityNode.get_by_uuids(driver, list(node_uuids))
-                    for node in nodes:
-                        uuid_to_name[node.uuid] = node.name
-                        # Get the first non-Entity label as the type
-                        node_type = 'Entity'
-                        for label in (node.labels or []):
-                            if label != 'Entity' and not label.startswith('Entity_'):
-                                node_type = label
-                                break
-                        uuid_to_type[node.uuid] = node_type
-                except Exception as e:
-                    print(f"[Memory] Warning: Could not get node names: {e}")
-
-            # Get episode UUIDs to look up chapter names
-            episode_uuids = set()
-            for edge in edge_list:
-                for ep_uuid in (edge.episodes or []):
-                    episode_uuids.add(ep_uuid)
-
-            # Build episode UUID -> chapter name mapping
-            from graphiti_core.nodes import EpisodicNode
-            episode_to_chapter = {}
-            if episode_uuids:
-                try:
-                    episodes = await EpisodicNode.get_by_uuids(driver, list(episode_uuids))
-                    for ep in episodes:
-                        # Episode names are like "chapter_a_midnight_trek_and_fears"
-                        if ep.name.startswith('chapter_'):
-                            # Use capwords to avoid uppercasing after apostrophes (e.g., "Ferdinand'S")
-                            chapter_name = string.capwords(ep.name[8:].replace('_', ' '))
-                            episode_to_chapter[ep.uuid] = chapter_name
-                except Exception as e:
-                    print(f"[Memory] Warning: Could not get episode names: {e}")
-
-            # Build edge list with resolved names and temporal info
-            edges = []
-            for edge in edge_list:
-                source_name = uuid_to_name.get(edge.source_node_uuid, 'Unknown')
-                target_name = uuid_to_name.get(edge.target_node_uuid, 'Unknown')
-                source_type = uuid_to_type.get(edge.source_node_uuid, 'Entity')
-                target_type = uuid_to_type.get(edge.target_node_uuid, 'Entity')
-
-                # Look up chapter names from episode UUIDs
-                chapters = []
-                for ep_uuid in (edge.episodes or []):
-                    if ep_uuid in episode_to_chapter:
-                        chapters.append(episode_to_chapter[ep_uuid])
-
-                edges.append({
-                    "fact": edge.fact,
-                    "source": source_name,
-                    "target": target_name,
-                    "source_type": source_type,
-                    "target_type": target_type,
-                    "name": edge.name,  # Edge type/relationship name
-                    "chapters": chapters,  # Which chapters this fact is from
-                    "valid_at": edge.valid_at.isoformat() if edge.valid_at else None,
-                    "created_at": edge.created_at.isoformat() if edge.created_at else None,
-                })
-
-            # Sort by created_at (oldest first) for chronological order
-            edges.sort(key=lambda e: e.get('created_at') or '')
-
-            return {
-                "edges": edges,
-                "entity_count": len(node_uuids)
-            }
-        except Exception as e:
-            print(f"[Memory] Failed to get graph data: {e}")
-            import traceback
-            traceback.print_exc()
-            return {"edges": [], "entity_count": 0}
+    def _memory_to_edge(self, mem: Dict[str, Any]) -> Dict[str, Any]:
+        metadata = mem.get("metadata") or {}
+        session_id = mem.get("session_id") or ""
+        chapter = None
+        if session_id:
+            parts = [p for p in session_id.split("_") if p]
+            if len(parts) > 1:
+                chapter = string.capwords(" ".join(parts[1:6]))
+        return {
+            "fact": mem.get("content", ""),
+            "source": "You",
+            "target": "",
+            "source_type": "NPC",
+            "target_type": metadata.get("category") or "Memory",
+            "name": metadata.get("category") or "event",
+            "chapters": [chapter] if chapter else [],
+            "valid_at": mem.get("event_time"),
+            "created_at": mem.get("created_at"),
+        }
 
     def get_graph_data(self, npc_id: str) -> Dict[str, Any]:
-        """Retrieve all entities and relationships for an NPC (sync wrapper)."""
         if not self.init_graphiti():
             return {"edges": [], "entity_count": 0}
-
-        return self._run_async(self._get_graph_data_async(npc_id)) or {"edges": [], "entity_count": 0}
-
-    async def _delete_node_async(self, npc_id: str, node_name: str) -> Dict[str, Any]:
-        """Delete a node and all its edges from the NPC's graph."""
-        if self._graphiti is None:
-            return {"success": False, "error": "Graphiti not initialized"}
-
         try:
-            from graphiti_core.nodes import EntityNode
-
-            driver = self._graphiti.driver
-
-            # Find the node by name in this NPC's graph
-            nodes = await EntityNode.get_by_group_ids(driver, [npc_id])
-            target_node = None
-            for node in nodes:
-                if node.name.lower() == node_name.lower():
-                    target_node = node
-                    break
-
-            if not target_node:
-                return {"success": False, "error": f"Node '{node_name}' not found"}
-
-            # node.delete() does DETACH DELETE which removes the node and all connected edges
-            await target_node.delete(driver)
-
-            return {"success": True}
-
-        except Exception as e:
-            print(f"[Memory] Error deleting node '{node_name}': {e}")
-            import traceback
-            traceback.print_exc()
-            return {"success": False, "error": str(e)}
-
-    def delete_node(self, npc_id: str, node_name: str) -> Dict[str, Any]:
-        """Delete a node and all its edges (sync wrapper)."""
-        if not self.init_graphiti():
-            return {"success": False, "error": "Kuzu not connected"}
-
-        self._busy = True
-        try:
-            return self._run_async(self._delete_node_async(npc_id, node_name)) or {"success": False, "error": "Async failed"}
-        finally:
-            self._busy = False
-
-    async def _delete_edge_async(self, npc_id: str, source_name: str, target_name: str, fact: Optional[str] = None) -> Dict[str, Any]:
-        """Delete a specific edge from the NPC's graph."""
-        if self._graphiti is None:
-            return {"success": False, "error": "Graphiti not initialized"}
-
-        try:
-            from graphiti_core.nodes import EntityNode
-            from graphiti_core.edges import EntityEdge
-
-            driver = self._graphiti.driver
-
-            # Get all nodes to build name -> uuid mapping
-            nodes = await EntityNode.get_by_group_ids(driver, [npc_id])
-            name_to_uuid = {node.name.lower(): node.uuid for node in nodes}
-
-            source_uuid = name_to_uuid.get(source_name.lower())
-            target_uuid = name_to_uuid.get(target_name.lower())
-
-            if not source_uuid or not target_uuid:
-                return {"success": False, "error": "Source or target node not found"}
-
-            # Find and delete matching edge(s)
-            edges = await EntityEdge.get_by_group_ids(driver, [npc_id])
-            deleted = 0
-            for edge in edges:
-                if edge.source_node_uuid == source_uuid and edge.target_node_uuid == target_uuid:
-                    # If fact provided, match it; otherwise delete first matching edge
-                    if fact is None or (edge.fact and edge.fact.lower() == fact.lower()):
-                        await edge.delete(driver)
-                        deleted += 1
-                        if fact:  # Only delete the specific one
-                            break
-
-            if deleted == 0:
-                return {"success": False, "error": "Edge not found"}
-
-            return {"success": True, "edges_deleted": deleted}
-
-        except Exception as e:
-            print(f"[Memory] Error deleting edge: {e}")
-            import traceback
-            traceback.print_exc()
-            return {"success": False, "error": str(e)}
-
-    def delete_edge(self, npc_id: str, source_name: str, target_name: str, fact: Optional[str] = None) -> Dict[str, Any]:
-        """Delete a specific edge (sync wrapper)."""
-        if not self.init_graphiti():
-            return {"success": False, "error": "Kuzu not connected"}
-
-        self._busy = True
-        try:
-            return self._run_async(self._delete_edge_async(npc_id, source_name, target_name, fact)) or {"success": False, "error": "Async failed"}
-        finally:
-            self._busy = False
-
-    def _clear_graph_sync(self, npc_id: str) -> Dict[str, Any]:
-        """Delete all nodes and edges for an NPC's graph using sync connection."""
-        try:
-            import time as _time
-            import kuzu
-            import gc
-
-            # Kuzu DB is a single FILE, not a directory. WAL file is memory.kuzu.wal.
-            kuzu_db_path = os.path.join(DATA_DIR, "memory.kuzu")
-
-            # Release Graphiti's DB locks (same as clear_all_memories)
-            reset_memory_connection()
-            gc.collect()
-
-            # Open fresh database + connection for the delete
-            print(f"[Memory/Clear] Deleting graph data for {npc_id}...")
-            db = kuzu.Database(kuzu_db_path)
-            conn = kuzu.Connection(db)
-
-            # Drop FTS indices first - Kuzu hangs updating them during deletes
-            fts_indices = [
-                ("RelatesToNode_", "edge_name_and_fact"),
-                ("Entity", "node_name_and_summary"),
-                ("Episodic", "episode_content"),
-                ("Community", "community_name"),
-            ]
-            for table, index_name in fts_indices:
-                try:
-                    conn.execute(f"CALL DROP_FTS_INDEX('{table}', '{index_name}')")
-                    print(f"[Memory/Clear] Dropped FTS index '{index_name}'")
-                except Exception:
-                    pass  # Index might not exist
-
-            # Delete edges first (no DETACH), then nodes
-            queries = [
-                ("RELATES_TO edges (Entity->RelatesToNode_)",
-                 "MATCH (n:Entity {group_id: $group_id})-[r:RELATES_TO]->() DELETE r"),
-                ("RELATES_TO edges (RelatesToNode_->Entity)",
-                 "MATCH (:RelatesToNode_ {group_id: $group_id})-[r:RELATES_TO]->() DELETE r"),
-                ("MENTIONS edges",
-                 "MATCH (:Episodic {group_id: $group_id})-[r:MENTIONS]->() DELETE r"),
-                ("HAS_MEMBER edges",
-                 "MATCH (:Community {group_id: $group_id})-[r:HAS_MEMBER]->() DELETE r"),
-                ("RelatesToNode_ nodes",
-                 "MATCH (n:RelatesToNode_ {group_id: $group_id}) DELETE n"),
-                ("Entity nodes",
-                 "MATCH (n:Entity {group_id: $group_id}) DELETE n"),
-                ("Episodic nodes",
-                 "MATCH (n:Episodic {group_id: $group_id}) DELETE n"),
-                ("Community nodes",
-                 "MATCH (n:Community {group_id: $group_id}) DELETE n"),
-            ]
-
-            for label, query in queries:
-                print(f"[Memory/Clear] Deleting {label}...")
-                t0 = _time.time()
-                conn.execute(query, {"group_id": npc_id})
-                print(f"[Memory/Clear] Deleted {label} in {_time.time() - t0:.2f}s")
-
-            conn.close()
-            del db
-            print(f"[Memory/Clear] All deletes complete for {npc_id}")
-
-            # Graphiti will reinitialize on next operation via init_graphiti()
-            return {"success": True}
-
-        except Exception as e:
-            print(f"[Memory] Error clearing graph for {npc_id}: {e}")
-            import traceback
-            traceback.print_exc()
-            return {"success": False, "error": str(e)}
-
-    def clear_graph(self, npc_id: str) -> Dict[str, Any]:
-        """Delete all nodes and edges for an NPC."""
-        self._busy = True
-        try:
-            # Run sync delete through executor (resets connection, deletes, reinits on next use)
-            executor = get_executor()
-            result = executor.submit(
-                self._clear_graph_sync, npc_id,
-                priority=TaskPriority.HIGH, timeout=30.0, max_retries=0
+            result = self._cognis.get_all(
+                owner_id=npc_id,
+                agent_id="npc_memory",
+                limit=2000,
+                include_historical=False,
             )
-            if result.success:
-                return result.value or {"success": False, "error": "No result"}
-            elif result.error:
-                return {"success": False, "error": str(result.error)}
-            else:
-                return {"success": False, "error": "Executor failed"}
-        finally:
-            self._busy = False
-
-    async def _get_node_uuid_async(self, npc_id: str, node_name: str) -> Optional[str]:
-        """Get UUID for a named node in an NPC's graph."""
-        if self._graphiti is None:
-            return None
-
-        try:
-            from graphiti_core.nodes import EntityNode
-
-            nodes = await EntityNode.get_by_group_ids(self._graphiti.driver, [npc_id])
-            for node in nodes:
-                if node.name.lower() == node_name.lower():
-                    return node.uuid
-            return None
+            memories = result.get("memories", []) if isinstance(result, dict) else []
+            edges = [self._memory_to_edge(m) for m in memories if m.get("content")]
+            edges.sort(key=lambda e: e.get("created_at") or "")
+            return {"edges": edges, "entity_count": len(edges)}
         except Exception as e:
-            print(f"[Memory] Error getting node UUID for '{node_name}': {e}")
-            return None
+            print(f"[Memory/Cognis] Failed to load memory data for {npc_id}: {e}")
+            return {"edges": [], "entity_count": 0}
 
     def get_node_uuid(self, npc_id: str, node_name: str) -> Optional[str]:
-        """Get UUID for a named node (sync wrapper)."""
-        if not self.init_graphiti():
-            return None
-        return self._run_async(self._get_node_uuid_async(npc_id, node_name), skip_if_busy=True)
+        return None
 
-    async def _search_facts_async(self, npc_id: str, query: str,
-                                   center_node_uuid: Optional[str] = None,
-                                   max_results: int = 50) -> List[str]:
-        """Search for facts relevant to a query, optionally centered on a node."""
-        if self._graphiti is None:
-            return []
-
-        try:
-            valid_only_filter = SearchFilters(
-                invalid_at=[[DateFilter(date=None, comparison_operator=ComparisonOperator.is_null)]]
-            )
-
-            # Use graphiti's hybrid search with lower similarity threshold
-            from graphiti_core.search.search_config_recipes import EDGE_HYBRID_SEARCH_RRF
-            from graphiti_core.search.search import search
-
-            # sim_min_score: low to get more candidates into reranker pool
-            # reranker_min_score: filters final RRF output (1/rank, so 0.4 = top 2-3)
-            search_config = EDGE_HYBRID_SEARCH_RRF.model_copy(deep=True)
-            search_config.edge_config.sim_min_score = 0.05
-            search_config.reranker_min_score = 0.3
-            search_config.limit = max_results
-
-            try:
-                results = await search(
-                    self._graphiti.clients,
-                    query,
-                    [npc_id],
-                    search_config,
-                    valid_only_filter,
-                    driver=self._graphiti.driver,
-                    center_node_uuid=center_node_uuid,
-                )
-            except Exception as search_err:
-                print(f"[Memory/Search] ERROR: {search_err}")
-                results = None
-
-            edge_count = len(results.edges) if results and results.edges else 0
-            methods = [m.value for m in search_config.edge_config.search_methods] if search_config.edge_config else []
-            reranker = search_config.edge_config.reranker.value if search_config.edge_config else 'none'
-            print(f"[Memory/Search] '{query}': {edge_count} results (methods={methods}, reranker={reranker})")
-            if results and results.edges and results.edge_reranker_scores:
-                for i, (edge, score) in enumerate(zip(results.edges[:5], results.edge_reranker_scores[:5])):
-                    print(f"  [{i}] rrf={score:.4f} | {edge.fact[:80]}")
-
-            if not results or not results.edges:
-                # Fallback to CONTAINS search if hybrid search returns nothing
-                from graphiti_core.driver.driver import GraphProvider
-                if self._graphiti.driver.provider == GraphProvider.KUZU:
-                    keyword_facts = await self._kuzu_contains_search(npc_id, query, max_results)
-                    print(f"[Memory/Search] CONTAINS fallback: {len(keyword_facts)} results")
-                    return keyword_facts
-                return []
-
-            # Resolve node UUIDs to names for hover highlighting
-            from graphiti_core.nodes import EntityNode
-            driver = self._graphiti.driver
-
-            node_uuids = set()
-            for edge in results.edges:
-                node_uuids.add(edge.source_node_uuid)
-                node_uuids.add(edge.target_node_uuid)
-
-            uuid_to_name = {}
-            if node_uuids:
-                try:
-                    nodes = await EntityNode.get_by_uuids(driver, list(node_uuids))
-                    for node in nodes:
-                        uuid_to_name[node.uuid] = node.name
-                except Exception:
-                    pass  # Fall back to UUIDs if name lookup fails
-
-            rich_results = []
-            for edge in results.edges:
-                rich_results.append({
-                    "fact": edge.fact,
-                    "source": uuid_to_name.get(edge.source_node_uuid, edge.source_node_uuid),
-                    "target": uuid_to_name.get(edge.target_node_uuid, edge.target_node_uuid),
-                })
-
-            print(f"[Memory/Search] Returning {len(rich_results)} facts")
-            return rich_results
-        except Exception as e:
-            print(f"[Memory] Search error: {e}")
-            return []
-
-    async def _kuzu_contains_search(self, npc_id: str, query: str, max_results: int = 50) -> List[Dict[str, str]]:
-        """Fallback search for Kuzu using CONTAINS instead of broken FTS."""
-        try:
-            driver = self._graphiti.driver
-
-            # Split query into words for multi-word matching
-            query_words = [w.strip().lower() for w in query.split() if len(w.strip()) > 2]
-            if not query_words:
-                query_words = [query.lower()]
-
-            results = []
-            seen = set()
-
-            # Search with full edge pattern to get source/target names
-            # Use the driver's execute_query to go through the patched single-thread executor
-            for word in query_words:
-                safe_word = word.replace("'", "''")
-                cypher = f"""
-                    MATCH (e:Entity)-[:RELATES_TO]->(r:RelatesToNode_)-[:RELATES_TO]->(e2:Entity)
-                    WHERE r.group_id = '{npc_id}'
-                    AND (lower(r.fact) CONTAINS '{safe_word}' OR lower(r.name) CONTAINS '{safe_word}'
-                         OR lower(e.name) CONTAINS '{safe_word}' OR lower(e2.name) CONTAINS '{safe_word}')
-                    RETURN r.fact AS fact, e.name AS source, e2.name AS target
-                    LIMIT {max_results}
-                """
-                rows, _, _ = await driver.execute_query(cypher)
-                for row in (rows if isinstance(rows, list) else []):
-                    fact = row.get('fact', '')
-                    if fact and fact not in seen:
-                        seen.add(fact)
-                        results.append({
-                            "fact": fact,
-                            "source": row.get('source', ''),
-                            "target": row.get('target', ''),
-                        })
-
-            return results[:max_results]
-
-        except Exception as e:
-            print(f"[Memory] Kuzu search error: {e}")
-            return []
+    def get_last_added_edges(self, npc_id: str) -> List[Dict[str, Any]]:
+        return list(self._last_added_edges.get(npc_id, []))
 
     def search_facts(self, npc_id: str, query: str,
                      center_node_uuid: Optional[str] = None,
                      max_results: int = 5) -> List[Dict[str, str]]:
-        """Search for facts relevant to a query (sync wrapper).
-
-        Returns list of dicts with keys: fact, source, target
-        """
         if not self.init_graphiti():
             return []
-        return self._run_async(
-            self._search_facts_async(npc_id, query, center_node_uuid, max_results),
-            skip_if_busy=True
-        ) or []
+        try:
+            result = self._cognis.search(
+                query=query,
+                owner_id=npc_id,
+                agent_id="npc_memory",
+                session_id="sonorus",
+                limit=max_results,
+            )
+            memories = result.get("results", []) if isinstance(result, dict) else []
+            facts = []
+            seen = set()
+            for mem in memories:
+                fact = (mem.get("content") or "").strip()
+                key = fact.lower()
+                if not fact or key in seen:
+                    continue
+                seen.add(key)
+                metadata = mem.get("metadata") or {}
+                session_id = mem.get("session_id") or ""
+                chapter = None
+                if session_id:
+                    parts = [p for p in session_id.split("_") if p]
+                    if len(parts) > 1:
+                        chapter = string.capwords(" ".join(parts[1:6]))
+                facts.append({
+                    "fact": fact,
+                    "source": "You",
+                    "target": "",
+                    "category": metadata.get("category") or "",
+                    "chapter": chapter or "",
+                    "valid_at": mem.get("event_time"),
+                    "created_at": mem.get("created_at"),
+                })
+            print(f"[Memory/Cognis] Search '{query}': {len(facts)} facts")
+            return facts
+        except Exception as e:
+            print(f"[Memory/Cognis] Search failed for {npc_id}: {e}")
+            return []
+
+    def delete_node(self, npc_id: str, node_name: str) -> Dict[str, Any]:
+        return {
+            "success": False,
+            "error": "Node deletion is not supported by the lightweight fact memory backend.",
+        }
+
+    def delete_edge(self, npc_id: str, source_name: str, target_name: str, fact: Optional[str] = None) -> Dict[str, Any]:
+        if not fact:
+            return {"success": False, "error": "Fact text is required for lightweight memory deletion."}
+        if not self.init_graphiti():
+            return {"success": False, "error": "Memory not initialized"}
+        try:
+            result = self._cognis.get_all(
+                owner_id=npc_id,
+                agent_id="npc_memory",
+                limit=5000,
+                include_historical=False,
+            )
+            target = fact.strip().lower()
+            for mem in result.get("memories", []):
+                if (mem.get("content") or "").strip().lower() == target:
+                    return self._cognis.delete(mem.get("memory_id"), owner_id=npc_id)
+            return {"success": False, "error": "Fact not found"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def clear_graph(self, npc_id: str) -> Dict[str, Any]:
+        if not self.init_graphiti():
+            return {"success": False, "error": "Memory not initialized"}
+        try:
+            return self._cognis.clear(owner_id=npc_id)
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+
+# Keep existing call sites stable while exposing a backend-neutral name.
+MemoryManager = CognisMemoryManager
+GraphitiManager = CognisMemoryManager
 
 
 # =============================================================================
@@ -1423,37 +1320,134 @@ class ChapterManager:
         self._save_chapter_data(npc_id, data)
         print(f"[Memory] Updated indexing meta for {npc_id}: last_index_timestamp={timestamp}")
 
-    def clear_npc_data(self, npc_id: str) -> bool:
-        """Clear all chapter data, memory cache, bio, and chapter content for an NPC."""
+    def _clear_chapter_tracking_files(self, npc_id: str):
+        """Delete chapter-state files without touching the NPC's bio."""
         try:
-            # Delete chapter file
             chapter_path = self._get_chapter_file(npc_id)
             if os.path.exists(chapter_path):
                 os.remove(chapter_path)
-                print(f"[Memory] Deleted chapters for {npc_id}")
+                print(f"[Memory] Deleted chapter tracking for {npc_id}")
 
-            # Delete memory cache
             cache_path = self._get_memory_cache_file(npc_id)
             if os.path.exists(cache_path):
                 os.remove(cache_path)
                 print(f"[Memory] Deleted memory cache for {npc_id}")
 
-            # Delete bio file
-            bio_path = get_bio_path(npc_id)
-            if os.path.exists(bio_path):
-                os.remove(bio_path)
-                print(f"[Memory] Deleted bio for {npc_id}")
-
-            # Delete chapter_content files (named {npc_id}_{timestamp}.json)
-            content_dir = os.path.join(DATA_DIR, "chapter_content")
+            content_dir = os.path.join(_memory_data_dir, "chapter_content")
             if os.path.exists(content_dir):
-                # Chapter IDs are like "NpcId:timestamp" which become "NpcId_timestamp.json"
                 prefix = f"{npc_id}_"
                 for filename in os.listdir(content_dir):
                     if filename.startswith(prefix) and filename.endswith('.json'):
                         filepath = os.path.join(content_dir, filename)
                         os.remove(filepath)
                         print(f"[Memory] Deleted chapter content: {filename}")
+        except Exception as e:
+            print(f"[Memory] Error clearing chapter tracking for {npc_id}: {e}")
+
+    def reset_chapter_tracking(self, npc_id: str):
+        """Clear chapter/indexing state for an NPC without deleting the bio."""
+        self._clear_chapter_tracking_files(npc_id)
+        self.invalidate_memory_cache(npc_id)
+
+    def repair_after_in_place_history_edit(self, npc_id: str, last_timestamp: int):
+        """
+        Repair chapter state after an in-place history edit where row IDs remain stable.
+
+        We preserve queue/indexing progress and only clean up chapter artifacts that can
+        no longer be trusted after manual edits.
+        """
+        data = self._load_chapter_data(npc_id)
+        has_real_chapters = bool(data.get('open_chapter') or data.get('closed_chapters'))
+
+        if not has_real_chapters:
+            # Preserve indexing progress for unchaptered NPCs so the next real batch is not
+            # misclassified as "old untracked data" and skipped.
+            self.invalidate_memory_cache(npc_id)
+            print(f"[Memory] Preserved indexing state for {npc_id} after in-place history edit")
+            return
+
+        if last_timestamp <= 0:
+            # No history remains for this NPC; clear chapter artifacts but keep the bio.
+            self.reset_chapter_tracking(npc_id)
+            print(f"[Memory] Cleared chapter tracking for {npc_id} after in-place history edit")
+            return
+
+        # Manual edits can invalidate the in-progress chapter structure.
+        if data.get('open_chapter'):
+            data['open_chapter'] = None
+
+        closed_chapters = []
+        for chapter in data.get('closed_chapters', []):
+            start_ts = chapter.get('start_timestamp') or 0
+            end_ts = chapter.get('end_timestamp') or 0
+
+            # Drop chapters that now lie wholly beyond the remaining history tail.
+            if start_ts > last_timestamp or end_ts > last_timestamp:
+                continue
+
+            closed_chapters.append(chapter)
+
+        data['closed_chapters'] = closed_chapters
+        self._save_chapter_data(npc_id, data)
+        self.invalidate_memory_cache(npc_id)
+        print(f"[Memory] Repaired chapter state for {npc_id} after in-place history edit")
+
+    def repair_after_history_rewrite(self, npc_id: str, last_timestamp: int):
+        """
+        Repair chapter tracking after a bulk dialogue-history rewrite.
+
+        This is intentionally conservative:
+        - Drop the open chapter, since arbitrary rewrites can invalidate it
+        - Drop any closed chapters that now lie entirely beyond remaining history
+        - Advance indexing_meta to the end of remaining history so old content is
+          not auto-reprocessed into duplicate memories
+        """
+        data = self._load_chapter_data(npc_id)
+        has_real_chapters = bool(data.get('open_chapter') or data.get('closed_chapters'))
+
+        if not has_real_chapters:
+            self.reset_chapter_tracking(npc_id)
+            print(f"[Memory] Cleared stale chapter tracking for {npc_id} after history rewrite")
+            return
+
+        # Manual edits can invalidate the in-progress chapter structure.
+        if data.get('open_chapter'):
+            data['open_chapter'] = None
+
+        closed_chapters = []
+        for chapter in data.get('closed_chapters', []):
+            start_ts = chapter.get('start_timestamp') or 0
+            end_ts = chapter.get('end_timestamp') or 0
+
+            # Drop chapters that now lie wholly beyond the edited history tail.
+            if start_ts > last_timestamp or end_ts > last_timestamp:
+                continue
+
+            closed_chapters.append(chapter)
+
+        data['closed_chapters'] = closed_chapters
+        data['indexing_meta'] = {
+            'last_index_timestamp': last_timestamp
+        }
+
+        self._save_chapter_data(npc_id, data)
+        self.invalidate_memory_cache(npc_id)
+        print(f"[Memory] Repaired chapter state for {npc_id} after history rewrite; last_index_timestamp={last_timestamp}")
+
+    def repair_after_history_edit(self, npc_id: str, last_timestamp: int):
+        """Backward-compatible alias for the older, rewrite-style repair path."""
+        self.repair_after_history_rewrite(npc_id, last_timestamp)
+
+    def clear_npc_data(self, npc_id: str) -> bool:
+        """Clear all chapter data, memory cache, bio, and chapter content for an NPC."""
+        try:
+            self._clear_chapter_tracking_files(npc_id)
+
+            # Delete bio file
+            bio_path = get_bio_path(npc_id)
+            if os.path.exists(bio_path):
+                os.remove(bio_path)
+                print(f"[Memory] Deleted bio for {npc_id}")
 
             return True
         except Exception as e:
@@ -1467,7 +1461,7 @@ class ChapterManager:
 
 def get_bios_dir() -> str:
     """Get the bios directory path, creating it if needed."""
-    bios_dir = os.path.join(DATA_DIR, "npc_bios")
+    bios_dir = os.path.join(_memory_data_dir, "npc_bios")
     os.makedirs(bios_dir, exist_ok=True)
     return bios_dir
 
@@ -1565,6 +1559,78 @@ def format_bio_for_context(bio: Dict) -> str:
     return "\n\n".join(sections)
 
 
+def _build_static_background_sections(npc_id: str, npc_name: str = None,
+                                      player_name: str = "Player",
+                                      settings=None,
+                                      include_player: bool = True) -> List[str]:
+    """Build additive static background sections for NPC and player."""
+    settings = settings or load_settings()
+    sections = []
+
+    npc_static_bio = get_static_bio(npc_id=npc_id, display_name=npc_name, settings=settings)
+    if npc_static_bio:
+        sections.append(f"### About You\n**Background:** {npc_static_bio}")
+
+    player_static_bio = get_player_static_bio(player_name=player_name, settings=settings)
+    if include_player and player_static_bio:
+        sections.append(f"### About {player_name}\n**Background:** {player_static_bio}")
+
+    return sections
+
+
+def get_character_background_context(npc_id: str, npc_name: str = None,
+                                     player_name: str = "Player") -> Optional[str]:
+    """Get shared NPC background context for direct chat/mail flows."""
+    settings = load_settings()
+
+    if is_npc_memory_effectively_enabled(npc_id, settings=settings):
+        memory_block = get_contextual_memory(
+            npc_id=npc_id,
+            npc_name=npc_name,
+            player_name=player_name,
+            current_location=None,
+            nearby_npcs=None,
+            mentioned_entities=None,
+        )
+        if memory_block:
+            return memory_block
+
+    sections = _build_static_background_sections(
+        npc_id=npc_id,
+        npc_name=npc_name,
+        player_name=player_name,
+        settings=settings,
+        include_player=True,
+    )
+    if sections:
+        return "\n\n".join(sections)
+
+    guidance = get_editor_guidance(npc_id=npc_id, display_name=npc_name, settings=settings)
+    if guidance:
+        return f"### About You\n{guidance}"
+    return None
+
+
+def _build_static_bio_generation_section(npc_id: str, npc_name: str = None, settings=None) -> str:
+    """Build static-bio grounding for generated bio prompts."""
+    settings = settings or load_settings()
+    static_bio = get_static_bio(npc_id=npc_id, display_name=npc_name, settings=settings)
+    if not static_bio:
+        return ""
+
+    return f"""
+STATIC BIO:
+{static_bio}
+
+When generating or updating the memory bio:
+- Treat the STATIC BIO section as immutable background
+- Do NOT repeat facts, details, or traits that are already stated in the STATIC BIO section
+- Prefer dynamic developments, relationships, tasks, recent changes, and memory-derived details that add to the STATIC BIO section
+- Do not copy text from the STATIC BIO section into user_notes unless a guidance-specific note truly belongs there
+
+"""
+
+
 def generate_full_bio(npc_id: str, npc_name: str, editor_guidance: str = None) -> Optional[Dict]:
     """
     Generate a complete bio from all graph data (for migration/rebuild).
@@ -1577,14 +1643,18 @@ def generate_full_bio(npc_id: str, npc_name: str, editor_guidance: str = None) -
     Returns the bio dict, or None if generation fails.
     """
     import llm
+    settings = load_settings()
+    if not is_npc_long_term_memory_enabled(npc_id, settings=settings):
+        print(f"[Bio] Long-term memory disabled for {npc_id}, skipping full bio generation")
+        return None
 
-    graphiti_mgr = GraphitiManager()
-    if not graphiti_mgr.init_graphiti():
-        print(f"[Bio] Could not initialize Graphiti for {npc_id}")
+    memory_mgr = MemoryManager()
+    if not memory_mgr.init_graphiti():
+        print(f"[Bio] Could not initialize memory backend for {npc_id}")
         return None
 
     # Get all facts
-    graph_data = graphiti_mgr.get_graph_data(npc_id)
+    graph_data = memory_mgr.get_graph_data(npc_id)
     edges = graph_data.get('edges', [])
     if not edges:
         print(f"[Bio] No edges found for {npc_id}")
@@ -1592,6 +1662,15 @@ def generate_full_bio(npc_id: str, npc_name: str, editor_guidance: str = None) -
 
     # Format facts by chapter
     formatted = format_graph_for_context(edges, npc_name)
+
+    static_bio_section = _build_static_bio_generation_section(
+        npc_id=npc_id,
+        npc_name=npc_name,
+        settings=settings,
+    )
+    static_bio_rule = ""
+    if static_bio_section:
+        static_bio_rule = '\n9. Keep the generated bio lean by avoiding facts, details, or traits already covered in the "STATIC BIO" section'
 
     # Build guidance section if provided
     guidance_section = ""
@@ -1609,6 +1688,7 @@ When generating the bio:
 
     # Call LLM to generate bio
     prompt = f"""Analyze these facts about {npc_name} and create a structured bio.
+{static_bio_section}
 {guidance_section}
 FACTS:
 {formatted}
@@ -1634,13 +1714,12 @@ RULES:
    - "Retrieved X for Y" is correct. "Helped Y overcome their fear" is WRONG (unless explicitly stated)
    - Do not infer character growth, emotional change, or narrative meaning
    - If the facts say "A did X for B because B was scared", the task is "Did X for B", NOT "Helped B overcome fear"
-8. For user_notes: Include guidance items that are still valid but don't fit structured categories
+8. For user_notes: Include guidance items that are still valid but don't fit structured categories{static_bio_rule}
 
 ```json
 """
 
-    settings = load_settings()
-    model = settings.get('memory', {}).get('prose_model', 'gemini-2.5-flash-lite')
+    model = _get_memory_llm_model(settings.get('memory', {}), 'prose_model')
 
     parsed = call_llm_with_retry(prompt, model, max_retries=3, context="bio_generation")
     if not parsed:
@@ -1672,11 +1751,15 @@ def update_bio_incremental(npc_id: str, npc_name: str,
     """
     Update an NPC's bio incrementally after a chapter closes.
 
-    Queries Graphiti for edges created during the chapter timeframe,
+    Uses facts extracted from the recently closed chapter,
     then uses LLM to update only affected bio sections.
     Incorporates editor's guidance from settings if available.
     """
     import llm
+    settings = load_settings()
+    if not is_npc_long_term_memory_enabled(npc_id, settings=settings):
+        print(f"[Bio] Long-term memory disabled for {npc_id}, skipping incremental bio update")
+        return None
 
     # Load existing bio
     bio = load_bio(npc_id)
@@ -1684,41 +1767,48 @@ def update_bio_incremental(npc_id: str, npc_name: str,
         print(f"[Bio] No existing bio for {npc_id}, skipping incremental update")
         return None
 
-    # Get edges from Graphiti
-    graphiti_mgr = GraphitiManager()
-    if not graphiti_mgr.init_graphiti():
+    # Get facts from long-term memory.
+    memory_mgr = MemoryManager()
+    if not memory_mgr.init_graphiti():
         return bio
 
-    # Query all edges for this NPC
-    graph_data = graphiti_mgr.get_graph_data(npc_id)
-    edges = graph_data.get('edges', [])
+    new_edges = memory_mgr.get_last_added_edges(npc_id)
 
-    # Filter to edges from this chapter (by created_at timestamp)
-    new_edges = []
-    for edge in edges:
-        created = edge.get('created_at')
-        if created:
-            # Parse ISO timestamp to unix
-            try:
-                from dateutil.parser import parse as parse_date
-                edge_ts = int(parse_date(created).timestamp())
-                if chapter_start_ts <= edge_ts <= chapter_end_ts + 60:  # +60s buffer
-                    new_edges.append(edge)
-            except:
-                pass
+    # Fallback for rebuild paths where the update is not called immediately
+    # after add_episode().
+    graph_data = memory_mgr.get_graph_data(npc_id)
+    edges = graph_data.get('edges', [])
+    if not new_edges:
+        for edge in edges:
+            created = edge.get('created_at')
+            if created:
+                try:
+                    from dateutil.parser import parse as parse_date
+                    edge_ts = int(parse_date(created).timestamp())
+                    if chapter_start_ts <= edge_ts <= chapter_end_ts + 300:
+                        new_edges.append(edge)
+                except Exception:
+                    pass
 
     if not new_edges:
-        print(f"[Bio] No new edges for {npc_id} in chapter timeframe ({chapter_start_ts}-{chapter_end_ts})")
+        print(f"[Bio] No new memory facts for {npc_id} in chapter timeframe ({chapter_start_ts}-{chapter_end_ts})")
         return bio
 
-    print(f"[Bio] Found {len(new_edges)} new edges for {npc_id}")
+    print(f"[Bio] Found {len(new_edges)} new memory facts for {npc_id}")
 
     # Format new facts
     new_facts = "\n".join(f"- {e.get('fact', '')}" for e in new_edges)
 
     # Load editor's guidance from settings
-    settings = load_settings()
-    editor_guidance = settings.get('prompts', {}).get('editor_guidance', {}).get(npc_id, '')
+    editor_guidance = get_editor_guidance(npc_id=npc_id, display_name=npc_name, settings=settings)
+    static_bio_section = _build_static_bio_generation_section(
+        npc_id=npc_id,
+        npc_name=npc_name,
+        settings=settings,
+    )
+    static_bio_rule = ""
+    if static_bio_section:
+        static_bio_rule = '\n8. Remove or avoid adding entries that repeat facts, details, or traits already covered in the "STATIC BIO" section'
 
     guidance_section = ""
     if editor_guidance:
@@ -1732,6 +1822,7 @@ When updating, ensure user_notes section preserves guidance items that are still
 
     # Call LLM to update bio
     prompt = f"""Update this NPC bio based on new facts from a recent conversation.
+{static_bio_section}
 {guidance_section}
 CURRENT BIO:
 ```json
@@ -1764,12 +1855,12 @@ RULES:
 4. For relationships, "items" should be a dict like {{"Name": {{"type": "...", "notes": "..."}}}}
 5. Return ONLY valid JSON
 6. FACTUAL ACCURACY: Describe only what literally happened. Do not embellish or infer meaning beyond stated facts.
-7. Preserve user_notes that are still valid; remove any contradicted by new facts
+7. Preserve user_notes that are still valid; remove any contradicted by new facts{static_bio_rule}
 
 ```json
 """
 
-    model = settings.get('memory', {}).get('prose_model', 'gemini-2.5-flash-lite')
+    model = _get_memory_llm_model(settings.get('memory', {}), 'prose_model')
 
     updates = call_llm_with_retry(prompt, model, max_retries=2, context="bio_update")
     if not updates:
@@ -1786,18 +1877,21 @@ RULES:
         if action == "append" and items:
             bio[section] = bio.get(section, []) + items
             changes_made = True
-        elif action == "replace" and items:
-            bio[section] = items
-            changes_made = True
+        elif action == "replace":
+            if bio.get(section, []) != items:
+                bio[section] = items
+                changes_made = True
 
     # Handle relationships separately (dict merge)
     rel_update = updates.get("relationships", {})
     if rel_update.get("action") == "append" and rel_update.get("items"):
         bio["relationships"] = {**bio.get("relationships", {}), **rel_update["items"]}
         changes_made = True
-    elif rel_update.get("action") == "replace" and rel_update.get("items"):
-        bio["relationships"] = rel_update["items"]
-        changes_made = True
+    elif rel_update.get("action") == "replace":
+        new_relationships = rel_update.get("items", {})
+        if bio.get("relationships", {}) != new_relationships:
+            bio["relationships"] = new_relationships
+            changes_made = True
 
     # Save updated bio
     if changes_made:
@@ -1816,6 +1910,12 @@ RULES:
 def build_chapter_prompt(npc_name: str, npc_id: str, dialogue_entries: List[Dict],
                          open_chapter: Optional[Dict], characters_in_earshot: List[str] = None) -> str:
     """Build the prompt for chapter boundary detection."""
+    include_cutscene = load_settings().get('memory', {}).get('include_cutscene', True)
+
+    dialogue_entries = [
+        entry for entry in dialogue_entries
+        if should_include_entry_for_npc_chaptering(npc_id, entry, include_cutscene=include_cutscene)
+    ]
 
     # Get player name from entries if available
     player_name = "the student"
@@ -1849,15 +1949,11 @@ def build_chapter_prompt(npc_name: str, npc_id: str, dialogue_entries: List[Dict
         if game_time_str:
             time_prefix = f"{time_prefix} [{game_time_str}]" if time_prefix else f"[{game_time_str}]"
 
-        # Skip broom events - not relevant for chapter summaries
-        if entry_type == 'broom':
+        if entry_type == 'location':
             continue
-        elif entry_type == 'location':
-            formatted_entries.append(f"{time_prefix} Location: {text}")
-        elif entry_type == 'spell':
-            formatted_entries.append(f"{time_prefix} Spell: {text}")
         elif entry_type == 'combat':
-            formatted_entries.append(f"{time_prefix} Combat: {text}")
+            combat_summary = format_combat_summary(entry, include_damage=False)
+            formatted_entries.append(f"{time_prefix} Combat: {combat_summary}")
         else:
             role = "Player" if entry.get('isPlayer') else speaker
             formatted_entries.append(f"{time_prefix} {role}: {text}")
@@ -1944,11 +2040,11 @@ Return your analysis as JSON:
   ],
   "new_chapters": [
     {{
-      "title": "Return to the Broomsticks",
+      "title": "Regrouping After Failure",
       "start_timestamp": 1768035550,
       "end_timestamp": null,
       "status": "open",
-      "summary": "After the failed rescue, {npc_name} returns to the Three Broomsticks with {player_name}.",
+      "summary": "After the failed rescue, {npc_name} and {player_name} discuss what blocked Ferdinand Pratt's rescue.",
       "key_events": []
     }}
   ]
@@ -2022,11 +2118,11 @@ Return your analysis as JSON:
       ]
     }},
     {{
-      "title": "Empty-Handed Return",
+      "title": "Blocked Rescue",
       "start_timestamp": 1768035100,
       "end_timestamp": null,
       "status": "open",
-      "summary": "Unable to open the locked door, {npc_name} returns to the Three Broomsticks with {player_name}.",
+      "summary": "Unable to open the locked door, {npc_name} and {player_name} leave Ferdinand Pratt's portrait rescue unresolved.",
       "key_events": []
     }}
   ]
@@ -2066,6 +2162,7 @@ Return your analysis as JSON:
    - Incremental progress or minor discoveries
    - Emotional reactions without plot consequences
    - Procedural actions (walking, looking, basic questioning)
+   - Routine location changes, travel transitions, entering places, exiting places, or route descriptions
    - Generic greetings or farewells
 
    - Each event title: max 32 characters
@@ -2079,6 +2176,7 @@ Return your analysis as JSON:
     return f"""You are analyzing {npc_name}'s experiences to identify natural chapter breaks and create meaningful titles.
 
 Important: This is from {npc_name}'s perspective. When writing summaries and describing events, write from their point of view using their name.
+Do not give {npc_name} false agency. If {npc_name} only overheard or witnessed {player_name} talking to another character, say {npc_name} witnessed/overheard that exchange or omit it. Do not say {npc_name} planned, arranged, accepted, purchased, rescued, or conferred unless {npc_name} personally did so.
 
 The player character is named "{player_name}".
 
@@ -2107,27 +2205,23 @@ def build_episode_prompt(npc_name: str, chapter_title: str, chapter_summary: str
     """
     Build prompt for generating episode content optimized for graph storage/retrieval.
 
-    This generates rich prose that will be stored in Kuzu via Graphiti.
+    This generates rich prose that Cognis will extract into deduped facts.
     """
 
     # Format dialogue entries
     dialogue_lines = []
-    for entry in dialogue_entries[-30:]:  # Last 30 entries from this chapter
+    for entry in dialogue_entries:
         speaker = entry.get('speaker', 'Unknown')
         text = entry.get('text', '')
         entry_type = entry.get('type', 'dialogue')
 
         if entry_type == 'location':
-            location = entry.get('location', text.replace('Entered ', ''))
-            companions = entry.get('companions')
-            if companions:
-                dialogue_lines.append(f"[{speaker} and {', '.join(companions)} entered {location}]")
-            else:
-                dialogue_lines.append(f"[{speaker} entered {location}]")
-        elif entry_type in ('spell', 'broom'):
-            continue  # Skip spell casts and broom events - not meaningful for long-term memory
+            continue
+        elif entry_type in ('spell', 'broom', 'mount', 'mail'):
+            continue  # Skip spell casts, mount events, mail markers - not meaningful for long-term memory
         elif entry_type == 'combat':
-            dialogue_lines.append(f"[Combat: {text}]")
+            combat_summary = format_combat_summary(entry, include_damage=False)
+            dialogue_lines.append(f"[Combat: {combat_summary}]")
         else:
             dialogue_lines.append(f"{speaker}: {text}")
 
@@ -2139,7 +2233,7 @@ def build_episode_prompt(npc_name: str, chapter_title: str, chapter_summary: str
         event_lines = [f"- {e.get('title', '')}: {e.get('summary', '')}" for e in key_events]
         events_str = "\n".join(event_lines)
 
-    return f"""You are generating a memory episode for {npc_name} to be stored in a knowledge graph.
+    return f"""You are generating a memory episode for {npc_name} to be stored as searchable long-term facts.
 
 ## Chapter Information
 Title: {chapter_title}
@@ -2154,13 +2248,23 @@ Summary: {chapter_summary}
 
 ## Task
 
-Generate a rich prose narrative of this chapter from {npc_name}'s perspective. This will be stored in a graph database for later retrieval. Each fact is stored independently, so a search for a name won't match a pronoun reference.
+Generate a rich prose narrative of this chapter from {npc_name}'s perspective. This will be extracted into independent searchable facts, so a search for a name won't match a pronoun reference.
+
+CRITICAL PERSPECTIVE RULE:
+- Treat the Chapter Information and Key Events as authoritative context for the chapter. Do not contradict them just because the raw dialogue is long, noisy, or missing supporting lines.
+- If the dialogue is unclear, omit uncertain details rather than claiming a summarized key event did not happen.
+- Only say {npc_name} did, planned, arranged, promised, asked, rescued, bought, or accepted something if {npc_name} personally did it in the raw dialogue or key events.
+- If {npc_name} merely overheard or witnessed {player_name} speaking with another character, preserve that witness role exactly.
+- Do NOT convert another character's quest, plan, purchase, or rescue task into {npc_name}'s quest or plan.
+- If {player_name} talks to another character about that character's task while {npc_name} is nearby, write that {npc_name} overheard the specific discussion only if it is meaningful for {npc_name}'s memory. Do NOT turn the other character's task into {npc_name}'s task.
 
 Optimize for:
 
 1. **EXPLICIT NAMES**: Always use full character names, NEVER pronouns like "he", "she", "they", "him", "her", "them". Every single reference to a person must use their name.
    - BAD: "He told her about the mission"
    - GOOD: "{player_name} told {npc_name} about the mission"
+   - GOOD WITNESSING: "{npc_name} overheard {player_name} and another named character discuss the named task"
+   - BAD ATTRIBUTION: "{npc_name} planned the named task" unless {npc_name} personally planned it
 
 2. **MAXIMIZE RELATIONSHIP CLARITY**: State relationships and connections explicitly. Don't assume context.
    - BAD: "They went to the ruins together"
@@ -2168,27 +2272,33 @@ Optimize for:
    - BAD: "The shopkeeper helped"
    - GOOD: "Sirona Ryan, the innkeeper at the Three Broomsticks, helped {npc_name} and {player_name}"
 
-3. **EXTRAPOLATE TEMPORAL RELATIONSHIPS**: State when things happened and derive implicit temporal facts.
+3. **DO NOT PAD WITH MOVEMENT, PLANS, OR REACTIONS**: Do not turn routine location changes, walking routes, proposed destinations, where-to-go questions, hiding suggestions, overheard filler, or momentary reactions into memory material.
+   - BAD: "{npc_name} and {player_name} entered the Grand Staircase"
+   - BAD: "{npc_name} traveled with {player_name} into the Faculty Tower"
+   - BAD: "{npc_name} asked whether to go to a school common room or a hidden corner"
+   - BAD: "Cedric Marsh expressed disgust at {player_name}'s suggestion" if the suggestion is not explicitly named
+   - GOOD: "{player_name} made a specific memorable insult toward Cedric Marsh, and Cedric Marsh reacted with a specific emotion because of that insult"
+   - If a reaction only makes sense with its cause, include the cause and reaction together in one sentence or omit the reaction.
+
+4. **EXTRAPOLATE TEMPORAL RELATIONSHIPS CAREFULLY**: State when important things happened and derive only direct, useful implications.
    - BAD: "Later, they found the portrait"
    - GOOD: "After defeating the Ashwinders, {npc_name} and {player_name} discovered Ferdinand Pratt's portrait"
    - EXTRAPOLATE: If someone was rescued, state they were previously captured. If a lock blocked progress, state the mission remains incomplete. If this is a second meeting, reference the first.
 
-4. **FACTUAL DENSITY**: Pack in key facts useful for retrieval - full names, specific locations, item names, spell names, quest outcomes, stated emotions, promises made.
+5. **SELECTIVE COMPLETENESS, NOT FACT SPAM**: Pack in only material useful for long-term retrieval: full names, durable backstory, explicit lore, stable preferences, lasting relationship changes, completed memorable outcomes, named heirlooms, unusual revelations, and meaningful discoveries. Prefer one longer complete memory over several vague fragments. Omit ordinary navigation, filler, routine chatter, and momentary reactions.
 
-5. **THIRD PERSON**: Write about {npc_name} in third person (e.g., "{npc_name} traveled with {player_name}..."). This allows proper entity deduplication in the graph.
+6. **THIRD PERSON WITHOUT FALSE AGENCY**: Write about {npc_name} in third person, but do not make {npc_name} the actor for witnessed events. Use "{npc_name} witnessed...", "{npc_name} overheard...", or "{npc_name} was present when..." when {npc_name} was only nearby.
 
-6. **EVENTS, NOT STATES**: Write about what HAPPENED (events), not what IS (states). State facts become outdated and clutter the graph.
-   - BAD: "Duncan is on a quest for bravery" (state - becomes false when quest ends)
-   - BAD: "Duncan is anxious about the leaf" (state - temporary)
-   - BAD: "Duncan was promised a leaf" (passive state)
-   - GOOD: "Duncan asked {npc_name} to retrieve a leaf" (event - always true)
-   - GOOD: "Duncan expressed fear of the Venomous Tentacula" (event - always true)
-   - GOOD: "{npc_name} promised Duncan to retrieve the leaf" (event - always true)
-   - GOOD: "{npc_name} delivered the leaf to Duncan, completing Duncan's quest" (event with conclusion)
+7. **DURABLE MEMORY, NOT TASK LOG**: Do not preserve open quest/task state as memory material. Requests, plans, blockers, attempts, errands, and next steps usually become stale and contradictory. Mention task-related material only when it became a completed memorable outcome, revealed durable lore, or changed a relationship in a lasting way.
+   - BAD: "Rowan Bell is on a quest for bravery" (temporary task state)
+   - BAD: "Rowan Bell asked {npc_name} to retrieve a leaf" (open request)
+   - BAD: "Rowan Bell expressed relief after a fight" (momentary reaction)
+   - GOOD: "{npc_name} delivered the leaf to Rowan Bell, and Rowan Bell's request ended with Rowan Bell feeling less ashamed of Rowan Bell's fear" (completed outcome with lasting character relevance)
+   - GOOD: "Rowan Bell revealed that Rowan Bell's family expects courage because Rowan Bell's older siblings were celebrated duelists" (backstory/lore)
 
 ## Output Format
 
-Write 2-4 paragraphs of flowing prose. No headers, no bullet points, just narrative text optimized for graph retrieval.
+Write 2-4 paragraphs of flowing prose. No headers, no bullet points, just narrative text optimized for fact retrieval.
 
 Begin your response with the prose directly, no preamble."""
 
@@ -2198,15 +2308,20 @@ def generate_episode_content(npc_name: str, chapter_title: str, chapter_summary:
                              dialogue_entries: List[Dict], player_name: str = "the student",
                              max_retries: int = 3) -> str:
     """
-    Generate episode content using LLM for storage in Graphiti.
+    Generate episode content using LLM for long-term memory extraction.
 
-    Returns rich prose optimized for graph retrieval with explicit names and relationships.
+    Returns rich prose optimized for fact retrieval with explicit names and relationships.
     """
     import llm
 
     settings = load_settings()
     memory_settings = settings.get('memory', {})
-    model = memory_settings.get('prose_model', memory_settings.get('chapter_model', 'gemini-2.5-flash-lite'))
+    include_cutscene = memory_settings.get('include_cutscene', True)
+    model = _get_memory_llm_model(
+        memory_settings,
+        'prose_model',
+        memory_settings.get('chapter_model') or 'gpt-4.1-nano',
+    )
 
     prompt = build_episode_prompt(
         npc_name=npc_name,
@@ -2256,7 +2371,8 @@ Summary: {chapter_summary}
 
 
 def detect_chapter_boundary(npc_id: str, npc_name: str, dialogue_entries: List[Dict],
-                            current_location: str, characters_in_earshot: List[str] = None) -> Dict[str, Any]:
+                            current_location: str, characters_in_earshot: List[str] = None,
+                            force_detection: bool = False) -> Dict[str, Any]:
     """
     Detect if a chapter boundary should occur for an NPC.
 
@@ -2271,9 +2387,15 @@ def detect_chapter_boundary(npc_id: str, npc_name: str, dialogue_entries: List[D
 
     settings = load_settings()
     memory_settings = settings.get('memory', {})
+    include_cutscene = memory_settings.get('include_cutscene', True)
 
     if not memory_settings.get('enabled', True):
         return {"current_chapter_action": "continue", "new_chapters": []}
+
+    dialogue_entries = [
+        entry for entry in dialogue_entries
+        if should_include_entry_for_npc_chaptering(npc_id, entry, include_cutscene=include_cutscene)
+    ]
 
     chapter_mgr = ChapterManager()
     open_chapter = chapter_mgr.get_open_chapter(npc_id)
@@ -2296,7 +2418,7 @@ def detect_chapter_boundary(npc_id: str, npc_name: str, dialogue_entries: List[D
     # Skip if: same location AND entries since last index below threshold
     location_changed = not open_chapter or open_chapter.get('location') != current_location
 
-    if not location_changed:
+    if not force_detection and not location_changed:
         # Same location - check entry threshold
         entries_since_last = sum(1 for e in dialogue_entries if e.get('timestamp', 0) > last_index_ts)
         threshold = memory_settings.get('chapter_entry_threshold', 30)
@@ -2307,10 +2429,12 @@ def detect_chapter_boundary(npc_id: str, npc_name: str, dialogue_entries: List[D
             return {"current_chapter_action": "continue", "new_chapters": [], "_skipped": True}
         else:
             print(f"[Memory] Entry threshold reached for {npc_id}: {entries_since_last} >= {threshold}")
+    elif force_detection:
+        print(f"[Memory] Force-running chapter detection for {npc_id} (threshold bypass only)")
 
     # Build and send prompt
     prompt = build_chapter_prompt(npc_name, npc_id, dialogue_entries, open_chapter, characters_in_earshot)
-    model = memory_settings.get('chapter_model', 'gemini-2.5-flash-lite')
+    model = _get_memory_llm_model(memory_settings, 'chapter_model')
 
     # Use retry helper
     parsed = call_llm_with_retry(prompt, model, max_retries=2, context="chapter_detection")
@@ -2328,88 +2452,6 @@ def detect_chapter_boundary(npc_id: str, npc_name: str, dialogue_entries: List[D
 # =============================================================================
 # Memory Compilation
 # =============================================================================
-
-def get_npc_community_summaries(npc_id: str, npc_name: str, max_summaries: int = 5) -> List[str]:
-    """
-    DEPRECATED: Not used in production. Bio system replaced community summaries.
-
-    Get the most relevant community summaries for an NPC, ordered chronologically.
-
-    Communities are clusters of related facts that provide high-level context
-    about the NPC's experiences and relationships.
-
-    Args:
-        npc_id: NPC's internal ID (group_id in Graphiti)
-        npc_name: NPC's display name to filter relevant communities
-        max_summaries: Maximum number of summaries to return
-
-    Returns:
-        List of community summary strings, ordered chronologically (oldest first)
-    """
-    graphiti_mgr = GraphitiManager()
-    if not graphiti_mgr.init_graphiti():
-        return []
-
-    try:
-        from graphiti_core.nodes import CommunityNode
-
-        async def get_communities_with_timestamps():
-            driver = graphiti_mgr._graphiti.driver
-            # Query communities with the earliest episode timestamp of their member edges
-            # This gives us temporal ordering based on when events actually happened
-            records, _, _ = await driver.execute_query(
-                """
-                MATCH (c:Community)-[:HAS_MEMBER]->(e:Entity)
-                WHERE c.group_id = $group_id
-                OPTIONAL MATCH (e)-[:RELATES_TO]-(edge)-[:MENTIONS]-(ep:Episodic)
-                WITH c, min(ep.valid_at) AS earliest_event
-                RETURN DISTINCT
-                    c.uuid AS uuid,
-                    c.name AS name,
-                    c.summary AS summary,
-                    earliest_event
-                ORDER BY COALESCE(earliest_event, CAST('9999-12-31' AS TIMESTAMP)) ASC
-                """,
-                group_id=npc_id
-            )
-            return records
-
-        records = graphiti_mgr._run_async(get_communities_with_timestamps(), skip_if_busy=True)
-        if not records:
-            return []
-
-        # Filter to communities where NPC is actually involved
-        relevant_communities = []
-        npc_name_lower = npc_name.lower() if npc_name else ""
-        seen_summaries = set()  # For deduplication
-
-        for record in records:
-            summary = record.get('summary', '')
-            if not summary:
-                continue
-
-            # Skip duplicates (sometimes same summary appears in multiple communities)
-            summary_key = summary[:100].lower()  # Use first 100 chars as key
-            if summary_key in seen_summaries:
-                continue
-
-            summary_lower = summary.lower()
-
-            # Only include if NPC name appears in summary
-            if npc_name_lower and npc_name_lower not in summary_lower:
-                continue
-
-            seen_summaries.add(summary_key)
-            relevant_communities.append(summary)
-
-            if len(relevant_communities) >= max_summaries:
-                break
-
-        return relevant_communities
-
-    except Exception as e:
-        print(f"[Memory] Error getting community summaries: {e}")
-        return []
 
 
 def get_contextual_memory(npc_id: str, npc_name: str = None, player_name: str = "Player",
@@ -2442,138 +2484,128 @@ def get_contextual_memory(npc_id: str, npc_name: str = None, player_name: str = 
     settings = load_settings()
     if not settings.get('memory', {}).get('enabled', True):
         return None
-
-    graphiti_mgr = GraphitiManager()
-    if not graphiti_mgr.init_graphiti():
+    if not is_npc_long_term_memory_enabled(npc_id, settings=settings):
         return None
 
-    # Skip if Graphiti is busy adding episodes
-    if graphiti_mgr._busy:
-        print("[Memory] Contextual memory skipped - Graphiti busy")
+    memory_mgr = MemoryManager()
+    if not memory_mgr.init_graphiti():
         return None
 
-    try:
-        from graphiti_core.nodes import EntityNode
+    # Skip if memory backend is busy adding episodes.
+    if memory_mgr._busy:
+        print("[Memory] Contextual memory skipped - memory backend busy")
+        return None
 
-        async def get_nodes():
-            driver = graphiti_mgr._graphiti.driver
-            return await EntityNode.get_by_group_ids(driver, [npc_id])
+    # Lightweight memory has no graph node summaries. Use structured bio when
+    # available, then cached compiled fact prose and static background.
+    sections = []
 
-        nodes = graphiti_mgr._run_async(get_nodes(), skip_if_busy=True)
-        if not nodes:
-            return None
+    bio = load_bio(npc_id)
+    if bio:
+        bio_context = format_bio_for_context(bio)
+        if bio_context:
+            sections.append(bio_context)
 
-        # Build name -> summary lookup
-        node_lookup = {}
-        for node in nodes:
-            summary = getattr(node, 'summary', '')
-            if summary:
-                node_lookup[node.name.lower()] = {
-                    'name': node.name,
-                    'summary': summary
-                }
+    if not sections:
+        compiled = compile_memory_prose(npc_id, npc_name or npc_id)
+        if compiled:
+            sections.append(compiled)
 
-        sections = []
+    static_sections = _build_static_background_sections(
+        npc_id=npc_id,
+        npc_name=npc_name,
+        player_name=player_name,
+        settings=settings,
+        include_player=False,
+    )
+    sections.extend(static_sections)
 
-        # 1. Use structured bio (bio-only approach)
-        bio = load_bio(npc_id)
-        if bio:
-            bio_context = format_bio_for_context(bio)
-            if bio_context:
-                sections.append(bio_context)
-        else:
-            # Fallback to old entity summary if no bio exists
-            npc_node = None
-            if npc_name:
-                npc_lower = npc_name.lower()
-                npc_node = node_lookup.get(npc_lower)
-                if not npc_node:
-                    # Try partial match for NPC name
-                    for name, data in node_lookup.items():
-                        if npc_lower in name or name in npc_lower:
-                            npc_node = data
-                            break
-            # Fallback to "You" for backwards compatibility with old data
-            if not npc_node and 'you' in node_lookup:
-                npc_node = node_lookup['you']
+    player_bio = get_player_static_bio(player_name=player_name, settings=settings)
+    if player_bio:
+        sections.append(f"### About {player_name}\n**Background:** {player_bio}")
 
-            if npc_node:
-                sections.append(f"### Your Memories\n{npc_node['summary']}")
-
-        # 2. Always include Player (dynamic learned facts + static bio)
-        player_lower = player_name.lower()
-
-        # Get Player bio (static facts known to all NPCs)
-        player_bio = settings.get('prompts', {}).get('editor_guidance', {}).get('Player', '')
-
-        # Build Player section with both dynamic and static context
-        player_parts = []
-
-        # Try to get dynamic Graphiti summary first
-        player_node = node_lookup.get(player_lower)
-        if not player_node:
-            # Try to find player by partial match
-            for name, data in node_lookup.items():
-                if player_lower in name or name in player_lower:
-                    player_node = data
-                    break
-
-        if player_node:
-            player_parts.append(player_node['summary'])
-
-        # Always add static bio if it exists (additive with Graphiti summary)
-        if player_bio:
-            player_parts.append(f"**Background:** {player_bio}")
-
-        if player_parts:
-            sections.append(f"### About {player_name}\n" + "\n\n".join(player_parts))
-
-        # 3. Add current location (if provided and known)
-        if current_location:
-            location_lower = current_location.lower()
-            location_node = node_lookup.get(location_lower)
-            if not location_node:
-                # Try partial match for locations
-                for name, data in node_lookup.items():
-                    if location_lower in name or name in location_lower:
-                        location_node = data
-                        break
-            if location_node:
-                sections.append(f"### About {location_node['name']}\n{location_node['summary']}")
-
-        # 4. Add nearby NPCs (if provided)
-        already_added = {s.lower() for s in ['you', player_lower, current_location.lower() if current_location else '']}
-        if nearby_npcs:
-            for npc_name in nearby_npcs[:3]:  # Limit to 3 nearby NPCs
-                npc_lower = npc_name.lower()
-                if npc_lower in node_lookup and npc_lower not in already_added:
-                    data = node_lookup[npc_lower]
-                    sections.append(f"### About {data['name']}\n{data['summary']}")
-                    already_added.add(npc_lower)
-
-        # 5. Add mentioned entities (if provided)
-        if mentioned_entities:
-            for entity_name in mentioned_entities[:2]:  # Limit to 2 mentioned
-                entity_lower = entity_name.lower()
-                if entity_lower in node_lookup and entity_lower not in already_added:
-                    data = node_lookup[entity_lower]
-                    sections.append(f"### About {data['name']}\n{data['summary']}")
-                    already_added.add(entity_lower)
-
-        # If no memory sections, fall back to editor_guidance as last resort
-        if not sections:
-            # Try to get editor_guidance from settings as a fallback
-            editor_guidance = settings.get('prompts', {}).get('editor_guidance', {}).get(npc_id, '')
-            if editor_guidance:
-                print(f"[Memory] No bio/graph data for {npc_id}, using editor_guidance as fallback")
-                return f"### About You\n{editor_guidance}"
-            return None
-
+    if sections:
         return "\n\n".join(sections)
 
-    except Exception as e:
-        print(f"[Memory] Error getting contextual memory: {e}")
+    editor_guidance = get_editor_guidance(npc_id=npc_id, display_name=npc_name, settings=settings)
+    if editor_guidance:
+        return f"### About You\n{editor_guidance}"
+
+    return None
+
+
+
+def _parse_memory_datetime(value: Any) -> Optional[datetime]:
+    if not value:
         return None
+    try:
+        if isinstance(value, datetime):
+            return value
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _format_memory_game_time(value: Any) -> str:
+    """Format stored game-time timestamps for prompt context."""
+    dt = _parse_memory_datetime(value)
+    if not dt:
+        return ""
+    label = f"{dt.strftime('%b')} {dt.day}, {dt.year}"
+    if dt.hour or dt.minute:
+        label += f" {dt.hour:02d}:{dt.minute:02d}"
+    return label
+
+
+def _format_time_ago(event_time: Any, reference_time: Any) -> str:
+    event_dt = _parse_memory_datetime(event_time)
+    reference_dt = _parse_memory_datetime(reference_time)
+    if not event_dt or not reference_dt:
+        return ""
+
+    delta_seconds = int((reference_dt - event_dt).total_seconds())
+    if delta_seconds < 0:
+        delta_seconds = abs(delta_seconds)
+        suffix = "from now"
+    else:
+        suffix = "ago"
+
+    if delta_seconds < 60:
+        return "moments ago" if suffix == "ago" else "in moments"
+    minutes = delta_seconds // 60
+    if minutes < 60:
+        unit = "minute" if minutes == 1 else "minutes"
+        return f"{minutes} {unit} {suffix}"
+    hours = minutes // 60
+    if hours < 24:
+        unit = "hour" if hours == 1 else "hours"
+        return f"{hours} {unit} {suffix}"
+    days = hours // 24
+    if days < 14:
+        unit = "day" if days == 1 else "days"
+        return f"{days} {unit} {suffix}"
+    weeks = days // 7
+    if weeks < 8:
+        unit = "week" if weeks == 1 else "weeks"
+        return f"{weeks} {unit} {suffix}"
+    months = max(1, days // 30)
+    if months < 18:
+        unit = "month" if months == 1 else "months"
+        return f"{months} {unit} {suffix}"
+    years = max(1, days // 365)
+    unit = "year" if years == 1 else "years"
+    return f"{years} {unit} {suffix}"
+
+
+def _format_memory_fact_line(fact: str, valid_at: Any = None, chapter: str = "", reference_time: Any = None) -> str:
+    parts = []
+    time_label = _format_time_ago(valid_at, reference_time) if reference_time else _format_memory_game_time(valid_at)
+    if time_label:
+        parts.append(f"happened {time_label}")
+    if chapter:
+        parts.append(f"chapter: {chapter}")
+    prefix = f"[{'; '.join(parts)}] " if parts else ""
+    return f"{prefix}{fact}"
 
 
 def format_graph_for_context(edges: List[Dict], npc_name: str = "You") -> str:
@@ -2608,7 +2640,10 @@ def format_graph_for_context(edges: List[Dict], npc_name: str = "You") -> str:
     for edge in edges:
         source = edge.get('source', 'Unknown')
         target = edge.get('target', 'Unknown')
-        fact = edge.get('fact', '')
+        fact = _format_memory_fact_line(
+            edge.get('fact', ''),
+            valid_at=edge.get('valid_at'),
+        )
         chapters = edge.get('chapters', [])
 
         source_lower = source.lower()
@@ -2689,6 +2724,8 @@ def compile_memory_prose(npc_id: str, npc_name: str) -> Optional[str]:
 
     if not memory_settings.get('enabled', True):
         return None
+    if not is_npc_long_term_memory_enabled(npc_id, settings=settings):
+        return None
 
     # Check cache first
     chapter_mgr = ChapterManager()
@@ -2697,8 +2734,8 @@ def compile_memory_prose(npc_id: str, npc_name: str) -> Optional[str]:
         return cached
 
     # Get graph data
-    graphiti_mgr = GraphitiManager()
-    graph_data = graphiti_mgr.get_graph_data(npc_id)
+    memory_mgr = MemoryManager()
+    graph_data = memory_mgr.get_graph_data(npc_id)
 
     if not graph_data.get('edges'):
         return None  # No memories yet
@@ -2732,7 +2769,7 @@ Convert these facts into a flowing, natural prose summary written in second pers
 
 Write your summary now:"""
 
-    model = memory_settings.get('prose_model', 'gemini-2.5-flash-lite')
+    model = _get_memory_llm_model(memory_settings, 'prose_model')
 
     try:
         result = llm.chat(
@@ -2774,7 +2811,7 @@ def get_npc_memory(npc_id: str, npc_name: str = None) -> Optional[str]:
     if not settings.get('memory', {}).get('enabled', True):
         return None
 
-    if not _graphiti_available:
+    if not _cognis_available:
         return None
 
     # Use npc_id as name if not provided
@@ -2808,7 +2845,7 @@ Player: {player_name}
 Speaking to: {npc_name}
 Message: "{player_message}"
 
-Extract key entities/topics for searching the NPC's knowledge graph (2-6 words).
+Extract key entities/topics for searching the NPC's memory facts (2-6 words).
 - EXCLUDE the NPC's name ({npc_name}) - we're already searching their graph
 - Replace "I/me/my/we/us/our" with player name ({player_name}) if relevant
 - Extract other names, places, events, objects mentioned
@@ -2829,9 +2866,9 @@ Examples:
 - "I met someone strange at Hogsmeade" → Hogsmeade {player_name}
 - "do you know my friend Sebastian?" → Sebastian {player_name}
 - "what did Poppy say about the beasts?" → Poppy beasts
-- "have you spoken to Professor Fig lately?" → Professor Fig
+- "have you spoken to Professor Elm lately?" → Professor Elm
 - "did Sebastian mention the scriptorium?" → Sebastian scriptorium
-- "what do you think of Ominis?" → Ominis
+- "what do you think of Rowan?" → Rowan
 - "what happened at the tavern?" → tavern
 - "hey how are you?" → NONE
 - "thanks for your help" → NONE
@@ -2841,14 +2878,14 @@ Examples:
 
     settings = load_settings()
     # Use reranker model (small/fast) for intent extraction
-    model = settings.get('memory', {}).get('reranker_model', 'meta-llama/llama-3.1-8b-instruct')
+    model = _get_memory_llm_model(settings.get('memory', {}), 'reranker_model', 'gpt-4.1-nano')
 
     try:
         _profiler.mark("search_intent start")
         result = llm.chat(
             messages=[{"role": "user", "content": prompt}],
             model=model,
-            temperature=0,
+            temperature=0.2,
             max_tokens=4096,
             context="search_intent"
         )
@@ -2878,16 +2915,17 @@ Examples:
 
 def search_relevant_facts(npc_id: str, query: str, npc_name: str = None,
                           player_name: str = None, center_node_name: str = None,
-                          max_results: int = 50) -> Optional[List[str]]:
+                          max_results: int = 50,
+                          current_game_date: str = "",
+                          current_game_time: str = "") -> Optional[List[str]]:
     """
     Search for facts relevant to a query, centered on a specific node.
 
     Uses a small LLM to extract search intent from conversational messages,
-    then Graphiti's hybrid search with node distance reranking to find facts
-    that are both semantically relevant AND close to the center node.
+    then Cognis semantic/BM25 search to find relevant facts.
 
     Args:
-        npc_id: NPC's group_id in the graph
+        npc_id: NPC's memory owner id
         query: The player's message (will be processed to extract search query)
         npc_name: NPC's display name (for query extraction context)
         player_name: Player's character name (for resolving "we", "I", etc.)
@@ -2895,13 +2933,15 @@ def search_relevant_facts(npc_id: str, query: str, npc_name: str = None,
         max_results: Maximum unique facts to return (after deduplication)
 
     Returns:
-        List of unique fact strings, or None if search fails/no graph data
+        List of unique fact strings, or None if search fails/no memory data
     """
     settings = load_settings()
     if not settings.get('memory', {}).get('enabled', True):
         return None
+    if not is_npc_long_term_memory_enabled(npc_id, settings=settings):
+        return None
 
-    if not _graphiti_available:
+    if not _cognis_available:
         return None
 
     # Extract clean search query from conversational message
@@ -2910,20 +2950,23 @@ def search_relevant_facts(npc_id: str, query: str, npc_name: str = None,
         print(f"[Memory] No search needed for: '{query[:50]}...'")
         return None
 
-    graphiti_mgr = GraphitiManager()
-    if not graphiti_mgr.init_graphiti():
+    memory_mgr = MemoryManager()
+    print(f"[Memory] Search init for '{search_query}'...")
+    if not memory_mgr.init_graphiti():
         return None
 
-    # Default center node to NPC's name (for third-person facts) or "You" (for old data)
+    # Keep center-node arguments for legacy callers; Cognis ignores them.
     if not center_node_name:
         center_node_name = npc_name if npc_name else "You"
 
-    # Get center node UUID (optional - search works without it, just less targeted)
-    center_uuid = graphiti_mgr.get_node_uuid(npc_id, center_node_name)
+    # Get center node UUID for legacy compatibility.
+    print(f"[Memory] Search get_node_uuid for {center_node_name}...")
+    center_uuid = memory_mgr.get_node_uuid(npc_id, center_node_name)
+    print(f"[Memory] Search get_node_uuid done: {center_uuid}")
 
     # Search for more than we need to account for filtering and duplicates
     _profiler.mark("graph_lookup start")
-    facts = graphiti_mgr.search_facts(
+    facts = memory_mgr.search_facts(
         npc_id=npc_id,
         query=search_query,
         center_node_uuid=center_uuid,
@@ -2933,6 +2976,10 @@ def search_relevant_facts(npc_id: str, query: str, npc_name: str = None,
 
     if not facts:
         return None
+
+    reference_time = None
+    if current_game_date and "/" in current_game_date and len(current_game_date.split("/", 1)[0]) == 4:
+        reference_time = game_time_to_datetime(current_game_date, current_game_time)
 
     # Normalize text for matching: strip possessives, contractions, lowercase
     import re
@@ -2968,17 +3015,25 @@ def search_relevant_facts(npc_id: str, query: str, npc_name: str = None,
 
     for fact_item in facts:
         # Handle both dict format (from search_facts) and string format
-        fact_str = fact_item.get('fact', '') if isinstance(fact_item, dict) else str(fact_item)
+        raw_fact_str = fact_item.get('fact', '') if isinstance(fact_item, dict) else str(fact_item)
+        fact_str = raw_fact_str
+        if isinstance(fact_item, dict):
+            fact_str = _format_memory_fact_line(
+                raw_fact_str,
+                valid_at=fact_item.get('valid_at'),
+                chapter=fact_item.get('chapter') or "",
+                reference_time=reference_time,
+            )
         if not fact_str:
             continue
 
-        fact_lower = fact_str.lower().strip()
+        fact_lower = raw_fact_str.lower().strip()
         if fact_lower in seen:
             continue
         seen.add(fact_lower)
 
         # Normalize fact for keyword matching
-        fact_normalized = normalize_for_match(fact_str)
+        fact_normalized = normalize_for_match(raw_fact_str)
 
         # Check if any query keyword appears in the normalized fact
         has_keyword = any(kw in fact_normalized for kw in query_words)
@@ -3022,11 +3077,11 @@ def evaluate_chapter_boundary(npc_id: str, npc_name: str, dialogue_history: List
     if not settings.get('memory', {}).get('enabled', True):
         return False
 
-    if not _graphiti_available:
+    if not _cognis_available:
         return False
 
     chapter_mgr = ChapterManager()
-    graphiti_mgr = GraphitiManager()
+    memory_mgr = MemoryManager()
 
     # Detect chapter boundary
     result = detect_chapter_boundary(npc_id, npc_name, dialogue_history, current_location, characters_in_earshot)
@@ -3073,9 +3128,15 @@ def evaluate_chapter_boundary(npc_id: str, npc_name: str, dialogue_history: List
                 dialogue_entries=chapter_entries,
                 player_name=player_name
             )
+            save_generated_episode_audit(npc_id, open_chapter['title'], episode_content, {
+                "summary": open_chapter.get('summary', 'No summary'),
+                "key_events": open_chapter.get('key_events', []),
+                "location": open_chapter.get('location', 'Unknown'),
+                "entries": chapter_entries,
+            })
 
-            # Add episode to Graphiti
-            graphiti_mgr.add_episode(
+            # Add episode to long-term memory.
+            memory_mgr.add_episode(
                 npc_id=npc_id,
                 chapter_title=open_chapter['title'],
                 content=episode_content,
@@ -3128,7 +3189,7 @@ def evaluate_chapter_boundary(npc_id: str, npc_name: str, dialogue_history: List
             continue
 
         if chapter_status == 'closed' and start_ts and end_ts:
-            # This is a fully closed chapter - add directly to Graphiti
+            # This is a fully closed chapter - add directly to long-term memory.
             chapter_entries = [e for e in dialogue_history
                               if start_ts <= e.get('timestamp', 0) <= end_ts]
 
@@ -3149,8 +3210,14 @@ def evaluate_chapter_boundary(npc_id: str, npc_name: str, dialogue_history: List
                 dialogue_entries=chapter_entries,
                 player_name=player_name
             )
+            save_generated_episode_audit(npc_id, chapter_title, episode_content, {
+                "summary": chapter_summary,
+                "key_events": chapter_events,
+                "location": current_location,
+                "entries": chapter_entries,
+            })
 
-            graphiti_mgr.add_episode(
+            memory_mgr.add_episode(
                 npc_id=npc_id,
                 chapter_title=chapter_title,
                 content=episode_content,
@@ -3282,7 +3349,8 @@ def call_llm_with_retry(prompt: str, model: str, max_retries: int = 3,
 # =============================================================================
 
 def migrate_npc_history(npc_id: str, npc_name: str, full_history: List[Dict],
-                        batch_size: int = 50, progress_callback=None) -> Dict[str, Any]:
+                        batch_size: int = 50, progress_callback=None,
+                        force_rebuild: bool = False) -> Dict[str, Any]:
     """
     Migrate existing dialogue history into chapters/episodes for an NPC.
     Processes history in batches to handle large histories (1000+ entries).
@@ -3302,17 +3370,18 @@ def migrate_npc_history(npc_id: str, npc_name: str, full_history: List[Dict],
     settings = load_settings()
     if not settings.get('memory', {}).get('enabled', True):
         return {"error": "Memory system not enabled"}
+    if not is_npc_long_term_memory_enabled(npc_id, settings=settings):
+        return {"error": f"Long-term memory is disabled for {npc_name or npc_id}"}
 
-    if not _graphiti_available:
-        return {"error": "Graphiti not available"}
+    if not _cognis_available:
+        return {"error": "Cognis memory backend not available"}
 
-    # Filter to what this NPC witnessed, excluding insignificant NPCs
-    from .text_utils import is_significant_npc
-    npc_history = [e for e in full_history if
-                   (e.get('voiceName') == npc_id or
-                    npc_id in e.get('earshot', []))
-                   and (e.get('isPlayer') or e.get('isAIResponse')
-                        or is_significant_npc(e.get('voiceName', '')))]
+    # Filter to entries that should actually contribute to this NPC's chapters.
+    include_cutscene = settings.get('memory', {}).get('include_cutscene', True)
+    npc_history = [
+        e for e in full_history
+        if should_include_entry_for_npc_chaptering(npc_id, e, include_cutscene=include_cutscene)
+    ]
 
     if not npc_history:
         return {"error": f"No history found for {npc_id}", "entries_processed": 0}
@@ -3327,24 +3396,22 @@ def migrate_npc_history(npc_id: str, npc_name: str, full_history: List[Dict],
         progress_callback(0, total_entries, f"Starting migration for {npc_name}")
 
     chapter_mgr = ChapterManager()
-    graphiti_mgr = GraphitiManager()
+    memory_mgr = MemoryManager()
 
-    # Check if NPC already has chapters (already migrated)
-    existing_chapters = chapter_mgr.get_all_chapters(npc_id)
-    if existing_chapters.get('closed_chapters') or existing_chapters.get('open_chapter'):
-        print(f"[Migration] {npc_name} already has chapters - skipping migration")
+    # Initialize memory backend.
+    if not memory_mgr.init_graphiti():
+        return {"error": "Failed to initialize memory backend"}
+
+    if has_npc_memory_facts(npc_id) and not force_rebuild:
+        print(f"[Migration] {npc_name} already has Cognis facts - skipping migration")
         return {
             "skipped": True,
-            "reason": "Already migrated",
+            "reason": "Already migrated to Cognis",
             "chapters_created": 0,
             "episodes_added": 0,
             "entries_processed": 0,
             "errors": []
         }
-
-    # Initialize Graphiti
-    if not graphiti_mgr.init_graphiti():
-        return {"error": "Failed to initialize Graphiti/Kuzu"}
 
     results = {
         "chapters_created": 0,
@@ -3353,14 +3420,25 @@ def migrate_npc_history(npc_id: str, npc_name: str, full_history: List[Dict],
         "errors": []
     }
 
-    # Get all unique characters mentioned in history
-    all_characters = set()
-    for entry in npc_history:
-        if entry.get('speaker') and not entry.get('isPlayer'):
-            all_characters.add(entry.get('speaker'))
-        for char in entry.get('earshot', []):
-            all_characters.add(char)
-    characters_list = list(all_characters)
+    # Old Graphiti chapters are not proof of Cognis migration. Clear per-NPC
+    # derived state before rebuilding so chapter files and queue rows do not
+    # make duplicate or stale memory state.
+    try:
+        memory_mgr.clear_graph(npc_id)
+    except Exception as e:
+        print(f"[Migration] Warning: could not clear existing facts for {npc_id}: {e}")
+    try:
+        chapter_mgr.clear_npc_data(npc_id)
+    except Exception as e:
+        print(f"[Migration] Warning: could not clear old chapter state for {npc_id}: {e}")
+    try:
+        from .memory_queue import reset_npc_state
+        reset_npc_state(npc_id)
+    except Exception as e:
+        print(f"[Migration] Warning: could not reset queue state for {npc_id}: {e}")
+
+    # Keep the auxiliary character list aligned with the same filtered chapter inputs.
+    characters_list = collect_chapter_context_characters(npc_id, npc_history)
 
     # Process in batches with sliding window
     current_pos = 0
@@ -3394,7 +3472,7 @@ def migrate_npc_history(npc_id: str, npc_name: str, full_history: List[Dict],
                 npc_name, npc_id, batch, open_chapter, characters_list
             )
 
-            model = settings.get('memory', {}).get('chapter_model', 'gemini-2.5-flash-lite')
+            model = _get_memory_llm_model(settings.get('memory', {}), 'chapter_model')
 
             if progress_callback:
                 progress_callback(current_pos, total_entries, "Detecting chapter boundaries...")
@@ -3447,13 +3525,20 @@ def migrate_npc_history(npc_id: str, npc_name: str, full_history: List[Dict],
                     dialogue_entries=chapter_entries,
                     player_name=player_name
                 )
+                save_generated_episode_audit(npc_id, open_chapter['title'], episode_content, {
+                    "summary": open_chapter.get('summary', ''),
+                    "key_events": open_chapter.get('key_events', []),
+                    "location": open_chapter.get('location', 'Unknown'),
+                    "entries": chapter_entries,
+                    "migration": True,
+                })
 
-                # Add to Graphiti
+                # Add to long-term memory.
                 if progress_callback:
                     progress_callback(current_pos, total_entries,
                                     f"Indexing to graph: {open_chapter['title'][:30]}...")
 
-                if graphiti_mgr.add_episode(
+                if memory_mgr.add_episode(
                     npc_id=npc_id,
                     chapter_title=open_chapter['title'],
                     content=episode_content,
@@ -3513,12 +3598,19 @@ def migrate_npc_history(npc_id: str, npc_name: str, full_history: List[Dict],
                         dialogue_entries=chapter_entries,
                         player_name=player_name
                     )
+                    save_generated_episode_audit(npc_id, new_chapter['title'], episode_content, {
+                        "summary": new_chapter.get('summary', ''),
+                        "key_events": new_chapter.get('key_events', []),
+                        "location": current_location,
+                        "entries": chapter_entries,
+                        "migration": True,
+                    })
 
                     if progress_callback:
                         progress_callback(current_pos, total_entries,
                                         f"Indexing to graph: {new_chapter['title'][:30]}...")
 
-                    if graphiti_mgr.add_episode(
+                    if memory_mgr.add_episode(
                         npc_id=npc_id,
                         chapter_title=new_chapter['title'],
                         content=episode_content,
@@ -3655,22 +3747,16 @@ def migrate_all_npcs(full_history: List[Dict], progress_callback=None) -> Dict[s
     """
     from .localization import get_display_name
 
-    # Find all unique significant NPCs in history (by voiceName and earshot)
-    from .text_utils import is_significant_npc
-
-    npc_entry_counts = {}
-    for entry in full_history:
-        voice_name = entry.get('voiceName')
-        if voice_name and voice_name.lower() != 'player' and is_significant_npc(voice_name):
-            npc_entry_counts[voice_name] = npc_entry_counts.get(voice_name, 0) + 1
-        for char_id in entry.get('earshot', []):
-            if char_id.lower() != 'player' and is_significant_npc(char_id):
-                npc_entry_counts[char_id] = npc_entry_counts.get(char_id, 0) + 1
+    npc_entry_counts = count_chapter_candidate_entries_by_npc(full_history)
 
     # Filter to NPCs meeting minimum entry threshold (same as migration-status endpoint)
     settings = load_settings()
     min_entries = settings.get('memory', {}).get('chapter_entry_threshold', 30)
-    npc_ids = {npc_id for npc_id, count in npc_entry_counts.items() if count >= min_entries}
+    npc_ids = [
+        npc_id for npc_id, count in npc_entry_counts.items()
+        if count >= min_entries
+    ]
+    npc_ids = filter_memory_enabled_npc_ids(npc_ids, settings=settings)
 
     results = {}
     total_npcs = len(npc_ids)
@@ -3687,20 +3773,46 @@ def migrate_all_npcs(full_history: List[Dict], progress_callback=None) -> Dict[s
 
 
 def is_memory_available() -> bool:
-    """Check if the memory system is available (Graphiti installed)."""
-    return _graphiti_available
+    """Check if the lightweight memory system is available."""
+    return _cognis_available
+
+
+def has_npc_memory_facts(npc_id: str) -> bool:
+    """Return True only when the active Cognis backend has facts for this NPC."""
+    if not _cognis_available:
+        return False
+    settings = load_settings()
+    if not settings.get('memory', {}).get('enabled', False):
+        return False
+    provider = settings.get('llm', {}).get('provider', 'gemini')
+    if provider not in ('openai', 'openrouter'):
+        return False
+    memory_mgr = MemoryManager()
+    graph_data = memory_mgr.get_graph_data(npc_id)
+    return bool(graph_data.get("edges"))
 
 
 def init_memory() -> bool:
     """
-    Initialize the memory system (Graphiti + Kuzu).
+    Initialize the lightweight memory system.
     Call on server startup and after memory settings change.
 
     Returns:
         True if initialization succeeded, False otherwise.
     """
-    if not _graphiti_available:
-        print("[Memory] Graphiti not available - memory system disabled")
+    _sync_memory_data_dir_from_player_context()
+
+    try:
+        from . import player_context
+
+        if not player_context.is_ready():
+            print("[Memory] Player context not ready - deferring memory init until player scope is available")
+            return False
+    except Exception:
+        pass
+
+    if not _cognis_available:
+        print("[Memory] Cognis not available - memory system disabled")
         return False
 
     settings = load_settings()
@@ -3710,10 +3822,18 @@ def init_memory() -> bool:
         print("[Memory] Memory system disabled in settings")
         return False
 
-    graphiti_mgr = GraphitiManager()
-    success = graphiti_mgr.init_graphiti()
+    provider = settings.get('llm', {}).get('provider', 'gemini')
+    if provider not in ('openai', 'openrouter'):
+        print(f"[Memory] Memory system disabled for provider '{provider}' (requires OpenAI or OpenRouter)")
+        return False
+
+    memory_mgr = MemoryManager()
+    success = memory_mgr.init_graphiti()
 
     if success:
+        if not MemoryManager._startup_backup_done:
+            if create_memory_snapshot("startup_validated", timeout=180.0, keep=10):
+                MemoryManager._startup_backup_done = True
         print("[Memory] Memory system initialized successfully")
     else:
         print("[Memory] Memory system initialization failed")
@@ -3721,12 +3841,282 @@ def init_memory() -> bool:
     return success
 
 
-def reset_memory_connection():
+def reset_memory_connection() -> bool:
     """
-    Reset the Graphiti connection. Call when memory settings change.
+    Reset the memory connection. Call when memory settings change.
     Next init_memory() or graph operation will reconnect with new settings.
     """
-    graphiti_mgr = GraphitiManager()
-    graphiti_mgr._graphiti = None
-    graphiti_mgr._loop = None
-    print("[Memory] Memory connection reset - will reconnect on next use")
+    memory_mgr = MemoryManager()
+    close_ok = memory_mgr.close_graphiti(timeout=30.0)
+    success = close_ok
+    MemoryManager._indices_built = False
+    MemoryManager._startup_backup_done = False
+
+    if success:
+        print("[Memory] Memory connection reset - will reconnect on next use")
+    else:
+        print(f"[Memory] Memory connection reset incomplete (close_ok={close_ok}, shutdown_ok={shutdown_ok})")
+
+    return success
+
+
+def close_all():
+    """Shut down memory resources and reset all state."""
+    reset_memory_connection()
+
+
+def reinit(data_dir):
+    """Re-initialize memory system at a new data directory."""
+    global _memory_data_dir
+    _memory_data_dir = data_dir
+    init_memory()
+
+
+def _copy_tree_if_exists(src: str, dst: str) -> bool:
+    """Copy a directory if it exists."""
+    if not os.path.isdir(src):
+        return False
+    shutil.copytree(src, dst)
+    return True
+
+
+def _export_memory_queue_snapshot(dest_db_path: str) -> bool:
+    """Create a consistent SQLite backup of the memory queue database."""
+    from .memory_queue import QUEUE_DB_PATH
+
+    if not os.path.exists(QUEUE_DB_PATH):
+        return False
+
+    os.makedirs(os.path.dirname(dest_db_path), exist_ok=True)
+    src_conn = sqlite3.connect(QUEUE_DB_PATH, timeout=30.0, check_same_thread=False)
+    dest_conn = sqlite3.connect(dest_db_path, timeout=30.0, check_same_thread=False)
+    try:
+        src_conn.backup(dest_conn)
+        dest_conn.commit()
+        return True
+    finally:
+        try:
+            dest_conn.close()
+        except Exception:
+            pass
+        try:
+            src_conn.close()
+        except Exception:
+            pass
+
+
+def create_memory_snapshot(reason: str, timeout: float = 180.0, keep: int = 10) -> Optional[str]:
+    """Create a restorable memory snapshot including Cognis data, queue DB, and chapter state."""
+    backup_root = _get_memory_backup_root()
+    snapshot_dir = _make_unique_backup_dir(backup_root, reason)
+    includes = {
+        "cognis": False,
+        "memory_queue_db": False,
+        "chapters": False,
+        "chapter_content": False,
+        "npc_bios": False,
+    }
+
+    try:
+        os.makedirs(snapshot_dir, exist_ok=True)
+
+        cognis_dir = os.path.join(_sync_memory_data_dir_from_player_context(), "cognis")
+        includes["cognis"] = _copy_tree_if_exists(
+            cognis_dir,
+            _get_memory_snapshot_cognis_dir(snapshot_dir),
+        )
+
+        chapters_dir = os.path.join(_memory_data_dir, "chapters")
+        includes["chapters"] = _copy_tree_if_exists(chapters_dir, os.path.join(snapshot_dir, "chapters"))
+        includes["chapter_content"] = _copy_tree_if_exists(
+            _get_chapter_content_dir_path(),
+            os.path.join(snapshot_dir, "chapter_content"),
+        )
+        includes["npc_bios"] = _copy_tree_if_exists(
+            os.path.join(_memory_data_dir, "npc_bios"),
+            os.path.join(snapshot_dir, "npc_bios"),
+        )
+        includes["memory_queue_db"] = _export_memory_queue_snapshot(
+            _get_memory_snapshot_queue_db_path(snapshot_dir)
+        )
+
+        manifest = {
+            "backup_type": "cognis_memory_snapshot",
+            "version": 2,
+            "created_at": int(time.time()),
+            "reason": reason,
+            "includes": includes,
+        }
+        with open(_get_memory_snapshot_manifest_path(snapshot_dir), "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+
+        _prune_old_graph_backups(backup_root, keep=keep)
+        print(f"[Memory] Created memory snapshot: {snapshot_dir}")
+        return snapshot_dir
+    except Exception as e:
+        if os.path.isdir(snapshot_dir):
+            try:
+                shutil.rmtree(snapshot_dir)
+            except Exception:
+                pass
+        print(f"[Memory] Failed to create memory snapshot '{reason}': {e}")
+        return None
+
+
+
+def _move_existing_path(src: str, dst: str) -> None:
+    """Move an existing file or directory into rollback storage."""
+    if not os.path.exists(src):
+        return
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.move(src, dst)
+
+
+def _remove_path_if_exists(path: str) -> None:
+    """Delete a file or directory if it exists."""
+    if not os.path.exists(path):
+        return
+    if os.path.isdir(path):
+        shutil.rmtree(path)
+    else:
+        os.remove(path)
+
+
+def restore_memory_backup(backup_id: str) -> Dict[str, Any]:
+    """Restore a Cognis memory snapshot."""
+    backup_path = _resolve_memory_backup_path(backup_id)
+    if not backup_path:
+        return {"success": False, "error": "Backup not found or invalid"}
+
+    latest_rel_id = _relative_graph_backup_id(backup_path)
+    manifest = _load_backup_manifest(backup_path)
+    backup_type = manifest.get("backup_type") or "legacy_graph_export"
+    includes = manifest.get("includes", {})
+
+    if backup_type == "legacy_graph_export":
+        return {
+            "success": False,
+            "error": "Legacy Kuzu/Graphiti exports cannot be restored into the Cognis memory backend. Re-index from chapters instead.",
+        }
+
+    if backup_type == "memory_snapshot" and not includes.get("cognis"):
+        return {
+            "success": False,
+            "error": "This pre-Cognis memory snapshot does not contain Cognis data. Re-index from chapters instead.",
+        }
+
+    if backup_type not in ("cognis_memory_snapshot", "memory_snapshot"):
+        return {"success": False, "error": f"Unsupported backup type: {backup_type}"}
+
+    create_memory_snapshot("before_manual_restore", timeout=180.0, keep=10)
+
+    from .memory_queue import graceful_shutdown, close_all_connections, reset_connection_state
+
+    if not graceful_shutdown(max_wait=30.0):
+        return {"success": False, "error": "Memory shutdown did not complete cleanly"}
+
+    close_all_connections()
+    reset_connection_state()
+    reset_memory_connection()
+
+    temp_root = tempfile.mkdtemp(prefix="memory_restore_", dir=_memory_data_dir)
+    rollback_root = os.path.join(temp_root, "rollback")
+    staged_root = os.path.join(temp_root, "staged")
+    os.makedirs(rollback_root, exist_ok=True)
+    os.makedirs(staged_root, exist_ok=True)
+
+    stage_queue_path = os.path.join(staged_root, "memory_queue.db")
+    staged_dirs: Dict[str, str] = {}
+
+    try:
+        for dir_name in ("cognis", "chapters", "chapter_content", "npc_bios"):
+            src_dir = os.path.join(backup_path, dir_name)
+            if os.path.isdir(src_dir):
+                staged_dir = os.path.join(staged_root, dir_name)
+                shutil.copytree(src_dir, staged_dir)
+                staged_dirs[dir_name] = staged_dir
+
+        queue_snapshot_path = _get_memory_snapshot_queue_db_path(backup_path)
+        if includes.get("memory_queue_db") and os.path.exists(queue_snapshot_path):
+            shutil.copy2(queue_snapshot_path, stage_queue_path)
+            conn = sqlite3.connect(stage_queue_path, timeout=30.0, check_same_thread=False)
+            try:
+                conn.execute("SELECT 1")
+            finally:
+                conn.close()
+
+        from .memory_queue import QUEUE_DB_PATH
+
+        restore_targets = {
+            "cognis": os.path.join(_memory_data_dir, "cognis"),
+            "memory_queue.db": QUEUE_DB_PATH,
+            "memory_queue.db-wal": QUEUE_DB_PATH + "-wal",
+            "memory_queue.db-shm": QUEUE_DB_PATH + "-shm",
+            "chapters": os.path.join(_memory_data_dir, "chapters"),
+            "chapter_content": _get_chapter_content_dir_path(),
+            "npc_bios": os.path.join(_memory_data_dir, "npc_bios"),
+        }
+
+        for name, final_path in restore_targets.items():
+            _move_existing_path(final_path, os.path.join(rollback_root, name))
+
+        for dir_name in ("cognis", "chapters", "chapter_content", "npc_bios"):
+            final_dir = restore_targets[dir_name]
+            if dir_name in staged_dirs:
+                shutil.move(staged_dirs[dir_name], final_dir)
+            else:
+                _remove_path_if_exists(final_dir)
+
+        if os.path.exists(stage_queue_path):
+            shutil.move(stage_queue_path, QUEUE_DB_PATH)
+        else:
+            _remove_path_if_exists(QUEUE_DB_PATH)
+        _remove_path_if_exists(QUEUE_DB_PATH + "-wal")
+        _remove_path_if_exists(QUEUE_DB_PATH + "-shm")
+
+        shutil.rmtree(rollback_root, ignore_errors=True)
+        shutil.rmtree(temp_root, ignore_errors=True)
+    except Exception as e:
+        for name in ("cognis", "memory_queue.db", "memory_queue.db-wal", "memory_queue.db-shm", "chapters", "chapter_content", "npc_bios"):
+            _remove_path_if_exists(os.path.join(_memory_data_dir, name))
+
+        if os.path.isdir(rollback_root):
+            for name in os.listdir(rollback_root):
+                shutil.move(os.path.join(rollback_root, name), os.path.join(_memory_data_dir, name))
+
+        shutil.rmtree(temp_root, ignore_errors=True)
+        return {"success": False, "error": f"Restore failed: {e}"}
+
+    init_ok = init_memory()
+    if not init_ok:
+        print("[Memory] Restored memory snapshot; memory backend did not initialize under current settings")
+
+    try:
+        from .memory_queue import ensure_worker_running
+        ensure_worker_running()
+    except Exception as e:
+        print(f"[Memory] Warning: restored memory, but failed to restart memory queue worker: {e}")
+
+    return {
+        "success": True,
+        "backup_id": latest_rel_id,
+        "path": backup_path,
+        "backup_type": backup_type,
+        "memory_initialized": bool(init_ok),
+    }
+
+def list_graph_backups() -> List[Dict[str, Any]]:
+    """Backward-compatible alias for memory snapshot listing."""
+    return list_memory_backups()
+
+
+def restore_graph_backup(backup_id: str) -> Dict[str, Any]:
+    """Backward-compatible alias for memory snapshot restore."""
+    return restore_memory_backup(backup_id)
+
+
+try:
+    from . import player_context
+    player_context.register("memory", close_all, reinit)
+except ImportError:
+    pass

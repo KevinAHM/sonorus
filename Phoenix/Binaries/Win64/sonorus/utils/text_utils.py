@@ -4,7 +4,12 @@ Handles text splitting, name sanitization, and NPC filtering.
 """
 
 import re
-from constants import CONVERSATION_EARSHOT_DISTANCE, STEALTH_EARSHOT_DISTANCE, BROOM_EARSHOT_DISTANCE
+from constants import (
+    CONVERSATION_EARSHOT_DISTANCE,
+    STEALTH_EARSHOT_DISTANCE,
+    FOLLOWING_COMPANION_EARSHOT_DISTANCE,
+    BROOM_EARSHOT_DISTANCE,
+)
 from services.tts.voice_utils import has_voice_reference, get_game_language
 
 
@@ -324,7 +329,8 @@ def get_significant_npc_names() -> tuple:
 
 
 def filter_npcs_by_earshot(nearby_npcs, max_distance=None, player_in_stealth=False,
-                           player_on_broom=False, companion_on_broom=False, companion_id=None):
+                           player_on_broom=False, companion_on_broom=False,
+                           companion_id=None, companion_following=False):
     """
     Filter nearby NPCs to only those within earshot distance for conversations.
 
@@ -334,7 +340,8 @@ def filter_npcs_by_earshot(nearby_npcs, max_distance=None, player_in_stealth=Fal
         player_in_stealth: If True, uses reduced stealth distance (Disillusionment active)
         player_on_broom: If True, player is currently flying on a broom
         companion_on_broom: If True, companion is currently flying on a broom
-        companion_id: Companion's NPC ID (e.g., "SebastianSallow") for broom range extension
+        companion_id: Companion's NPC ID (e.g., "SebastianSallow") for companion range extension
+        companion_following: If True, the companion is actively following and gets walking grace range
 
     Returns:
         Filtered list of NPCs within earshot
@@ -345,21 +352,27 @@ def filter_npcs_by_earshot(nearby_npcs, max_distance=None, player_in_stealth=Fal
         else:
             max_distance = CONVERSATION_EARSHOT_DISTANCE
 
-    # When both player and companion are on brooms, use extended range for companion
-    # This allows mid-flight conversations since companion flies alongside at varying distances
+    # Companion gets special range handling:
+    # - much larger when flying together on brooms
+    # - moderately larger while actively following on foot so trailing pathing doesn't abort dialogue
     broom_extended_range = player_on_broom and companion_on_broom and companion_id
+    walking_extended_range = companion_following and companion_id
 
     filtered = []
     for npc in nearby_npcs:
         distance = npc.get('distance', float('inf'))
         npc_name = npc.get('name', '').lower().replace(' ', '')
 
-        # Check if this is the companion (when both flying together)
-        if broom_extended_range and companion_id:
+        # Check if this is the companion (special handling for broom/walking follow range)
+        if companion_id and (broom_extended_range or walking_extended_range):
             companion_id_normalized = companion_id.lower().replace(' ', '')
-            # Use extended broom range for companion
             if companion_id_normalized in npc_name or npc_name in companion_id_normalized:
-                if distance <= BROOM_EARSHOT_DISTANCE:
+                allowed_distance = (
+                    BROOM_EARSHOT_DISTANCE
+                    if broom_extended_range
+                    else FOLLOWING_COMPANION_EARSHOT_DISTANCE
+                )
+                if distance <= allowed_distance:
                     filtered.append(npc)
                 continue
 
@@ -675,6 +688,12 @@ _TAG_CANONICAL = {
         "groan": "groans", "groaning": "groans",
         "pause": "pauses", "pausing": "pauses",
         "clearing throat": "clears throat", "clear_throat": "clears throat",
+    },
+    "omnivoice": {
+        # OmniVoice only supports [laughter] — all laugh variants map to it,
+        # everything else gets stripped by omnivoice_text.preprocess_text
+        "laugh": "laughter", "laughs": "laughter", "laughing": "laughter",
+        "chuckle": "laughter", "chuckles": "laughter", "chuckling": "laughter",
     },
 }
 

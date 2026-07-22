@@ -1,5 +1,5 @@
 """
-LLM utility for multiple providers (Gemini, OpenRouter, OpenAI).
+LLM utility for multiple providers (Gemini, OpenRouter, OpenAI, Ollama, llama.cpp).
 Single module for all LLM operations - text and vision.
 """
 import base64
@@ -8,6 +8,8 @@ import os
 import re
 import threading
 import time
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
@@ -62,7 +64,7 @@ def _parse_llm_error(error: Exception) -> str:
     Works for Gemini, OpenRouter, and OpenAI errors.
 
     Known error patterns:
-    - 429 RESOURCE_EXHAUSTED (free quota) -> "free quota exhausted"
+    - 429 RESOURCE_EXHAUSTED (free-tier rate limit) -> "free tier rate limit exceeded"
     - 503 UNAVAILABLE (overloaded) -> "model overloaded"
     - 400 INVALID_ARGUMENT (bad API key) -> "api key not valid"
     - 401 (auth) -> "api key not valid"
@@ -70,12 +72,20 @@ def _parse_llm_error(error: Exception) -> str:
     - Otherwise: extract the 'message' field or return as-is
     """
     error_str = str(error)
+    lower_error = error_str.lower()
 
     # Check for known error codes/patterns
     if '429' in error_str:
         if 'RESOURCE_EXHAUSTED' in error_str:
-            if 'free_tier' in error_str.lower() or 'quota' in error_str.lower():
-                return "daily free quota exhausted"
+            if (
+                'generaterequestsperminute' in lower_error
+                or 'generate_content_free_tier_requests' in lower_error
+                or 'retrydelay' in lower_error
+                or 'please retry in' in lower_error
+            ):
+                return "Gemini free tier rate limit exceeded - wait a moment or switch to OpenRouter and deposit $5 for more use"
+            if 'free_tier' in lower_error or 'quota' in lower_error:
+                return "Gemini free tier quota exhausted - switch to OpenRouter and deposit $5 for more use"
         return "rate limit exceeded"
 
     if '503' in error_str and 'UNAVAILABLE' in error_str:
@@ -138,7 +148,7 @@ _parse_gemini_error = _parse_llm_error
 MIN_REASONING_TOKENS = 8192
 
 # Module state
-from utils.settings import DATA_DIR
+from utils.settings import DATA_DIR, GEMINI_CHAT_DEFAULT, GEMINI_CHAT_DEFAULT_OR
 SETTINGS_FILE = Path(DATA_DIR) / "settings.json"
 
 
@@ -155,6 +165,8 @@ def load_settings():
 
 # Shared model capabilities cache (from OpenRouter API, used by all providers)
 _model_capabilities = {}  # model_id -> {supports_reasoning: bool, full_data: dict}
+_openrouter_model_ids = []  # Full OpenRouter model IDs for frontend autocomplete
+_openrouter_embedding_model_ids = []  # OpenRouter embedding model IDs for frontend autocomplete
 
 # --- Client connection pooling ---
 _client_lock = threading.Lock()
@@ -163,6 +175,12 @@ _cached_client_key = None       # (provider, api_key, base_url) for debug loggin
 _last_request_time = 0.0        # For idle detection
 _keepalive_timer = None         # threading.Timer ref
 _KEEPALIVE_INTERVAL = 45        # Seconds between keep-alive pings
+_llamacpp_slot_condition = threading.Condition()
+_llamacpp_slot_token = None
+_llamacpp_slot_context = None
+_llamacpp_slot_acquired_at = None
+_llamacpp_slot_cache = None
+_llamacpp_slot_cache_key = None
 
 
 def _get_client():
@@ -219,6 +237,7 @@ def _keepalive_tick():
 
     with _client_lock:
         client = _cached_client
+        provider = _cached_client_key
         if client is None:
             return
 
@@ -226,8 +245,9 @@ def _keepalive_tick():
     idle = time.time() - _last_request_time
     if idle >= _KEEPALIVE_INTERVAL:
         try:
-            # GET /key with auth — exercises TCP pool + auth/credit validation
-            client._client.get(str(client.base_url).rstrip('/') + '/key')
+            # GET /models is supported by llama.cpp; /key exercises auth on OpenRouter/OpenAI.
+            endpoint = '/models' if provider == 'llamacpp' else '/key'
+            client._client.get(str(client.base_url).rstrip('/') + endpoint)
         except Exception:
             pass  # httpx will reconnect on next real request
 
@@ -239,11 +259,13 @@ def _keepalive_tick():
 
 def invalidate_client():
     """Invalidate the cached client. Call when LLM settings change."""
-    global _cached_client, _cached_client_key
+    global _cached_client, _cached_client_key, _llamacpp_slot_cache, _llamacpp_slot_cache_key
     with _client_lock:
         old_client = _cached_client
         _cached_client = None
         _cached_client_key = None
+        _llamacpp_slot_cache = None
+        _llamacpp_slot_cache_key = None
         _stop_keepalive_unlocked()
 
     if old_client is not None:
@@ -261,14 +283,15 @@ def prewarm_client():
     """
     settings = load_settings()
     provider = settings.get('llm', {}).get('provider', 'gemini')
-    if provider == 'gemini':
-        return  # Gemini uses its own client library
+    if provider in ('gemini', 'ollama'):
+        return  # Native SDK/API paths do not use the shared OpenAI client
 
     def _warm():
         try:
             client = _get_client()
             if client:
-                client._client.get(str(client.base_url).rstrip('/') + '/key')
+                endpoint = '/models' if _cached_client_key == 'llamacpp' else '/key'
+                client._client.get(str(client.base_url).rstrip('/') + endpoint)
                 print(f"[LLM] {_cached_client_key} connection pre-warmed")
         except Exception as e:
             print(f"[LLM] Pre-warm ping failed (non-fatal): {e}")
@@ -277,16 +300,50 @@ def prewarm_client():
     t.start()
 
 
+def _fetch_openrouter_embedding_model_ids(requests_module) -> list:
+    """Fetch OpenRouter embedding model IDs from the dedicated embeddings model endpoint."""
+    headers = {}
+    try:
+        settings = load_settings()
+        api_key = settings.get('llm', {}).get('openrouter', {}).get('api_key', '')
+        if api_key:
+            headers['Authorization'] = f'Bearer {api_key}'
+    except Exception:
+        pass
+
+    resp = requests_module.get(
+        "https://openrouter.ai/api/v1/embeddings/models",
+        headers=headers or None,
+        timeout=10,
+    )
+    if not resp.ok:
+        print(f"[LLM] Failed to fetch OpenRouter embedding models: {resp.status_code}")
+        return []
+
+    model_ids = set()
+    for model in resp.json().get('data', []):
+        model_id = model.get('id')
+        if model_id:
+            model_ids.add(model_id)
+
+    # Keep the current default available even if the endpoint omits it transiently.
+    model_ids.add('openai/text-embedding-3-small')
+    return sorted(model_ids)
+
+
 def fetch_model_capabilities():
-    """Fetch OpenRouter model list and extract capabilities for all providers"""
-    global _model_capabilities
+    """Fetch OpenRouter model lists and extract capabilities for frontend selectors."""
+    global _model_capabilities, _openrouter_model_ids, _openrouter_embedding_model_ids
     try:
         import requests
         resp = requests.get("https://openrouter.ai/api/v1/models", timeout=10)
         if resp.ok:
+            _model_capabilities = {}
+            model_ids = set()
             for m in resp.json().get('data', []):
                 full_id = m['id']
                 supported = m.get('supported_parameters', [])
+                model_ids.add(full_id)
 
                 # Strip OpenRouter modifiers (e.g., "model:nitro" -> "model")
                 clean_id = full_id.split(':')[0]
@@ -306,11 +363,20 @@ def fetch_model_capabilities():
                 else:
                     _model_capabilities[base_name] = caps
 
+            _openrouter_model_ids = sorted(model_ids)
             print(f"[LLM] Cached capabilities for {len(_model_capabilities)} models")
         else:
             print(f"[LLM] Failed to fetch model capabilities: {resp.status_code}")
+
+        try:
+            _openrouter_embedding_model_ids = _fetch_openrouter_embedding_model_ids(requests)
+            print(f"[LLM] Cached {len(_openrouter_embedding_model_ids)} OpenRouter embedding models")
+        except Exception as e:
+            print(f"[LLM] Failed to fetch OpenRouter embedding models: {e}")
+            _openrouter_embedding_model_ids = ['openai/text-embedding-3-small']
     except Exception as e:
         print(f"[LLM] Failed to fetch model capabilities: {e}")
+        _openrouter_embedding_model_ids = ['openai/text-embedding-3-small']
 
 
 def supports_reasoning(model_id: str) -> bool:
@@ -344,6 +410,40 @@ def get_model_capabilities_for_frontend() -> dict:
     }
 
 
+def get_openrouter_model_ids_for_frontend() -> list:
+    """Return cached OpenRouter model IDs for frontend autocomplete."""
+    return list(_openrouter_model_ids)
+
+
+def get_openrouter_embedding_model_ids_for_frontend() -> list:
+    """Return cached OpenRouter embedding model IDs for frontend autocomplete."""
+    if _openrouter_embedding_model_ids:
+        return list(_openrouter_embedding_model_ids)
+    return ['openai/text-embedding-3-small']
+
+
+# Models that need explicit provider routing on OpenRouter (strip :nitro and set provider order)
+_OPENROUTER_PROVIDER_OVERRIDES = {
+    'meta-llama/llama-3.1-8b-instruct:nitro': ('meta-llama/llama-3.1-8b-instruct', ['wandb', 'groq', 'deepinfra', 'novita']),
+    'mistralai/mistral-small-3.2-24b-instruct:nitro': (
+        'mistralai/mistral-small-3.2-24b-instruct',
+        {'order': ['Mistral', 'DeepInfra'], 'allow_fallbacks': False}
+    ),
+}
+
+
+def _resolve_openrouter_model(model: str) -> tuple:
+    """Resolve OpenRouter model ID and provider overrides.
+    Returns (request_model, extra_body dict)."""
+    override = _OPENROUTER_PROVIDER_OVERRIDES.get(model)
+    if override:
+        provider_config = override[1]
+        if isinstance(provider_config, list):
+            provider_config = {'order': provider_config}
+        return override[0], {'provider': provider_config}
+    return model, {}
+
+
 def _get_provider():
     """Get the current LLM provider from settings"""
     settings = load_settings()
@@ -373,7 +473,7 @@ def _get_api_key(provider: str) -> str:
         # This avoids accidentally reusing (for example) a Gemini key for OpenRouter.
         has_provider_specific_keys = any(
             llm_settings.get(p, {}).get('api_key', '')
-            for p in ('gemini', 'openrouter', 'openai')
+            for p in ('gemini', 'openrouter', 'openai', 'ollama', 'llamacpp')
         )
         if not has_provider_specific_keys:
             return legacy_key
@@ -382,7 +482,9 @@ def _get_api_key(provider: str) -> str:
     env_vars = {
         'gemini': 'GEMINI_API_KEY',
         'openrouter': 'OPENROUTER_API_KEY',
-        'openai': 'OPENAI_API_KEY'
+        'openai': 'OPENAI_API_KEY',
+        'ollama': 'OLLAMA_API_KEY',
+        'llamacpp': 'LLAMACPP_API_KEY'
     }
     return os.getenv(env_vars.get(provider, ''), '')
 
@@ -402,20 +504,132 @@ def _create_gemini_client():
     return genai.Client(api_key=api_key)
 
 
+def _get_llamacpp_api_url(llm_settings: Dict[str, Any]) -> str:
+    """Return llama.cpp OpenAI-compatible base URL, accepting root or /v1."""
+    api_url = llm_settings.get('llamacpp', {}).get('api_url', '').strip() or "http://127.0.0.1:8080/v1"
+    api_url = api_url.rstrip('/')
+    if not api_url.lower().endswith('/v1'):
+        api_url = f"{api_url}/v1"
+    return api_url
+
+
+def _get_ollama_chat_url(llm_settings: Dict[str, Any]) -> str:
+    """Return Ollama chat endpoint, accepting root, /api, or /api/chat."""
+    api_url = llm_settings.get('ollama', {}).get('api_url', '').strip() or "https://ollama.com/api/chat"
+    api_url = api_url.rstrip('/')
+    lower = api_url.lower()
+    if lower.endswith('/api/chat'):
+        return api_url
+    if lower.endswith('/api'):
+        return f"{api_url}/chat"
+    return f"{api_url}/api/chat"
+
+
+def _get_ollama_headers(api_url: str) -> Optional[Dict[str, str]]:
+    """Build Ollama headers. Cloud requires a bearer token; local endpoints may not."""
+    api_key = _get_api_key('ollama')
+    if not api_key and 'ollama.com' in api_url.lower():
+        print("[LLM] Warning: No Ollama API key configured")
+        return None
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def _get_llamacpp_slot_cache(settings: Dict[str, Any] = None):
+    """Return cached llama.cpp slot-cache helper configured from settings."""
+    global _llamacpp_slot_cache, _llamacpp_slot_cache_key
+    settings = settings or load_settings()
+    llama_settings = settings.get('llm', {}).get('llamacpp', {})
+    api_url = _get_llamacpp_api_url(settings.get('llm', {}))
+    api_key = _get_api_key('llamacpp')
+    cache_key = (
+        api_url,
+        api_key,
+        bool(llama_settings.get('kv_cache_enabled', True)),
+        int(llama_settings.get('kv_cache_max_entries', 10) or 10),
+        llama_settings.get('kv_cache_slot_save_path', '') or '',
+    )
+    if _llamacpp_slot_cache is None or _llamacpp_slot_cache_key != cache_key:
+        from utils.llamacpp_slot_cache import LlamaCppSlotCache
+        _llamacpp_slot_cache = LlamaCppSlotCache(
+            api_url=api_url,
+            api_key=api_key,
+            enabled=llama_settings.get('kv_cache_enabled', True),
+            max_entries=llama_settings.get('kv_cache_max_entries', 10),
+            slot_save_path=llama_settings.get('kv_cache_slot_save_path') or None,
+        )
+        _llamacpp_slot_cache_key = cache_key
+    return _llamacpp_slot_cache
+
+
+def _get_llamacpp_request_extra_body() -> Dict[str, Any]:
+    """Force llama.cpp requests through slot 0 and enable prompt-cache reuse."""
+    return {"id_slot": 0, "cache_prompt": True}
+
+
+@contextmanager
+def _llamacpp_slot_lease(context: str, timeout: float = 15.0, stale_after: float = 180.0):
+    """Serialize llama.cpp slot-0 use without allowing an abandoned stream to wedge Sonorus."""
+    global _llamacpp_slot_token, _llamacpp_slot_context, _llamacpp_slot_acquired_at
+    token = uuid.uuid4().hex
+    deadline = time.monotonic() + timeout
+    acquired = False
+
+    with _llamacpp_slot_condition:
+        while _llamacpp_slot_token is not None:
+            held_for = time.monotonic() - (_llamacpp_slot_acquired_at or time.monotonic())
+            if held_for >= stale_after:
+                print(
+                    f"[LlamaCppSlot] Stealing stale slot lease from {_llamacpp_slot_context} "
+                    f"after {held_for:.1f}s"
+                )
+                break
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Timed out waiting for llama.cpp slot 0 lease held by {_llamacpp_slot_context} "
+                    f"for {held_for:.1f}s"
+                )
+            _llamacpp_slot_condition.wait(timeout=min(remaining, 1.0))
+
+        _llamacpp_slot_token = token
+        _llamacpp_slot_context = context
+        _llamacpp_slot_acquired_at = time.monotonic()
+        acquired = True
+
+    try:
+        yield
+    finally:
+        if acquired:
+            with _llamacpp_slot_condition:
+                if _llamacpp_slot_token == token:
+                    _llamacpp_slot_token = None
+                    _llamacpp_slot_context = None
+                    _llamacpp_slot_acquired_at = None
+                    _llamacpp_slot_condition.notify_all()
+
+
 def _create_client():
     """Create a fresh OpenAI client configured for the selected LLM provider"""
     settings = load_settings()
     llm_settings = settings.get('llm', {})
     provider = llm_settings.get('provider', 'gemini')
 
-    api_url = llm_settings.get('openai', {}).get('api_url', '').strip() or "https://api.openai.com/v1"
+    openai_api_url = llm_settings.get('openai', {}).get('api_url', '').strip() or "https://api.openai.com/v1"
+    llamacpp_api_url = _get_llamacpp_api_url(llm_settings)
 
     # Get provider-specific API key
     api_key = _get_api_key(provider)
 
     if not api_key:
-        if provider == 'openai' and api_url != "https://api.openai.com/v1":
+        if provider == 'openai' and openai_api_url != "https://api.openai.com/v1":
             api_key = "lm-studio"
+        elif provider == 'llamacpp':
+            api_key = "llama-cpp"
         else:
             print(f"[LLM] Warning: No API key configured for {provider}")
             return None
@@ -424,8 +638,11 @@ def _create_client():
     # SDK default is 5s which defeats connection pooling entirely.
     # Expiry must be >> ping interval (45s) so connections aren't dropped
     # before our keepalive timer can exercise them.
-    # DefaultHttpxClient preserves SDK defaults (600s timeout, 1000 max conn, etc.)
+    # Timeout: 30s connect, 120s between chunks (read).
+    # read must be generous: local models (e.g. Gemma 26B) can take 60s+
+    # on prefill before emitting the first token.
     http_client = DefaultHttpxClient(
+        timeout=httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0),
         limits=httpx.Limits(
             max_connections=1000,
             max_keepalive_connections=100,
@@ -435,7 +652,11 @@ def _create_client():
 
     # Configure client based on provider
     if provider == 'openai':
-        return OpenAI(api_key=api_key, base_url=api_url, http_client=http_client)
+        return OpenAI(api_key=api_key, base_url=openai_api_url, http_client=http_client)
+    elif provider == 'ollama':
+        return None
+    elif provider == 'llamacpp':
+        return OpenAI(api_key=api_key, base_url=llamacpp_api_url, http_client=http_client)
     else:
         # Default to OpenRouter
         return OpenAI(
@@ -448,19 +669,14 @@ def _create_client():
 def _use_responses_api() -> bool:
     """Check if the OpenAI Responses API should be used.
 
-    Returns True for default OpenAI endpoint, or when explicitly enabled for custom endpoints.
-    Custom non-OpenAI endpoints default to Chat Completions API (responses_api=False).
+    This follows the OpenAI provider toggle directly for both the default OpenAI
+    endpoint and custom OpenAI-compatible endpoints.
     """
     settings = load_settings()
+    if settings.get('llm', {}).get('provider', 'gemini') != 'openai':
+        return False
     openai_settings = settings.get('llm', {}).get('openai', {})
-    api_url = (openai_settings.get('api_url', '') or '').strip()
-
-    # Default OpenAI endpoint always uses responses API
-    if not api_url or 'openai.com' in api_url.lower():
-        return True
-
-    # Custom endpoint: check the toggle
-    return openai_settings.get('responses_api', True)
+    return openai_settings.get('responses_api', False)
 
 
 def _get_openai_extra_params(model: str) -> Dict[str, Any]:
@@ -475,6 +691,154 @@ def _get_openai_extra_params(model: str) -> Dict[str, Any]:
 
     # For models that support it, disable store (don't save for training)
     return {'store': False}
+
+
+def _get_openai_token_param(max_tokens: int, use_responses: bool) -> Dict[str, int]:
+    """
+    Return the correct token limit field for the current OpenAI API mode.
+
+    - Responses API uses `max_output_tokens`
+    - Chat Completions uses `max_completion_tokens` when Responses mode is enabled
+      for the provider (native OpenAI), otherwise `max_tokens` for compatibility
+      with custom OpenAI-style endpoints.
+    """
+    if use_responses:
+        return {"max_output_tokens": max_tokens}
+
+    if _use_responses_api():
+        return {"max_completion_tokens": max_tokens}
+
+    return {"max_tokens": max_tokens}
+
+
+def _normalize_model_name(model: str) -> str:
+    """Normalize a model ID for capability/compatibility checks."""
+    if not model:
+        return ""
+
+    normalized = model.strip().lower().split(':', 1)[0]
+    if '/' in normalized:
+        normalized = normalized.split('/')[-1]
+    return normalized
+
+
+def _model_supports_temperature(model: str) -> bool:
+    """
+    GPT-5 family models do not accept the temperature parameter.
+    """
+    return not _normalize_model_name(model).startswith('gpt-5')
+
+
+def _get_temperature_param(model: str, temperature: float) -> Dict[str, float]:
+    """Return temperature param only for model families that support it."""
+    if _model_supports_temperature(model):
+        return {"temperature": temperature}
+    return {}
+
+
+def _usage_field(usage: Any, field: str, default: Any = None) -> Any:
+    """Read a usage field from either an SDK object or a dict-like payload."""
+    if usage is None:
+        return default
+    if isinstance(usage, dict):
+        return usage.get(field, default)
+    return getattr(usage, field, default)
+
+
+def _extract_openrouter_usage_metrics(usage: Any) -> Dict[str, Any]:
+    """Extract OpenRouter token and cost metrics from a usage payload when present."""
+    if usage is None:
+        return {
+            "input_tokens": None,
+            "output_tokens": None,
+            "total_tokens": None,
+            "cost_total": None,
+            "cost_upstream_inference": None,
+        }
+
+    cost_details = _usage_field(usage, 'cost_details')
+    cost_total = _usage_field(usage, 'cost')
+    cost_upstream_inference = _usage_field(cost_details, 'upstream_inference_cost')
+    if cost_total == 0 and cost_upstream_inference not in (None, 0):
+        cost_total = cost_upstream_inference
+
+    return {
+        "input_tokens": _usage_field(usage, 'prompt_tokens'),
+        "output_tokens": _usage_field(usage, 'completion_tokens'),
+        "total_tokens": _usage_field(usage, 'total_tokens'),
+        "cost_total": cost_total,
+        "cost_upstream_inference": cost_upstream_inference,
+    }
+
+
+def _extract_gemini_usage_metrics(usage: Any) -> Dict[str, Any]:
+    """Extract Gemini token metrics from usage metadata when present."""
+    if usage is None:
+        return {
+            "input_tokens": None,
+            "output_tokens": None,
+            "total_tokens": None,
+        }
+
+    return {
+        "input_tokens": _usage_field(usage, 'prompt_token_count'),
+        "output_tokens": _usage_field(usage, 'candidates_token_count'),
+        "total_tokens": _usage_field(usage, 'total_token_count'),
+    }
+
+
+def _convert_openai_message_content_to_responses(content: Any) -> Any:
+    """
+    Convert chat-style multimodal message content to Responses API content parts.
+
+    Chat Completions vision messages use `text` / `image_url`.
+    Responses API expects `input_text` / `input_image`.
+    """
+    if not isinstance(content, list):
+        return content
+
+    converted = []
+    for part in content:
+        if not isinstance(part, dict):
+            converted.append(part)
+            continue
+
+        part_type = part.get('type')
+        if part_type == 'text':
+            converted.append({
+                "type": "input_text",
+                "text": part.get('text', '')
+            })
+        elif part_type == 'image_url':
+            image_url = part.get('image_url')
+            if isinstance(image_url, dict):
+                image_url = image_url.get('url', '')
+            converted.append({
+                "type": "input_image",
+                "image_url": image_url or ''
+            })
+        else:
+            converted.append(part)
+
+    return converted
+
+
+def _convert_openai_messages_to_responses_input(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Convert OpenAI chat-style messages to Responses API input items."""
+    input_messages = []
+    for msg in messages:
+        role = msg.get('role', 'user')
+        content = _convert_openai_message_content_to_responses(msg.get('content', ''))
+
+        if role == 'system':
+            role = 'developer'
+
+        input_messages.append({
+            "role": role,
+            "content": content
+        })
+
+    return input_messages
 
 
 # =============================================================================
@@ -497,11 +861,21 @@ def _format_reasoning_openrouter(model: str, max_tokens: int, enabled: bool) -> 
         effort = "medium" if enabled else "minimal"
         return {"reasoning": {"effort": effort}}
 
-    # google/ and anthropic/ use token-based
-    elif model_lower.startswith(('google/', 'anthropic/')):
+    # google/ Gemini 3+ uses effort-based (maps to thinkingLevel)
+    elif model_lower.startswith('google/'):
+        if re.search(r'gemini-?[3-9]', model_lower):
+            effort = "medium" if enabled else "minimal"
+            return {"reasoning": {"effort": effort}}
+        # Gemini 2.x uses token-based
         if enabled:
             return {"reasoning": {"max_tokens": max_tokens // 2}}
-        return {}  # No explicit OFF for token-based
+        return {"reasoning": {"max_tokens": 0}}
+
+    # anthropic/ use token-based
+    elif model_lower.startswith('anthropic/'):
+        if enabled:
+            return {"reasoning": {"max_tokens": max_tokens // 2}}
+        return {"reasoning": {"max_tokens": 0}}
 
     # Default: effort-based
     effort = "medium" if enabled else "minimal"
@@ -646,6 +1020,45 @@ def adjust_max_tokens_for_reasoning(model: str, context: str, max_tokens: int) -
     return max_tokens
 
 
+def _convert_messages_to_gemini(messages):
+    """Convert OpenAI-style messages to Gemini format.
+    Handles both plain text content and multipart content (text + images)."""
+    system_instruction = None
+    contents = []
+
+    for msg in messages:
+        role = msg.get('role', 'user')
+        content = msg.get('content', '')
+
+        if role == 'system':
+            system_instruction = content
+            continue
+
+        gemini_role = 'model' if role == 'assistant' else 'user'
+
+        # Multipart content (list of text/image parts)
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if part.get('type') == 'text':
+                    parts.append(types.Part.from_text(text=part['text']))
+                elif part.get('type') == 'image_url':
+                    url = part['image_url']['url']
+                    # Extract base64 data from data URI
+                    if url.startswith('data:'):
+                        # "data:image/jpeg;base64,<data>"
+                        header, b64_data = url.split(',', 1)
+                        mime_type = header.split(':')[1].split(';')[0]
+                        image_bytes = base64.b64decode(b64_data)
+                        parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
+            contents.append(types.Content(role=gemini_role, parts=parts))
+        else:
+            # Plain text content
+            contents.append(types.Content(role=gemini_role, parts=[types.Part.from_text(text=content)]))
+
+    return system_instruction, contents
+
+
 def _chat_gemini(messages: List[Dict[str, Any]],
                  model: str,
                  temperature: float,
@@ -660,20 +1073,7 @@ def _chat_gemini(messages: List[Dict[str, Any]],
         start_time = time.time()
 
         # Convert OpenAI-style messages to Gemini format
-        # Extract system message if present
-        system_instruction = None
-        contents = []
-
-        for msg in messages:
-            role = msg.get('role', 'user')
-            content = msg.get('content', '')
-
-            if role == 'system':
-                system_instruction = content
-            elif role == 'assistant':
-                contents.append(types.Content(role='model', parts=[types.Part.from_text(text=content)]))
-            else:  # user
-                contents.append(types.Content(role='user', parts=[types.Part.from_text(text=content)]))
+        system_instruction, contents = _convert_messages_to_gemini(messages)
 
         # Get reasoning config for Gemini (pass context for per-model settings)
         reasoning_params = get_reasoning_params('gemini', model, max_tokens, context)
@@ -750,19 +1150,12 @@ def _chat_openai(messages: List[Dict[str, Any]],
 
         if use_responses:
             # --- Responses API path ---
-            input_messages = []
-            for msg in messages:
-                role = msg.get('role', 'user')
-                content = msg.get('content', '')
-                if role == 'system':
-                    input_messages.append({"role": "developer", "content": content})
-                else:
-                    input_messages.append({"role": role, "content": content})
+            input_messages = _convert_openai_messages_to_responses_input(messages)
 
             request_params = {
                 "model": model,
                 "input": input_messages,
-                "max_output_tokens": max_tokens,
+                **_get_openai_token_param(max_tokens, use_responses=True),
             }
 
             reasoning_params = get_reasoning_params('openai', model, max_tokens, context)
@@ -789,9 +1182,11 @@ def _chat_openai(messages: List[Dict[str, Any]],
             request_params = {
                 "model": model,
                 "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
+                **_get_temperature_param(model, temperature),
+                **_get_openai_token_param(max_tokens, use_responses=False),
             }
+            if _get_provider() == 'llamacpp':
+                request_params["extra_body"] = _get_llamacpp_request_extra_body()
 
             response = client.chat.completions.create(**request_params)
             duration_ms = (time.time() - start_time) * 1000
@@ -846,11 +1241,91 @@ def _chat_openai(messages: List[Dict[str, Any]],
         return None
 
 
+def _chat_ollama(messages: List[Dict[str, Any]],
+                 model: str,
+                 temperature: float,
+                 max_tokens: int,
+                 context: str) -> Optional[str]:
+    """Send chat request using Ollama's native /api/chat endpoint."""
+    settings = load_settings()
+    api_url = _get_ollama_chat_url(settings.get('llm', {}))
+    headers = _get_ollama_headers(api_url)
+    if headers is None:
+        return None
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "options": {
+            "temperature": temperature,
+            "num_predict": max_tokens,
+        },
+    }
+
+    try:
+        start_time = time.time()
+        print(f"[LLM] Ollama request: {model} ({context}), max_tokens={max_tokens}")
+
+        with httpx.Client(timeout=httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)) as client:
+            response = client.post(api_url, headers=headers, json=payload)
+            response.raise_for_status()
+            data = response.json()
+
+        duration_ms = (time.time() - start_time) * 1000
+        content = (data.get('message') or {}).get('content') or data.get('response') or ''
+        result_text = content.strip()
+
+        if not result_text:
+            error_detail = "Empty response from Ollama API"
+            print(f"[LLM] {error_detail} from {model}")
+            log_llm(payload, error=error_detail)
+            el = _get_event_logger()
+            if el:
+                el.log_llm_event(model=model, context=context, status="error", error=error_detail)
+            return None
+
+        log_llm(payload, response=result_text)
+
+        input_tokens = data.get('prompt_eval_count')
+        output_tokens = data.get('eval_count')
+        total_tokens = (
+            input_tokens + output_tokens
+            if input_tokens is not None and output_tokens is not None
+            else None
+        )
+        el = _get_event_logger()
+        if el:
+            el.log_llm_event(
+                model=model,
+                context=context,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
+                duration_ms=duration_ms
+            )
+
+        print(f"[LLM] Ollama response: {model} ({len(result_text)} chars, {duration_ms:.0f}ms)")
+        return result_text
+
+    except Exception as e:
+        print(f"[LLM] Ollama error from {model}: {e}")
+        friendly_error = _parse_llm_error(e)
+        _set_last_error(friendly_error)
+        log_llm(payload, error=str(e))
+        el = _get_event_logger()
+        if el:
+            el.log_llm_event(model=model, context=context, status="error", error=friendly_error)
+        return None
+
+
 def chat(messages: List[Dict[str, Any]],
          model: str = None,
          temperature: float = 0.8,
          max_tokens: int = 8192,
-         context: str = "chat") -> Optional[str]:
+         context: str = "chat",
+         kv_cache_prefix: Any = None,
+         kv_cache_context: str = None) -> Optional[str]:
     """
     Send a chat completion request to the configured LLM provider.
 
@@ -869,7 +1344,7 @@ def chat(messages: List[Dict[str, Any]],
     provider = _get_provider()
 
     # Model should always be provided by caller, but default to the chat model
-    model = model or settings.get('conversation', {}).get('chat_model', 'gemini-3-flash-preview')
+    model = model or settings.get('conversation', {}).get('chat_model', GEMINI_CHAT_DEFAULT)
 
     # Adjust max_tokens if reasoning is enabled (thinking needs more tokens)
     max_tokens = adjust_max_tokens_for_reasoning(model, context, max_tokens)
@@ -878,8 +1353,31 @@ def chat(messages: List[Dict[str, Any]],
     if provider == 'gemini':
         return _chat_gemini(messages, model, temperature, max_tokens, context)
 
+    if provider == 'llamacpp':
+        try:
+            with _llamacpp_slot_lease(context):
+                cache = _get_llamacpp_slot_cache(settings)
+                if kv_cache_prefix is not None:
+                    restored = cache.restore(kv_cache_prefix, model, kv_cache_context or context)
+                    if restored.hit:
+                        print(f"[LlamaCppKV] Restored {restored.filename} for {kv_cache_context or context}")
+                result = _chat_openai(messages, model, temperature, max_tokens, context)
+                if result and kv_cache_prefix is not None:
+                    saved = cache.save(kv_cache_prefix, model, kv_cache_context or context)
+                    if saved.success:
+                        evicted = f", evicted={saved.evicted}" if saved.evicted else ""
+                        print(f"[LlamaCppKV] Saved {saved.filename} for {kv_cache_context or context}{evicted}")
+                return result
+        except TimeoutError as e:
+            print(f"[LlamaCppSlot] {e}")
+            _set_last_error(str(e))
+            return None
+
     if provider == 'openai':
         return _chat_openai(messages, model, temperature, max_tokens, context)
+
+    if provider == 'ollama':
+        return _chat_ollama(messages, model, temperature, max_tokens, context)
 
     # OpenRouter path (uses chat.completions API with extra_body for reasoning)
     t_entry = time.perf_counter()
@@ -889,15 +1387,9 @@ def chat(messages: List[Dict[str, Any]],
     t_client = time.perf_counter()
 
     try:
-        # Handle nitro model - use fast providers and strip suffix
-        extra_body = {}
-        request_model = model
-        if model == 'meta-llama/llama-3.1-8b-instruct:nitro':
-            request_model = 'meta-llama/llama-3.1-8b-instruct'
-            extra_body['provider'] = {
-                'order': ['Friendli', 'Cerebras', 'SambaNova', 'DeepInfra']
-            }
-            print(f"[LLM] Request: {model} -> {request_model} with nitro providers ({context})")
+        request_model, extra_body = _resolve_openrouter_model(model)
+        if request_model != model:
+            print(f"[LLM] Request: {model} -> {request_model} with provider override ({context})")
         else:
             print(f"[LLM] Request: {model} ({context})")
 
@@ -905,7 +1397,7 @@ def chat(messages: List[Dict[str, Any]],
         request_params = {
             "model": request_model,
             "messages": messages,
-            "temperature": temperature,
+            **_get_temperature_param(request_model, temperature),
             "max_tokens": max_tokens,
             "extra_headers": {
                 "HTTP-Referer": "https://sonorus.github.io/",
@@ -965,13 +1457,15 @@ def chat(messages: List[Dict[str, Any]],
         duration_ms = (t_post - t_pre) * 1000
         el = _get_event_logger()
         if el:
-            usage = response.usage
+            usage_metrics = _extract_openrouter_usage_metrics(getattr(response, 'usage', None))
             el.log_llm_event(
                 model=model,
                 context=context,
-                input_tokens=usage.prompt_tokens if usage else None,
-                output_tokens=usage.completion_tokens if usage else None,
-                total_tokens=usage.total_tokens if usage else None,
+                input_tokens=usage_metrics["input_tokens"],
+                output_tokens=usage_metrics["output_tokens"],
+                total_tokens=usage_metrics["total_tokens"],
+                cost_total=usage_metrics["cost_total"],
+                cost_upstream_inference=usage_metrics["cost_upstream_inference"],
                 duration_ms=duration_ms
             )
 
@@ -1017,7 +1511,9 @@ def chat_stream(messages: List[Dict[str, Any]],
                 model: str = None,
                 temperature: float = 0.8,
                 max_tokens: int = 8192,
-                context: str = "chat"):
+                context: str = "chat",
+                kv_cache_prefix: Any = None,
+                kv_cache_context: str = None):
     """
     Stream a chat completion, yielding text chunks as they arrive.
 
@@ -1041,7 +1537,7 @@ def chat_stream(messages: List[Dict[str, Any]],
     _set_last_error(None)
     settings = load_settings()
     provider = _get_provider()
-    model = model or settings.get('conversation', {}).get('chat_model', 'google/gemini-3-flash-preview:nitro')
+    model = model or settings.get('conversation', {}).get('chat_model', GEMINI_CHAT_DEFAULT_OR)
     max_tokens = adjust_max_tokens_for_reasoning(model, context, max_tokens)
 
     print(f"[LLM] Request (streaming): {model} ({context})")
@@ -1049,8 +1545,35 @@ def chat_stream(messages: List[Dict[str, Any]],
     try:
         if provider == 'gemini':
             yield from _chat_stream_gemini(messages, model, temperature, max_tokens, context)
+        elif provider == 'llamacpp':
+            try:
+                with _llamacpp_slot_lease(context):
+                    cache = _get_llamacpp_slot_cache(settings)
+                    if kv_cache_prefix is not None:
+                        restored = cache.restore(kv_cache_prefix, model, kv_cache_context or context)
+                        if restored.hit:
+                            print(f"[LlamaCppKV] Restored {restored.filename} for {kv_cache_context or context}")
+                    yielded_any = False
+                    completed = False
+                    try:
+                        for chunk in _chat_stream_openai(messages, model, temperature, max_tokens, context):
+                            yielded_any = True
+                            yield chunk
+                        completed = True
+                    finally:
+                        if completed and yielded_any and kv_cache_prefix is not None:
+                            saved = cache.save(kv_cache_prefix, model, kv_cache_context or context)
+                            if saved.success:
+                                evicted = f", evicted={saved.evicted}" if saved.evicted else ""
+                                print(f"[LlamaCppKV] Saved {saved.filename} for {kv_cache_context or context}{evicted}")
+            except TimeoutError as e:
+                print(f"[LlamaCppSlot] {e}")
+                _set_last_error(str(e))
+                return
         elif provider == 'openai':
             yield from _chat_stream_openai(messages, model, temperature, max_tokens, context)
+        elif provider == 'ollama':
+            yield from _chat_stream_ollama(messages, model, temperature, max_tokens, context)
         else:
             # OpenRouter - uses OpenAI-compatible streaming
             yield from _chat_stream_openrouter(messages, model, temperature, max_tokens, context)
@@ -1070,26 +1593,15 @@ def _chat_stream_openrouter(messages, model, temperature, max_tokens, context):
         return
 
     start_time = time.time()
-    extra_body = {}
-    request_model = model
-
-    # Handle nitro model
-    if model == 'meta-llama/llama-3.1-8b-instruct:nitro':
-        request_model = 'meta-llama/llama-3.1-8b-instruct'
-        extra_body['provider'] = {
-            'order': ['Friendli', 'Cerebras', 'SambaNova', 'DeepInfra']
-        }
-
-    # Handle nitro suffix for other models
-    if ':nitro' in model and request_model == model:
-        request_model = model  # OpenRouter handles :nitro suffix
+    request_model, extra_body = _resolve_openrouter_model(model)
 
     request_params = {
         "model": request_model,
         "messages": messages,
-        "temperature": temperature,
+        **_get_temperature_param(request_model, temperature),
         "max_tokens": max_tokens,
         "stream": True,
+        "stream_options": {"include_usage": True},
         "extra_headers": {
             "HTTP-Referer": "https://sonorus.github.io/",
             "X-Title": "Sonorus (Hogwarts Legacy Mod)"
@@ -1103,35 +1615,52 @@ def _chat_stream_openrouter(messages, model, temperature, max_tokens, context):
         request_params['extra_body'] = extra_body
 
     accumulated = []
+    usage = None
+    error_occurred = False
     try:
         stream = client.chat.completions.create(**request_params)
         for chunk in stream:
+            if getattr(chunk, 'usage', None):
+                usage = chunk.usage
             if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
                 text = chunk.choices[0].delta.content
                 accumulated.append(text)
                 yield text
 
-        duration_ms = (time.time() - start_time) * 1000
-        full_response = "".join(accumulated)
-
-        if full_response:
-            payload = {"model": model, "temperature": temperature, "max_tokens": max_tokens, "messages": messages}
-            log_llm(payload, response=full_response)
-            print(f"[LLM] Response (streamed): {model} ({len(full_response)} chars, {duration_ms:.0f}ms)")
-
-            el = _get_event_logger()
-            if el:
-                el.log_llm_event(model=model, context=context, duration_ms=duration_ms)
-        else:
-            print(f"[LLM] Empty streaming response from {model}")
-
     except Exception as e:
+        error_occurred = True
         print(f"[LLM] OpenRouter streaming error: {e}")
         friendly_error = _parse_llm_error(e)
         _set_last_error(friendly_error)
         el = _get_event_logger()
         if el:
             el.log_llm_event(model=model, context=context, status="error", error=friendly_error)
+    finally:
+        # Log even when the consumer abandons the stream early (e.g. target selection)
+        if not error_occurred:
+            duration_ms = (time.time() - start_time) * 1000
+            full_response = "".join(accumulated)
+
+            if full_response:
+                payload = {"model": model, "temperature": temperature, "max_tokens": max_tokens, "messages": messages}
+                log_llm(payload, response=full_response)
+                print(f"[LLM] Response (streamed): {model} ({len(full_response)} chars, {duration_ms:.0f}ms)")
+
+                el = _get_event_logger()
+                if el:
+                    usage_metrics = _extract_openrouter_usage_metrics(usage)
+                    el.log_llm_event(
+                        model=model,
+                        context=context,
+                        duration_ms=duration_ms,
+                        input_tokens=usage_metrics["input_tokens"],
+                        output_tokens=usage_metrics["output_tokens"],
+                        total_tokens=usage_metrics["total_tokens"],
+                        cost_total=usage_metrics["cost_total"],
+                        cost_upstream_inference=usage_metrics["cost_upstream_inference"],
+                    )
+            else:
+                print(f"[LLM] Empty streaming response from {model}")
 
 
 def _chat_stream_gemini(messages, model, temperature, max_tokens, context):
@@ -1149,18 +1678,8 @@ def _chat_stream_gemini(messages, model, temperature, max_tokens, context):
 
     start_time = time.time()
 
-    # Convert messages to Gemini format
-    system_instruction = None
-    contents = []
-    for msg in messages:
-        role = msg.get('role', 'user')
-        content = msg.get('content', '')
-        if role == 'system':
-            system_instruction = content
-        elif role == 'assistant':
-            contents.append(types.Content(role='model', parts=[types.Part.from_text(text=content)]))
-        else:
-            contents.append(types.Content(role='user', parts=[types.Part.from_text(text=content)]))
+    # Convert messages to Gemini format (handles multipart content including images)
+    system_instruction, contents = _convert_messages_to_gemini(messages)
 
     reasoning_params = get_reasoning_params('gemini', model, max_tokens, context)
     thinking_config = types.ThinkingConfig(**reasoning_params) if reasoning_params else None
@@ -1173,6 +1692,8 @@ def _chat_stream_gemini(messages, model, temperature, max_tokens, context):
     )
 
     accumulated = []
+    usage = None
+    error_occurred = False
     try:
         stream = client.models.generate_content_stream(
             model=model,
@@ -1180,76 +1701,215 @@ def _chat_stream_gemini(messages, model, temperature, max_tokens, context):
             config=config
         )
         for chunk in stream:
+            if getattr(chunk, 'usage_metadata', None):
+                usage = chunk.usage_metadata
             if chunk.text:
                 accumulated.append(chunk.text)
                 yield chunk.text
 
-        duration_ms = (time.time() - start_time) * 1000
-        full_response = "".join(accumulated)
-
-        if full_response:
-            payload = {"model": model, "temperature": temperature, "max_tokens": max_tokens, "messages": messages}
-            log_llm(payload, response=full_response)
-            print(f"[LLM] Response (streamed): {model} ({len(full_response)} chars, {duration_ms:.0f}ms)")
-
-            el = _get_event_logger()
-            if el:
-                usage = None
-                el.log_llm_event(model=model, context=context, duration_ms=duration_ms)
-
     except Exception as e:
+        error_occurred = True
         print(f"[LLM] Gemini streaming error: {e}")
         friendly_error = _parse_llm_error(e)
         _set_last_error(friendly_error)
         el = _get_event_logger()
         if el:
             el.log_llm_event(model=model, context=context, status="error", error=friendly_error)
+    finally:
+        if not error_occurred:
+            duration_ms = (time.time() - start_time) * 1000
+            full_response = "".join(accumulated)
+
+            if full_response:
+                payload = {"model": model, "temperature": temperature, "max_tokens": max_tokens, "messages": messages}
+                log_llm(payload, response=full_response)
+                print(f"[LLM] Response (streamed): {model} ({len(full_response)} chars, {duration_ms:.0f}ms)")
+
+                el = _get_event_logger()
+                if el:
+                    usage_metrics = _extract_gemini_usage_metrics(usage)
+                    el.log_llm_event(
+                        model=model,
+                        context=context,
+                        duration_ms=duration_ms,
+                        input_tokens=usage_metrics["input_tokens"],
+                        output_tokens=usage_metrics["output_tokens"],
+                        total_tokens=usage_metrics["total_tokens"],
+                    )
 
 
 def _chat_stream_openai(messages, model, temperature, max_tokens, context):
-    """Stream via OpenAI API (chat completions)."""
+    """Stream via OpenAI API (responses or chat completions)."""
     client = _get_client()
     if not client:
         return
 
     start_time = time.time()
-
-    request_params = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "stream": True,
-    }
+    use_responses = _use_responses_api()
+    api_mode = "responses" if use_responses else "chat.completions"
 
     accumulated = []
+    usage = None
+    error_occurred = False
     try:
-        stream = client.chat.completions.create(**request_params)
-        for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                text = chunk.choices[0].delta.content
-                accumulated.append(text)
-                yield text
+        if use_responses:
+            input_messages = _convert_openai_messages_to_responses_input(messages)
 
-        duration_ms = (time.time() - start_time) * 1000
-        full_response = "".join(accumulated)
+            request_params = {
+                "model": model,
+                "input": input_messages,
+                **_get_openai_token_param(max_tokens, use_responses=True),
+                **_get_temperature_param(model, temperature),
+            }
 
-        if full_response:
-            payload = {"model": model, "temperature": temperature, "max_tokens": max_tokens, "messages": messages}
-            log_llm(payload, response=full_response)
-            print(f"[LLM] Response (streamed): {model} ({len(full_response)} chars, {duration_ms:.0f}ms)")
+            reasoning_params = get_reasoning_params('openai', model, max_tokens, context)
+            if reasoning_params:
+                request_params.update(reasoning_params)
 
-            el = _get_event_logger()
-            if el:
-                el.log_llm_event(model=model, context=context, duration_ms=duration_ms)
+            with client.responses.stream(**request_params) as stream:
+                for event in stream:
+                    if event.type == "response.output_text.delta" and getattr(event, 'delta', None):
+                        text = event.delta
+                        accumulated.append(text)
+                        yield text
+
+                final_response = stream.get_final_response()
+                usage = getattr(final_response, 'usage', None)
+        else:
+            request_params = {
+                "model": model,
+                "messages": messages,
+                **_get_temperature_param(model, temperature),
+                **_get_openai_token_param(max_tokens, use_responses=False),
+                "stream": True,
+            }
+            if _get_provider() != 'llamacpp':
+                request_params["stream_options"] = {"include_usage": True}
+            else:
+                request_params["extra_body"] = _get_llamacpp_request_extra_body()
+
+            stream = client.chat.completions.create(**request_params)
+            for chunk in stream:
+                if getattr(chunk, 'usage', None):
+                    usage = chunk.usage
+                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                    text = chunk.choices[0].delta.content
+                    accumulated.append(text)
+                    yield text
 
     except Exception as e:
+        error_occurred = True
         print(f"[LLM] OpenAI streaming error: {e}")
         friendly_error = _parse_llm_error(e)
         _set_last_error(friendly_error)
         el = _get_event_logger()
         if el:
             el.log_llm_event(model=model, context=context, status="error", error=friendly_error)
+    finally:
+        if not error_occurred:
+            duration_ms = (time.time() - start_time) * 1000
+            full_response = "".join(accumulated)
+
+            if full_response:
+                payload = {"model": model, "temperature": temperature, "max_tokens": max_tokens, "messages": messages}
+                log_llm(payload, response=full_response)
+                print(f"[LLM] Response (streamed): {model} via {api_mode} ({len(full_response)} chars, {duration_ms:.0f}ms)")
+
+                el = _get_event_logger()
+                if el:
+                    input_tokens = getattr(usage, 'input_tokens', None) if usage else None
+                    output_tokens = getattr(usage, 'output_tokens', None) if usage else None
+                    total_tokens = (input_tokens + output_tokens) if usage and input_tokens is not None and output_tokens is not None else None
+                    el.log_llm_event(
+                        model=model,
+                        context=context,
+                        duration_ms=duration_ms,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        total_tokens=total_tokens,
+                    )
+
+
+def _chat_stream_ollama(messages, model, temperature, max_tokens, context):
+    """Stream via Ollama's native /api/chat endpoint."""
+    settings = load_settings()
+    api_url = _get_ollama_chat_url(settings.get('llm', {}))
+    headers = _get_ollama_headers(api_url)
+    if headers is None:
+        return
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": True,
+        "options": {
+            "temperature": temperature,
+            "num_predict": max_tokens,
+        },
+    }
+
+    start_time = time.time()
+    accumulated = []
+    usage = {}
+    error_occurred = False
+
+    try:
+        with httpx.stream(
+            "POST",
+            api_url,
+            headers=headers,
+            json=payload,
+            timeout=httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0),
+        ) as response:
+            response.raise_for_status()
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                data = json.loads(line)
+                usage = data
+                content = (data.get('message') or {}).get('content') or ''
+                if content:
+                    accumulated.append(content)
+                    yield content
+                if data.get('done') is True:
+                    break
+
+    except Exception as e:
+        error_occurred = True
+        print(f"[LLM] Ollama streaming error: {e}")
+        friendly_error = _parse_llm_error(e)
+        _set_last_error(friendly_error)
+        el = _get_event_logger()
+        if el:
+            el.log_llm_event(model=model, context=context, status="error", error=friendly_error)
+    finally:
+        if not error_occurred:
+            duration_ms = (time.time() - start_time) * 1000
+            full_response = "".join(accumulated)
+
+            if full_response:
+                log_llm(payload, response=full_response)
+                print(f"[LLM] Ollama response (streamed): {model} ({len(full_response)} chars, {duration_ms:.0f}ms)")
+
+                input_tokens = usage.get('prompt_eval_count')
+                output_tokens = usage.get('eval_count')
+                total_tokens = (
+                    input_tokens + output_tokens
+                    if input_tokens is not None and output_tokens is not None
+                    else None
+                )
+                el = _get_event_logger()
+                if el:
+                    el.log_llm_event(
+                        model=model,
+                        context=context,
+                        duration_ms=duration_ms,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        total_tokens=total_tokens,
+                    )
+            else:
+                print(f"[LLM] Empty Ollama streaming response from {model}")
 
 
 def chat_simple(prompt: str, system: str = None,
@@ -1383,7 +2043,7 @@ def _chat_with_vision_openai(prompt: str, image_b64: str,
             request_params = {
                 "model": model,
                 "input": [{"role": "user", "content": input_content}],
-                "max_output_tokens": max_tokens,
+                **_get_openai_token_param(max_tokens, use_responses=True),
             }
 
             reasoning_params = get_reasoning_params('openai', model, max_tokens, 'vision')
@@ -1418,9 +2078,11 @@ def _chat_with_vision_openai(prompt: str, image_b64: str,
             request_params = {
                 "model": model,
                 "messages": vision_messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
+                **_get_temperature_param(model, temperature),
+                **_get_openai_token_param(max_tokens, use_responses=False),
             }
+            if _get_provider() == 'llamacpp':
+                request_params["extra_body"] = _get_llamacpp_request_extra_body()
 
             response = client.chat.completions.create(**request_params)
             duration_ms = (time.time() - start_time) * 1000
@@ -1480,7 +2142,9 @@ def _chat_with_vision_openai(prompt: str, image_b64: str,
 
 def chat_with_vision(prompt: str, image_b64: str,
                      model: str = None, temperature: float = 0.7,
-                     max_tokens: int = 8192) -> Optional[str]:
+                     max_tokens: int = 8192,
+                     kv_cache_prefix: Any = None,
+                     kv_cache_context: str = "vision") -> Optional[str]:
     """
     Vision-enabled chat completion with base64 image.
 
@@ -1505,8 +2169,34 @@ def chat_with_vision(prompt: str, image_b64: str,
     if provider == 'gemini':
         return _chat_with_vision_gemini(prompt, image_b64, model, temperature, max_tokens)
 
+    if provider == 'llamacpp':
+        try:
+            with _llamacpp_slot_lease(kv_cache_context or 'vision'):
+                cache = _get_llamacpp_slot_cache(settings)
+                if kv_cache_prefix is not None:
+                    restored = cache.restore(kv_cache_prefix, model, kv_cache_context or 'vision')
+                    if restored.hit:
+                        print(f"[LlamaCppKV] Restored {restored.filename} for {kv_cache_context or 'vision'}")
+                result = _chat_with_vision_openai(prompt, image_b64, model, temperature, max_tokens)
+                if result and kv_cache_prefix is not None:
+                    saved = cache.save(kv_cache_prefix, model, kv_cache_context or 'vision')
+                    if saved.success:
+                        evicted = f", evicted={saved.evicted}" if saved.evicted else ""
+                        print(f"[LlamaCppKV] Saved {saved.filename} for {kv_cache_context or 'vision'}{evicted}")
+                return result
+        except TimeoutError as e:
+            print(f"[LlamaCppSlot] {e}")
+            _set_last_error(str(e))
+            return None
+
     if provider == 'openai':
         return _chat_with_vision_openai(prompt, image_b64, model, temperature, max_tokens)
+
+    if provider == 'ollama':
+        error_detail = "Vision is disabled for Ollama provider"
+        print(f"[LLM] {error_detail}")
+        _set_last_error(error_detail)
+        return None
 
     # OpenRouter path (uses chat.completions API)
     client = _get_client()
@@ -1528,7 +2218,7 @@ def chat_with_vision(prompt: str, image_b64: str,
         request_params = {
             "model": model,
             "messages": messages,
-            "temperature": temperature,
+            **_get_temperature_param(model, temperature),
             "max_tokens": max_tokens,
             "extra_headers": {
                 "HTTP-Referer": "https://sonorus.github.io/",
@@ -1554,13 +2244,15 @@ def chat_with_vision(prompt: str, image_b64: str,
         # Log vision event with token counts and latency
         el = _get_event_logger()
         if el:
-            usage = response.usage
+            usage_metrics = _extract_openrouter_usage_metrics(getattr(response, 'usage', None))
             el.log_llm_event(
                 model=model,
                 context="vision",
-                input_tokens=usage.prompt_tokens if usage else None,
-                output_tokens=usage.completion_tokens if usage else None,
-                total_tokens=usage.total_tokens if usage else None,
+                input_tokens=usage_metrics["input_tokens"],
+                output_tokens=usage_metrics["output_tokens"],
+                total_tokens=usage_metrics["total_tokens"],
+                cost_total=usage_metrics["cost_total"],
+                cost_upstream_inference=usage_metrics["cost_upstream_inference"],
                 duration_ms=duration_ms
             )
 
@@ -1584,9 +2276,9 @@ if __name__ == "__main__":
     import sys
 
     settings = load_settings()
-    api_key = settings.get('llm', {}).get('api_key') or os.getenv('GEMINI_API_KEY', '')
     provider = settings.get('llm', {}).get('provider', 'gemini')
-    chat_model = settings.get('conversation', {}).get('chat_model', 'gemini-3-flash-preview')
+    api_key = _get_api_key(provider)
+    chat_model = settings.get('conversation', {}).get('chat_model', GEMINI_CHAT_DEFAULT)
 
     if len(sys.argv) < 2:
         print("Usage: python llm.py <prompt>")

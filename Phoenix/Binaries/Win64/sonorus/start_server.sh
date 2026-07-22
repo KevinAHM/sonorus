@@ -71,11 +71,6 @@ mkdir -p bin bin/vgmstream models
     rm -f "bin/vgmstream.zip"
 }
 
-[ ! -f "models/silero_vad.onnx" ] && {
-    echo "Downloading VAD model..."
-    dl "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx" "models/silero_vad.onnx"
-}
-
 [ ! -f "models/smart-turn-v3.2-cpu.onnx" ] && {
     echo "Downloading turn detection model..."
     dl "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-cpu.onnx" "models/smart-turn-v3.2-cpu.onnx"
@@ -98,7 +93,7 @@ fi
 
 # --- Bootstrap pip and install Python deps ---
 
-if ! $PYTHON -c "import importlib.util, sys; sys.exit(0 if all(importlib.util.find_spec(m) is not None for m in ['soundfile', 'sentencepiece', 'onnx_asr']) else 1)" 2>/dev/null; then
+if ! $PYTHON -c "import importlib.util, sys; sys.exit(0 if all(importlib.util.find_spec(m) is not None for m in ['soundfile', 'sentencepiece', 'onnx_asr', 'kaldi_native_fbank']) else 1)" 2>/dev/null; then
     echo "Installing Python dependencies..."
     $PYTHON -m pip install setuptools wheel --no-warn-script-location -q
     grep -v libaudioverse requirements.txt | $PYTHON -m pip install -r /dev/stdin --no-warn-script-location

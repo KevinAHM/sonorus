@@ -5,7 +5,6 @@ Provides a unified interface for text-to-speech providers (Inworld, ElevenLabs).
 """
 import os
 import sys
-import re
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -41,6 +40,9 @@ def get_provider():
         elif provider_name == 'pocket' or provider_name == 'pocket_onnx':
             from .pocket_onnx import PocketOnnxProvider
             _providers[provider_name] = PocketOnnxProvider()
+        elif provider_name == 'omnivoice':
+            from .omnivoice import OmniVoiceProvider
+            _providers[provider_name] = OmniVoiceProvider()
         else:
             from .inworld import InworldProvider
             _providers[provider_name] = InworldProvider()
@@ -140,10 +142,8 @@ def _resolve_narrator_voice():
         return narrator_voice
 
     # Check for Narrator reference wav
-    voice_refs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'voice_references')
-    import glob
-    narrator_refs = glob.glob(os.path.join(voice_refs_dir, 'Narrator_reference_*'))
-    if narrator_refs:
+    from .voice_utils import find_voice_reference
+    if find_voice_reference('Narrator'):
         return 'Narrator'
 
     # Provider-specific fallbacks
@@ -156,7 +156,7 @@ def _resolve_narrator_voice():
     return None
 
 
-def _segment_text_for_prebuffer(text: str, narration_enabled: bool):
+def _segment_text_for_prebuffer(text: str, narration_enabled: bool, narration_min_words: int = 3):
     """Split full response text into sentence/narration segments."""
     from utils.text_utils import split_into_sentences_safe
 
@@ -171,12 +171,9 @@ def _segment_text_for_prebuffer(text: str, narration_enabled: bool):
     if narration_enabled:
         from utils.narration import parse_segments
         for sentence in sentence_chunks:
-            for seg in parse_segments(sentence):
+            for seg in parse_segments(sentence, narration_min_words=narration_min_words):
                 seg_text = (seg.text or "").strip()
                 if not seg_text:
-                    continue
-                # Skip bracket-only segments (e.g. [laugh]) to avoid empty subtitles.
-                if re.fullmatch(r'(\[[^\]]*\]\s*)+', seg_text):
                     continue
                 segments.append((seg_text, bool(seg.is_narration)))
     else:
@@ -198,8 +195,13 @@ def prepare_tts(text, character_name, **kwargs):
     """
     settings = load_settings()
     narration_enabled = settings.get('conversation', {}).get('narration_enabled', False)
+    narration_min_words = max(1, int(kwargs.pop('narration_min_words', 3) or 3))
 
-    segmented = _segment_text_for_prebuffer(text, narration_enabled=narration_enabled)
+    segmented = _segment_text_for_prebuffer(
+        text,
+        narration_enabled=narration_enabled,
+        narration_min_words=narration_min_words,
+    )
     if not segmented:
         processed_text = _apply_pronunciation(text)
         return get_provider().prepare_tts(processed_text, character_name, **kwargs)
@@ -284,6 +286,9 @@ def clear_provider_cache(provider_name=None):
         elif provider_name == 'pocket' or provider_name == 'pocket_onnx':
             from .pocket_onnx import clear_voice_cache
             clear_voice_cache()
+        elif provider_name == 'omnivoice':
+            from .omnivoice import clear_voice_cache
+            clear_voice_cache()
     else:
         print("[TTS] Clearing all cached providers")
         _providers.clear()
@@ -303,6 +308,11 @@ def clear_provider_cache(provider_name=None):
             clear_voice_cache()
         except ImportError:
             pass
+        try:
+            from .omnivoice import clear_voice_cache
+            clear_voice_cache()
+        except ImportError:
+            pass
 
 
 def is_available() -> bool:
@@ -317,10 +327,12 @@ def is_available() -> bool:
         return True  # Local ONNX inference - always available
     elif provider == 'inworld':
         inworld = tts_settings.get('inworld', {})
-        return bool(inworld.get('api_key') and inworld.get('workspace_id'))
+        return bool(inworld.get('api_key'))
     elif provider == 'elevenlabs':
         elevenlabs = tts_settings.get('elevenlabs', {})
         return bool(elevenlabs.get('api_key'))
+    elif provider == 'omnivoice':
+        return True  # Local GPU inference - always available
 
     return False
 
@@ -353,19 +365,34 @@ def synthesize_to_bytes(text, character_name, lang=None):
             words = word_timing.get("words", [])
             total_word_timestamps[0] += len(words)
 
-    # Use end marker trimmer for clean audio cutoffs
-    if END_TRIMMER_AVAILABLE:
-        padded_text = pad_text_with_end_marker(text)
-        trimmer = EndMarkerTrimmer(
-            original_text=text,
-            on_chunk=on_chunk,
-            sample_rate=sample_rate,
-            bytes_per_sample=2  # 16-bit PCM
-        )
-        success = provider.synthesize_stream(padded_text, voice_id, trimmer.process_chunk)
-        trimmer.flush()
-    else:
-        success = provider.synthesize_stream(text, voice_id, on_chunk)
+    def synthesize_once(current_voice_id):
+        # Use end marker trimmer for clean audio cutoffs
+        if END_TRIMMER_AVAILABLE:
+            padded_text = pad_text_with_end_marker(text)
+            trimmer = EndMarkerTrimmer(
+                original_text=text,
+                on_chunk=on_chunk,
+                sample_rate=sample_rate,
+                bytes_per_sample=2  # 16-bit PCM
+            )
+            ok = provider.synthesize_stream(padded_text, current_voice_id, trimmer.process_chunk)
+            trimmer.flush()
+            return ok
+        return provider.synthesize_stream(text, current_voice_id, on_chunk)
+
+    success = synthesize_once(voice_id)
+    if (
+        not success
+        and not pcm_chunks
+        and provider.should_reclone_after_synthesis_failure(voice_id)
+    ):
+        print(f"[TTS] Cached voice is stale; recloning {character_name} and retrying synthesis")
+        provider.invalidate_cached_voice(character_name, lang, voice_id)
+        voice = provider.get_or_create_voice(character_name, lang)
+        voice_id = voice.get('voiceId') or voice.get('voice_id')
+        if not voice_id:
+            raise Exception(f"Voice '{character_name}' has no voice ID after recloning.")
+        success = synthesize_once(voice_id)
 
     if not success:
         raise Exception("TTS synthesis failed.")

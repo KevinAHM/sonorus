@@ -23,20 +23,28 @@ _G.SonorusModLoaded = true
 -- Developer Mode (synced from settings.json via Python server)
 -- ============================================
 _G.SonorusDevMode = false  -- Default off, synced when Python connects
+_G.LogToFile = false         -- Blocking DevPrint breadcrumbs for crash debugging
+
+local DevLog = require("Utils.DevLog")
+local TickScheduler = require("Utils.TickScheduler")
 
 function _G.DevPrint(...)
+    if _G.LogToFile and DevLog then
+        DevLog.Log("DevPrint", ...)
+    end
     if _G.SonorusDevMode then
         print(...)
     end
 end
 
--- ============================================
--- Console Commands
--- ============================================
-RegisterConsoleCommandHandler("sonorus_test", function(FullCommand, Parameters, Ar)
-    print("[Sonorus] sonorus_test command fired")
-    return true
-end)
+-- BP-driven pause state. Default to paused until Blueprint tells us otherwise.
+_G.GamePauseState = _G.GamePauseState or {
+    isPaused = true,
+    hasBPEvent = false,
+    updatedAt = 0,
+}
+_G.GamePauseState.isPaused = _G.GamePauseState.isPaused ~= false
+_G.LastKnownPauseState = (_G.LastKnownPauseState == nil) and true or _G.LastKnownPauseState
 
 -- ============================================
 -- Global State (shared with logic.lua)
@@ -51,20 +59,28 @@ _G.SonorusState = {
     playerHouse = "",          -- Player's house (Gryffindor, Slytherin, etc.)
     playerLoaded = false,      -- True after player is in game (ClientRestart fired)
     sonorusModActor = nil,     -- Cached Blueprint ModActor reference
+    sonorusModActorName = nil, -- Cached actor full name for debugging stale refs
     pendingIdle = false,       -- Deferred idle transition (wait for mouth to close)
+    pendingIdleAt = 0,         -- Timestamp for a deferred idle during turn handoff
+    pendingEndBehavior = nil,  -- Optional idle cleanup override from Python
+    hasLoadedOnce = false
 }
+
+local _handshakePending = false
 
 -- ============================================
 -- Player Info Update (on load/reload)
 -- ============================================
 local Utils = require("Utils.Utils")
 local Cache = require("Utils.Cache")
+local BlueprintHelpers = require("Utils.BlueprintHelpers")
+local LocationRegistry = require("Utils.LocationRegistry")
 
 -- Updates player info (name/house) - must be called on game thread
 local function UpdatePlayerInfo()
     -- Get player name
     local firstName, lastName, fullName = Utils.GetPlayerName()
-    if fullName and fullName ~= "" then
+    if fullName and fullName ~= "" and string.lower(fullName) ~= "firstname lastname" then
         _G.SonorusState.playerName = fullName
         print("[Sonorus] Player name: " .. fullName)
     end
@@ -75,166 +91,218 @@ local function UpdatePlayerInfo()
     end
 end
 
--- Loading screen detection - fires when entering/exiting game
--- (note: "Loadingcreen" is the actual class name, not a typo)
-NotifyOnNewObject("/Script/Phoenix.Loadingcreen", function(Context)
-    print("[Sonorus] Loading screen detected - player entering or leaving game world")
-    _G.SonorusState.playerLoaded = true  -- Fallback: if ClientRestart didn't fire, fast travel proves player is loaded
-    -- Clear all caches - objects will be invalid after load
+function ShowHint(message, duration, layout)
+    local UIManager = Cache.Get("UIManager", function()
+        return FindFirstOf("UIManager")
+    end)
+    if UIManager and UIManager:IsValid() then
+        layout = layout or {
+            Position = { X = 500, Y = 500 },
+            Alignment = { X = 500, Y = 500 }
+        }
+        UIManager:SetAndShowHintMessage(message, layout, true, duration or 2)
+    end
+end
+-- Immediate cleanup for any world transition (safe to call mid-load)
+local function InvalidateWorld(reason)
+    print("[Sonorus] InvalidateWorld: " .. reason)
     Cache.ClearObjects()
-    Cache.ClearAllEntities()  -- NPCs will be invalid after load - force re-FindAllOf
+    Cache.ClearAllEntities()
     Cache.InvalidateStatic()
-    -- Release all locked NPCs (including preview locks) - they become invalid after load
+    BlueprintHelpers.InvalidateSonorusModActor(reason)
+    if TimeDilation and TimeDilation.MarkDirty then
+        pcall(TimeDilation.MarkDirty, tostring(reason))
+    end
+    if StopAmbientGaze then pcall(function() StopAmbientGaze("invalidate world: " .. tostring(reason)) end) end
     if ReleaseAllNPCs then pcall(ReleaseAllNPCs) end
-    -- Restore normal input mode (in case chat was open during load)
     if SetInputModeGameOnly then pcall(SetInputModeGameOnly) end
-    -- Reset chat input state (prevents stale preview lock on new world)
     if _G.ChatInputState then
         _G.ChatInputState.active = false
         _G.ChatInputState.text = ""
     end
     _G.ChatPreviewLock = nil
     _G.STTPreviewLock = nil
-    -- Invalidate time cache and permanent statics so next tick does a full refresh
+    if _G.SonorusState then _G.SonorusState.playerVoiceId = nil end
     if _G._TimeCache then _G._TimeCache.initialized = false end
     if _G._PermanentStatics then _G._PermanentStatics.initialized = false end
-    -- Mark active commitments as dirty for re-apply after load
     if _G.CommitmentManager then pcall(_G.CommitmentManager.MarkAllDirty) end
-    print("[Sonorus] Caches cleared for loading")
+    _G._MissionStatusCache = nil
+end
+
+-- Delayed refreshes for after player is back in the world (NOT safe mid-load)
+local function RefreshWorld(reason)
+    print("[Sonorus] RefreshWorld: " .. reason)
+    ExecuteInGameThreadWithDelay(2000, function()
+        if not _G.SonorusState.playerLoaded then return end
+        if RefreshTimeCache then pcall(RefreshTimeCache, true) end
+        if TimeDilation and TimeDilation.IsActive() then
+            ExecuteInGameThreadWithDelay(3000, function()
+                if not _G.SonorusState.playerLoaded then return end
+                TimeDilation.UpdateRate(true)
+            end)
+        end
+        UpdatePlayerInfo()
+        if _G.PathNav then
+            pcall(_G.PathNav.Clear)
+            pcall(_G.PathNav.RestartIfPending)
+        end
+        if RefreshHousePoints then RefreshHousePoints() end
+        if CompanionFollow then pcall(CompanionFollow.applySettings) end
+    end)
+    if _G.ForceRefreshStaticCache then _G.ForceRefreshStaticCache() end
+end
+
+local function DoPlayerHandshake()
+    local firstName, lastName, fullName = Utils.GetPlayerName()
+    if not fullName or fullName == "" then
+        print("[Sonorus] No player name available — deferring handshake\n")
+        return false
+    end
+
+    -- During character creation, the game returns placeholder "firstname lastname"
+    if string.lower(fullName) == "firstname lastname" then
+        print("[Sonorus] Placeholder player name detected — deferring handshake\n")
+        return false
+    end
+
+    _handshakePending = true
+    print("[Sonorus] Sending player_handshake: " .. fullName .. "\n")
+    SocketClient.send({
+        type = "player_handshake",
+        data = { playerName = fullName }
+    })
+    return true
+end
+
+function OnPlayerReady()
+    _handshakePending = false
+    _G.SonorusState.playerLoaded = true
+    _G.SonorusState.playerLoadedAt = os.clock()
+    print("[Sonorus] Player ready — playerLoaded = true\n")
+
+    -- Build location registry lookup tables (localization file exists by now)
+    -- Use _G ref so hot-reloaded module (from logic.lua dofile) is picked up
+    local LR = _G.LocationRegistryModule or LocationRegistry
+    LR.Init()
+
+    -- Insert 24hr commitment activities into game DB (needs registry + spots loaded)
+    if _G.CommitmentManager then
+        local ok, err = pcall(_G.CommitmentManager.Init)
+        if not ok then
+            print("[Sonorus] CommitmentManager.Init error: " .. tostring(err))
+        end
+    end
+
+    -- Now safe to send loading:finished and do post-load work
+    RefreshWorld("player handshake complete")
+    SocketClient.send({
+        type = "game_event",
+        event = "loading:finished",
+        data = {}
+    })
+
+end
+
+function OnLoadingScreenFinished()
+    if _G.SonorusState.playerLoaded then return end  -- Dedup (hook + poll can both fire)
+    if _handshakePending then return end  -- Already waiting
+
+    -- Try to handshake. If no player name yet (character creation),
+    -- playerLoaded stays false and we'll try again next loading screen.
+    local sent = DoPlayerHandshake()
+    if not sent then return end
+
+    -- Timeout: if no player_ready after 15 seconds, retry once.
+    -- If retry also fails after 15 more seconds, proceed anyway.
+    ExecuteInGameThreadWithDelay(15000, function()
+        if _handshakePending then
+            print("[Sonorus] Handshake timeout — retrying\n")
+            DoPlayerHandshake()
+            ExecuteInGameThreadWithDelay(15000, function()
+                if _handshakePending then
+                    print("[Sonorus] Handshake retry timeout — proceeding without handshake\n")
+                    _handshakePending = false
+                    _G.SonorusState.playerLoaded = true
+                    _G.SonorusState.playerLoadedAt = os.clock()
+                    RefreshWorld("handshake timeout fallback")
+                    SocketClient.send({
+                        type = "game_event",
+                        event = "loading:finished",
+                        data = {}
+                    })
+                end
+            end)
+        end
+    end)
+end
+
+-- Loading screen detection - fires when entering/exiting game
+-- (note: "Loadingcreen" is the actual class name, not a typo)
+_G._LoadingScreenPollHandle = nil  -- track active poll so we don't stack them
+NotifyOnNewObject("/Script/Phoenix.Loadingcreen", function(Context)
+    print("[Sonorus] Loading screen started")
+    _G.SonorusState.playerLoaded = false
+    _G.SonorusState.hasLoadedOnce = true
+    InvalidateWorld("loading screen started")
+
+    -- Cancel any existing poll before starting a new one
+    if _G._LoadingScreenPollHandle and _G._LoadingScreenPollHandle ~= "loading_screen_poll" then
+        pcall(CancelDelayedAction, _G._LoadingScreenPollHandle)
+    end
+    TickScheduler.Unregister("loading_screen_poll")
+    _G._LoadingScreenPollHandle = nil
+
+    -- Poll every 1s — require curtain up for 2 consecutive ticks before firing
+    local pollTicks = 0
+    local curtainUpTicks = 0
+    _G._LoadingScreenPollHandle = "loading_screen_poll"
+    TickScheduler.Register("loading_screen_poll", 1013, function()
+        pollTicks = pollTicks + 1
+        local curtainDown = true
+        pcall(function()
+            local curtainSys = FindFirstOf("CurtainSubsystem")
+            if curtainSys and Utils.SafeIsValid(curtainSys) then
+                curtainDown = curtainSys:IsCurtainDown(curtainSys)
+            end
+        end)
+        if curtainDown then
+            curtainUpTicks = 0
+            print("[Sonorus] Loading screen tick " .. pollTicks .. "s - curtain still down")
+        else
+            curtainUpTicks = curtainUpTicks + 1
+            if false and curtainUpTicks < 2 then
+                print("[Sonorus] Loading screen tick " .. pollTicks .. "s - curtain up (" .. curtainUpTicks .. "/2 confirm)")
+                return
+            end
+            TickScheduler.Unregister("loading_screen_poll")
+            _G._LoadingScreenPollHandle = nil
+            print("[Sonorus] Curtain confirmed after " .. pollTicks .. "s - load complete")
+            if OnLoadingScreenFinished then pcall(OnLoadingScreenFinished) end
+        end
+    end)
 end)
 
--- Hook on save load / character change
+-- Hook on save load / character change (logging only — OnLoadingScreenFinished handles setup)
 RegisterHook("/Script/Engine.PlayerController:ClientRestart", function(Context, NewPawn)
-    print("[Sonorus] ClientRestart hook fired - player loaded into game")
-    _G.SonorusState.playerLoaded = true  -- Player now in game world
-    -- Clear caches and force refresh - new game world
-    Cache.ClearObjects()
-    Cache.ClearAllEntities()  -- NPCs changed - force fresh FindAllOf
-    Cache.InvalidateStatic()
-    -- Release all locked NPCs (including preview locks) - they become invalid after load
-    if ReleaseAllNPCs then pcall(ReleaseAllNPCs) end
-    -- Restore normal input mode (in case chat was open)
-    if SetInputModeGameOnly then pcall(SetInputModeGameOnly) end
-    -- Reset chat input state (prevents stale preview lock on new world)
-    if _G.ChatInputState then
-        _G.ChatInputState.active = false
-        _G.ChatInputState.text = ""
+    print("[Sonorus] ClientRestart hook fired")
+    if not _G.SonorusState.hasLoadedOnce then
+        print("[Sonorus] Has not loaded yet, skipping hook")
+        return
     end
-    _G.ChatPreviewLock = nil
-    _G.STTPreviewLock = nil
-    -- Fresh time cache after load (delay to ensure scheduler is ready)
-    ExecuteInGameThreadWithDelay(500, function()
-        if RefreshTimeCache then pcall(RefreshTimeCache, true) end
-        if TimeDilation and TimeDilation.IsActive() then
-            TimeDilation.UpdateRate(true) -- Force update after load
-        end
-    end)
-    -- Delay slightly to ensure UIManager is ready (runs on game thread)
-    ExecuteInGameThreadWithDelay(1000, UpdatePlayerInfo)
-    -- Refresh house points after 2s (new save may have different standings)
-    ExecuteInGameThreadWithDelay(2000, function()
-        if RefreshHousePoints then RefreshHousePoints() end
-    end)
-    -- Commitment re-apply handled by timeUpdated event (CommitmentManager listens)
-    -- Reapply companion follow distance after 5s (CompanionManager config resets on load)
-    ExecuteInGameThreadWithDelay(5000, function()
-        if CompanionFollow then pcall(CompanionFollow.applySettings) end
-    end)
 end)
 
--- Hook on fast travel completion - NPCs change after fast travel
+-- Hook on fast travel / wait completion — may or may not trigger a loading screen
+-- (Wait/time pass does NOT create a Loadingcreen, but fast travel usually does)
 RegisterHook("/Script/Phoenix.FastTravelManager:FinishWait", function(Context)
-    print("[Sonorus] Fast travel finished - clearing caches")
-    _G.SonorusState.playerLoaded = true  -- Fallback: if ClientRestart didn't fire, fast travel proves player is loaded
-    Cache.ClearObjects()
-    Cache.ClearAllEntities()  -- NPCs changed - force fresh FindAllOf
-    Cache.InvalidateStatic()
-    -- Release all locked NPCs (including preview locks) - NPCs change after fast travel
-    if ReleaseAllNPCs then pcall(ReleaseAllNPCs) end
-    -- Restore normal input mode (in case chat was open)
-    if SetInputModeGameOnly then pcall(SetInputModeGameOnly) end
-    -- Reset chat input state
-    if _G.ChatInputState then
-        _G.ChatInputState.active = false
-        _G.ChatInputState.text = ""
-    end
-    _G.ChatPreviewLock = nil
-    _G.STTPreviewLock = nil
-    -- Fresh time cache + time dilation after fast travel (delay to ensure scheduler is ready)
-    ExecuteInGameThreadWithDelay(500, function()
-        if RefreshTimeCache then pcall(RefreshTimeCache, true) end
-        if TimeDilation and TimeDilation.IsActive() then
-            TimeDilation.UpdateRate(true) -- Force update after fast travel
-        end
-    end)
-    -- Refresh house points after 2s (in case time passed during travel)
-    ExecuteInGameThreadWithDelay(2000, function()
-        if RefreshHousePoints then RefreshHousePoints() end
-    end)
-    -- Commitment re-apply handled by timeUpdated event (CommitmentManager listens)
-    -- Reapply companion follow distance after 5s (CompanionManager config resets on fast travel)
-    ExecuteInGameThreadWithDelay(5000, function()
-        if CompanionFollow then pcall(CompanionFollow.applySettings) end
-    end)
+    print("[Sonorus] FinishWait hook fired")
+    InvalidateWorld("fast travel / wait")
+    RefreshWorld("fast travel / wait")
 end)
 
 -- ============================================
 -- Blueprint Mod Actor Detection
 -- ============================================
-NotifyOnNewObject("/Game/Mods/sonorusblueprintmod/ModActor.ModActor_C", function(Context)
-    _G.SonorusState.sonorusModActor = Context
-    print("[Sonorus] Sonorus ModActor found: " .. Context:GetName())
-end)
-
--- Delayed search for already-created actors (timing fallback)
--- Uses class path to distinguish between Sonorus and ConvAI actors
--- Retries every 2 seconds until Sonorus actor found (max 60 seconds)
-local modActorSearchStart = os.time()
-local modActorSearchAttempt = 0
-local modActorSearchHandle  -- Declare first for closure capture
-modActorSearchHandle = LoopInGameThreadWithDelay(2000, function()
-    modActorSearchAttempt = modActorSearchAttempt + 1
-
-    -- Give up after 60 seconds
-    if os.time() - modActorSearchStart > 60 then
-        print("[Sonorus] ModActor search timeout - giving up")
-        CancelDelayedAction(modActorSearchHandle)
-        return
-    end
-
-    -- Already found, stop searching
-    if _G.SonorusState.sonorusModActor then
-        CancelDelayedAction(modActorSearchHandle)
-        return
-    end
-
-    -- Already on game thread with LoopInGameThreadWithDelay, no wrapper needed
-    local modactors = FindAllOf("ModActor_C")
-    if modactors then
-        for _, actor in ipairs(modactors) do
-            -- Use SafeIsValid - corrupted references can crash
-            if Utils.SafeIsValid(actor) then
-                -- Use class path to identify which mod the actor belongs to
-                pcall(function()
-                    local class = actor:GetClass()
-                    if class then
-                        local className = class:GetFullName()
-
-                        if not _G.SonorusState.sonorusModActor and className:find("sonorusblueprintmod") then
-                            _G.SonorusState.sonorusModActor = actor
-                            print("[Sonorus] Sonorus ModActor detected (by class): " .. actor:GetName())
-                        end
-                    end
-                end)
-            end
-        end
-    end
-
-    -- Check if found this iteration
-    if _G.SonorusState.sonorusModActor then
-        CancelDelayedAction(modActorSearchHandle)
-    end
-end)
+BlueprintHelpers.SetupSonorusModActorLoader()
 
 -- ============================================
 -- Keybinds (delegate to logic.lua functions)
@@ -257,10 +325,58 @@ RegisterKeyBind(Key.F11, {}, function()
     end)
     if success then
         Cache.InvalidateStatic()
+        if _G.ForceRefreshStaticCache then _G.ForceRefreshStaticCache() end
         print("[Sonorus] Logic reloaded!")
     else
         print("[Sonorus] Reload failed: " .. tostring(err))
     end
+end)
+
+-- F9: Register commitment spot at player's current position (dev mode only)
+RegisterKeyBind(Key.F9, {}, function()
+    if not _G.SonorusDevMode then return end
+    ExecuteInGameThread(function()
+        local location = _G.LastTrackedLocation
+        if not location or location == "" then
+            if ShowHint then ShowHint("No location tracked", 3) end
+            return
+        end
+
+        local staticData = Cache.GetStaticData()
+        local player = staticData and staticData.player
+        if not player or not player:IsValid() then
+            if ShowHint then ShowHint("No player actor", 3) end
+            return
+        end
+
+        local pos, camRot
+        pcall(function()
+            pos = player:K2_GetActorLocation()
+            -- Use camera yaw (where you're looking), not player yaw
+            local cam = staticData.cameraManager
+            if cam then camRot = cam:GetCameraRotation() end
+        end)
+        if not pos or not camRot then
+            if ShowHint then ShowHint("Could not read position/camera", 3) end
+            return
+        end
+
+        local yaw = camRot.Yaw or 0
+        local msg = string.format("Spot: %s\nX=%.1f Y=%.1f Z=%.1f\nYaw=%.1f",
+            location, pos.X, pos.Y, pos.Z, yaw)
+        if ShowHint then ShowHint(msg, 5) end
+
+        if _G.SocketClient and _G.SocketClient.send then
+            _G.SocketClient.send({
+                type = "register_commitment_spot",
+                location = location,
+                x = pos.X,
+                y = pos.Y,
+                z = pos.Z,
+                yaw = yaw,
+            })
+        end
+    end)
 end)
 
 -- ============================================
@@ -352,11 +468,12 @@ RegisterHook("/Script/Phoenix.EnemyAIComponent:OnActorDamaged",
 )
 
 -- ============================================
--- Broom State (polling in logic.lua unified loop)
+-- Mount State (polling in logic.lua unified loop)
 -- ============================================
--- NOTE: Broom detection moved to polling in logic.lua unified loop (2s interval)
--- This avoids ReceiveTick hooks which fire every frame
-_G.BroomState = _G.BroomState or { mounted = false }
+-- NOTE: Mount detection moved to polling in logic.lua unified loop (2s interval)
+-- Uses IsPlayerOnMount() to detect all mounts (broom, hippogriff, graphorn, niffler)
+-- Mount type identified only on state change to avoid per-poll overhead
+_G.MountState = _G.MountState or { mounted = false, mountType = nil }
 
 -- ============================================
 -- Load logic.lua
@@ -375,35 +492,3 @@ end
 print("[Sonorus] ========================================")
 print("[Sonorus] Mod loaded!")
 print("[Sonorus] ========================================")
-
--- ============================================
--- Delayed Hook Registration (after ModActors load)
--- ============================================
-local hookRegistrationAttempted = false
-
-function TryRegisterHooksForModActors()
-    if hookRegistrationAttempted then return true end
-
-    local sonorusActor = nil
-    pcall(function()
-        if _G.SonorusState and _G.SonorusState.sonorusModActor then
-            sonorusActor = _G.SonorusState.sonorusModActor
-        end
-    end)
-
-    if not sonorusActor then
-        return false  -- Not ready yet
-    end
-
-    hookRegistrationAttempted = true
-    print("[Sonorus] ModActors detected, hook registration complete")
-    return true
-end
-
--- Check for ModActors periodically until found (quieter than before)
-local hookRegistrationHandle  -- Declare first for closure capture
-hookRegistrationHandle = LoopInGameThreadWithDelay(2000, function()
-    if TryRegisterHooksForModActors() then
-        CancelDelayedAction(hookRegistrationHandle)
-    end
-end)

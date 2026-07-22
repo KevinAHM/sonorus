@@ -139,6 +139,15 @@ def _resolve_voice(voice_id: str) -> Optional[str]:
     if voice_path:
         return str(voice_path)
 
+    # If voice_id is a hashed clone name (e.g. "PlayerMale_DE_DE_cafb73f0"),
+    # parse it back to the original character name + language and retry.
+    from services.tts.voice_utils import parse_hashed_voice_name, find_voice_reference
+    original_name, lang, _ = parse_hashed_voice_name(voice_id)
+    if original_name != voice_id:
+        path = find_voice_reference(original_name, language=lang or "EN_US")
+        if path:
+            return str(path)
+
     return None
 
 

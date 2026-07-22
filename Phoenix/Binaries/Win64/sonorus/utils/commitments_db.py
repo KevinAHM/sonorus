@@ -6,7 +6,6 @@ Follows the same patterns as dialogue_db.py: thread-local connections, WAL mode,
 import os
 import sqlite3
 import threading
-import uuid
 from contextlib import contextmanager
 from datetime import datetime
 
@@ -18,16 +17,19 @@ DB_PATH = os.path.join(DATA_DIR, "commitments.db")
 # Thread-local storage for connections
 _local = threading.local()
 
+# Track all connections for shutdown cleanup
+_all_connections = []
+_all_connections_lock = threading.Lock()
+
 # Lock for initialization
 _init_lock = threading.Lock()
 _initialized = False
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _ensure_data_dir():
-    if not os.path.exists(DATA_DIR):
-        os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 
 def _create_connection():
@@ -37,6 +39,8 @@ def _create_connection():
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
+    with _all_connections_lock:
+        _all_connections.append(conn)
     return conn
 
 
@@ -74,6 +78,32 @@ def get_connection():
                 pass
 
 
+def close_all():
+    """Close all connections across all threads, checkpoint WAL, reset state."""
+    global _initialized
+    with _all_connections_lock:
+        for conn in _all_connections:
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception:
+                pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+        _all_connections.clear()
+    if hasattr(_local, 'conn'):
+        _local.conn = None
+    _initialized = False
+
+
+def reinit(data_dir):
+    """Re-initialize with a new data directory."""
+    global DB_PATH
+    DB_PATH = os.path.join(data_dir, "commitments.db")
+    init_db()
+
+
 def _get_schema_version(conn):
     try:
         result = conn.execute(
@@ -100,7 +130,7 @@ def _run_migrations(conn, from_version):
         if current == 0:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS commitments (
-                    id TEXT PRIMARY KEY,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                     npc_id TEXT NOT NULL,
                     target_id TEXT NOT NULL,
                     location_id TEXT NOT NULL,
@@ -119,7 +149,44 @@ def _run_migrations(conn, from_version):
             conn.execute("CREATE INDEX IF NOT EXISTS idx_commitments_npc ON commitments(npc_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_commitments_status ON commitments(status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_commitments_start ON commitments(game_time_start)")
-            current = 1
+            current = 2
+        elif current == 1:
+            # Migrate TEXT id to INTEGER autoincrement
+            conn.execute("""
+                CREATE TABLE commitments_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    npc_id TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    location_id TEXT NOT NULL,
+                    location_display TEXT NOT NULL,
+                    activity_id TEXT NOT NULL,
+                    game_time_start TEXT NOT NULL,
+                    game_time_end TEXT NOT NULL,
+                    override_apply_time TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    is_companion INTEGER DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    resolved_at TEXT,
+                    notes TEXT
+                )
+            """)
+            conn.execute("""
+                INSERT INTO commitments_new (
+                    npc_id, target_id, location_id, location_display, activity_id,
+                    game_time_start, game_time_end, override_apply_time,
+                    status, is_companion, created_at, resolved_at, notes
+                ) SELECT
+                    npc_id, target_id, location_id, location_display, activity_id,
+                    game_time_start, game_time_end, override_apply_time,
+                    status, is_companion, created_at, resolved_at, notes
+                FROM commitments ORDER BY created_at ASC
+            """)
+            conn.execute("DROP TABLE commitments")
+            conn.execute("ALTER TABLE commitments_new RENAME TO commitments")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_commitments_npc ON commitments(npc_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_commitments_status ON commitments(status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_commitments_start ON commitments(game_time_start)")
+            current = 2
         else:
             raise ValueError(f"Unknown schema version {current}")
 
@@ -154,6 +221,9 @@ def init_db():
 
 def _ensure_initialized():
     if not _initialized:
+        from . import player_context
+        if not player_context.is_ready():
+            return
         init_db()
 
 
@@ -180,25 +250,25 @@ def _row_to_dict(row):
 def create_commitment(npc_id, target_id, location_id, location_display, activity_id,
                       game_time_start, game_time_end, override_apply_time,
                       is_companion=False, notes=None):
-    """Create a new commitment. Returns generated ID."""
+    """Create a new commitment. Returns generated ID (integer)."""
     _ensure_initialized()
-    commitment_id = str(uuid.uuid4())[:8]
     created_at = datetime.now().isoformat()
 
     try:
         with get_connection() as conn:
-            conn.execute("""
+            cursor = conn.execute("""
                 INSERT INTO commitments (
-                    id, npc_id, target_id, location_id, location_display, activity_id,
+                    npc_id, target_id, location_id, location_display, activity_id,
                     game_time_start, game_time_end, override_apply_time,
                     status, is_companion, created_at, notes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
             """, (
-                commitment_id, npc_id, target_id, location_id, location_display,
+                npc_id, target_id, location_id, location_display,
                 activity_id, game_time_start, game_time_end, override_apply_time,
                 1 if is_companion else 0, created_at, notes,
             ))
             conn.commit()
+            commitment_id = cursor.lastrowid
         print(f"[CommitmentsDB] Created commitment {commitment_id}: {npc_id} -> {location_display} at {game_time_start}")
         return commitment_id
     except Exception as e:
@@ -366,3 +436,10 @@ def get_commitments_in_window(npc_id, window_start, window_end):
     except Exception as e:
         print(f"[CommitmentsDB] Error checking window conflicts: {e}")
         return []
+
+
+try:
+    from . import player_context
+    player_context.register("commitments_db", close_all, reinit)
+except ImportError:
+    pass

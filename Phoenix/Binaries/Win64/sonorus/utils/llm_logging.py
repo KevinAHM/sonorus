@@ -40,7 +40,19 @@ def log_llm(payload, response=None, error=None):
 
             for msg in payload.get('messages', []):
                 f.write(f"--- {msg['role'].upper()} ---\n")
-                f.write(f"{msg['content']}\n\n")
+                content = msg.get('content', '')
+                # Handle multipart content (text + images)
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict):
+                            if part.get('type') == 'text':
+                                f.write(f"{part['text']}\n\n")
+                            elif part.get('type') == 'image_url':
+                                f.write("[image attached]\n\n")
+                        else:
+                            f.write(f"{part}\n\n")
+                else:
+                    f.write(f"{content}\n\n")
 
             if response:
                 f.write("=== RESPONSE ===\n")

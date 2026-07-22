@@ -5,8 +5,8 @@ Reads HMD + left/right controller poses, grip states, and the actual in-game
 camera rotation from named shared memory written by the sonorus_vr_bridge UEVR
 plugin.  Works regardless of whether UEVR uses OpenVR or OpenXR internally.
 
-Supports both v2 (80-byte, pose-only) and v3 (112-byte, adds left controller
-+ grip states) shared memory layouts.
+Supports v2 (80-byte, pose-only), v3 (112-byte, adds left controller + grip
+states), and v4 (132-byte, adds game-world HMD transform) shared memory layouts.
 """
 import math
 import mmap
@@ -44,10 +44,12 @@ from vr.base import VRBackend, PoseData
 _SHM_NAME    = "SonorusVRData"
 _SHM_SIZE_V2 = 80
 _SHM_SIZE_V3 = 112
+_SHM_SIZE_V4 = 132
 _FMT_V2 = "<II3f4f3f4f3fBBBB"       # 80 bytes
 _FMT_V3 = "<II3f4f3f4f3fBBBB3f4fBBBB"  # 112 bytes
+_FMT_V4 = "<II3f4f3f4f3fBBBB3f4fBBBB3f2f"  # 132 bytes
 
-# Field indices (same for both v2 and v3 up to index 22):
+# Field indices (same for v2/v3/v4 up to index 22):
 # [0]=version [1]=frame_counter
 # [2-4]=hmd_pos [5-8]=hmd_rot(w,x,y,z)
 # [9-11]=ctrl_pos [12-15]=ctrl_rot(w,x,y,z)
@@ -56,6 +58,8 @@ _FMT_V3 = "<II3f4f3f4f3fBBBB3f4fBBBB"  # 112 bytes
 # v3 additional:
 # [23-25]=left_pos [26-29]=left_rot(w,x,y,z)
 # [30]=left_valid [31]=grip_right [32]=grip_left [33]=pad
+# v4 additional:
+# [34-36]=hmd_world_pos(x,y,z) [37]=hmd_world_yaw [38]=hmd_world_pitch
 
 
 def _try_open_shm(size: int) -> Optional[mmap.mmap]:
@@ -82,6 +86,10 @@ class UEVRBackend(VRBackend):
         self.left_valid: bool = False
         self.hmd_rot:    tuple = (1.0, 0.0, 0.0, 0.0)  # w,x,y,z quaternion
         self.cam_yaw:    float = 0.0
+        # v4: game-world HMD transform (computed by C++ plugin from standing_origin + rotation_offset)
+        self.hmd_world_pos:   tuple = (0.0, 0.0, 0.0)
+        self.hmd_world_yaw:   float = 0.0
+        self.hmd_world_pitch: float = 0.0
         self.cam_pitch:  float = 0.0
         self.cam_valid:  bool = False
 
@@ -102,9 +110,12 @@ class UEVRBackend(VRBackend):
 
         On Windows mmap(-1, ..., tagname=) CREATES the mapping if it doesn't
         exist (filled with zeros), so we must read the version field to
-        distinguish 'plugin running' (version 2 or 3) from empty mapping.
+        distinguish 'plugin running' (version 2-4) from empty mapping.
         """
-        # Try v3 first, fall back to v2
+        # Try v4 first, fall back to v3, then v2
+        ver = UEVRBackend._read_version(_SHM_SIZE_V4)
+        if ver in (2, 3, 4):
+            return True
         ver = UEVRBackend._read_version(_SHM_SIZE_V3)
         if ver in (2, 3):
             return True
@@ -115,7 +126,32 @@ class UEVRBackend(VRBackend):
         return self.is_available()
 
     def init(self) -> bool:
-        # Try v3 layout first
+        # Try v4 layout first (game-world HMD transform)
+        shm = _try_open_shm(_SHM_SIZE_V4)
+        if shm:
+            try:
+                ver = struct.unpack("<I", shm[:4])[0]
+                if ver == 4:
+                    data = struct.unpack(_FMT_V4, shm[:_SHM_SIZE_V4])
+                    frame = data[1]
+                    hmd_active = data[20]
+                    if hmd_active:
+                        self._shm = shm
+                        self._shm_version = 4
+                        self._last_frame = frame
+                        runtime = "OpenXR" if data[21] else "OpenVR"
+                        print(f"[VR/UEVR] Connected v4 (runtime={runtime}, frame={frame})")
+                        return True
+                    shm.close()
+                else:
+                    shm.close()
+            except Exception:
+                try:
+                    shm.close()
+                except Exception:
+                    pass
+
+        # Try v3 layout
         shm = _try_open_shm(_SHM_SIZE_V3)
         if shm:
             try:
@@ -131,7 +167,7 @@ class UEVRBackend(VRBackend):
                         runtime = "OpenXR" if data[21] else "OpenVR"
                         print(f"[VR/UEVR] Connected v3 (runtime={runtime}, frame={frame})")
                         return True
-                    shm.close()  # hmd not yet active; fall through to retry
+                    shm.close()
                 elif ver == 2:
                     # Old DLL created 80-byte mapping; reopen at correct size
                     shm.close()
@@ -180,20 +216,22 @@ class UEVRBackend(VRBackend):
     def _quat_to_yaw_pitch(w, x, y, z) -> Tuple[float, float]:
         """Convert quaternion (w,x,y,z) to (yaw, pitch) in degrees.
 
-        UEVR get_pose() returns quaternions in Z-up coordinate space (UE convention).
-        Decomposition: Z-axis = yaw, Y-axis = pitch, X-axis = roll (intrinsic ZYX).
+        UEVR get_pose() returns quaternions in Y-up tracking space (OpenXR).
+        Uses forward vector: forward = -Z, right = +X, up = +Y.
+        Yaw positive = left (matches UE convention). Pitch positive = up.
         """
-        # Yaw: Z-axis rotation
-        siny_cosp = 2.0 * (w * z + x * y)
-        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-        yaw = math.degrees(math.atan2(siny_cosp, cosy_cosp))
+        # Forward vector = -Z column of rotation matrix
+        fx = -2.0 * (x * z + w * y)
+        fy =  2.0 * (w * x - y * z)
+        fz =  2.0 * (x * x + y * y) - 1.0
 
-        # Pitch: Y-axis rotation (negative = looking down, matching UE convention)
-        sinp = 2.0 * (w * y - x * z)
-        sinp = max(-1.0, min(1.0, sinp))
-        pitch = math.degrees(math.asin(sinp))
+        # Yaw: horizontal angle in XZ plane
+        yaw = math.degrees(math.atan2(-fx, -fz))
 
-        return -yaw, pitch
+        # Pitch: elevation from horizontal
+        pitch = math.degrees(math.asin(max(-1.0, min(1.0, fy))))
+
+        return yaw, pitch
 
     def poll(self) -> Tuple[PoseData, Optional[PoseData]]:
         hmd_pose = PoseData()
@@ -204,7 +242,10 @@ class UEVRBackend(VRBackend):
 
         try:
             self._shm.seek(0)
-            if self._shm_version == 3:
+            if self._shm_version == 4:
+                raw = self._shm.read(_SHM_SIZE_V4)
+                data = struct.unpack(_FMT_V4, raw)
+            elif self._shm_version == 3:
                 raw = self._shm.read(_SHM_SIZE_V3)
                 data = struct.unpack(_FMT_V3, raw)
             else:
@@ -217,7 +258,13 @@ class UEVRBackend(VRBackend):
             # Always update HMD quaternion + grip/left state (even for stale pose frames)
             self.hmd_rot = (data[5], data[6], data[7], data[8])  # w,x,y,z
 
-            if self._shm_version == 3:
+            # v4: game-world HMD transform (always update, even for stale frames)
+            if self._shm_version == 4:
+                self.hmd_world_pos = (data[34], data[35], data[36])
+                self.hmd_world_yaw = data[37]
+                self.hmd_world_pitch = data[38]
+
+            if self._shm_version >= 3:
                 self.grip_right = bool(data[31])
                 self.grip_left  = bool(data[32])
                 self.left_valid = bool(data[30])

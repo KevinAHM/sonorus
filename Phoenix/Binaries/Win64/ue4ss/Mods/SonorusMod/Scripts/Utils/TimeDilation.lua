@@ -32,6 +32,8 @@ _G.TimeDilationState = _G.TimeDilationState or {
     -- Runtime state
     currentRate = 3.0,  -- Current rate in our format (realtime multiplier)
     initialized = false,
+    pendingReapply = false,
+    pendingReason = nil,
 }
 
 -- ============================================
@@ -180,10 +182,11 @@ local function ApplyRate(rate, force)
     local scheduler = Cache.Get("TimeDilation_Scheduler", function() return FindFirstOf("Scheduler") end)
     if not scheduler then
         if _G.DevPrint then _G.DevPrint("[TimeDilation] Scheduler not found") end
-        return
+        return false
     end
 
     local gameRate = ToGameRate(rate)
+    local applied = false
 
     -- Try the "Advanced" method if objects are found
     local advancedSuccess = false
@@ -192,21 +195,29 @@ local function ApplyRate(rate, force)
     
     if objs then
         local ok, err = pcall(function()
-            SyncWithGameTime(rate)
+            advancedSuccess = SyncWithGameTime(rate)
         end)
-        if ok then
-            advancedSuccess = true
+        if ok and advancedSuccess then
+            applied = true
         else
             print("[TimeDilation] SyncWithGameTime failed: " .. tostring(err))
         end
-    else
+    end
+
+    if not applied then
         -- Fallback to simple overrides if objects missing (e.g. interior)
         local ok, err = pcall(function()
             scheduler:SetSimulationTimeFactorOverride(gameRate)
         end)
-        if not ok then
-             if _G.DevPrint then _G.DevPrint("[TimeDilation] Failed to apply simple rate: " .. tostring(err)) end
+        if ok then
+            applied = true
+        else
+            if _G.DevPrint then _G.DevPrint("[TimeDilation] Failed to apply simple rate: " .. tostring(err)) end
         end
+    end
+
+    if not applied then
+        return false
     end
 
     state.lastAppliedRate = rate
@@ -215,6 +226,7 @@ local function ApplyRate(rate, force)
     local forcedStr = force and " (FORCED)" or ""
     print(string.format("[TimeDilation] %s: %.1fx realtime (game factor: %.4f)%s", 
         method, rate, gameRate, forcedStr))
+    return true
 end
 
 -- ============================================
@@ -239,10 +251,14 @@ function TimeDilation.UpdateSettings(settings)
         tostring(state.enabled), state.dayRate, state.nightRate))
 
     if state.enabled then
+        state.pendingReapply = true
+        state.pendingReason = "settings update"
         TimeDilation.UpdateRate(true) -- Force update on settings change
     elseif wasInitialized and wasEnabled and not state.enabled then
         -- Only reset to vanilla when ACTIVELY turning off (not on initial load)
         -- Reset to vanilla game speed (30x realtime, 48 real mins per game day)
+        state.pendingReapply = false
+        state.pendingReason = nil
         ApplyRate(30.0, true)
     end
     -- If disabled on initial load, don't touch time flow at all - let game handle it
@@ -265,14 +281,30 @@ end
 
 function TimeDilation.UpdateRate(force)
     local state = _G.TimeDilationState
-    if not state.enabled then return end
+    if not state.enabled then
+        state.pendingReapply = false
+        state.pendingReason = nil
+        return false
+    end
+    if not _G.SonorusState or not _G.SonorusState.playerLoaded then
+        state.pendingReapply = true
+        state.pendingReason = state.pendingReason or "player not loaded"
+        return false
+    end
     
     local targetRate = TimeDilation.GetTargetRate()
     
     -- Only apply if changed or forced
-    if force or targetRate ~= state.currentRate then
-         ApplyRate(targetRate, force)
+    if force or state.pendingReapply or targetRate ~= state.currentRate then
+        local applied = ApplyRate(targetRate, force or state.pendingReapply)
+        if applied then
+            state.pendingReapply = false
+            state.pendingReason = nil
+        end
+        return applied
     end
+
+    return true
 end
 
 -- No-op: conversation rate setting removed, time continues at day/night rate
@@ -288,14 +320,33 @@ function TimeDilation.IsActive()
     return state.enabled and state.initialized
 end
 
+function TimeDilation.MarkDirty(reason)
+    local state = _G.TimeDilationState
+    if not state.enabled then return end
+
+    state.currentRate = nil
+    state.lastAppliedRate = nil
+    state.pendingReapply = true
+    state.pendingReason = reason or "world invalidated"
+    print("[TimeDilation] Marked dirty: " .. state.pendingReason)
+end
+
 function TimeDilation.OnTick()
     local state = _G.TimeDilationState
     if not state.enabled then return end
+    if not _G.SonorusState or not _G.SonorusState.playerLoaded then return end
+
+    if state.pendingReapply then
+        print("[TimeDilation] Retrying pending apply: " .. tostring(state.pendingReason))
+        TimeDilation.UpdateRate(true)
+        return
+    end
 
     -- Check if rate needs update (day/night transition)
     local targetRate = TimeDilation.GetTargetRate()
     if targetRate ~= state.currentRate then
-        print(string.format("[TimeDilation] Day/night transition: %.2f -> %.2f", state.currentRate, targetRate))
+        local currentRateStr = state.currentRate and string.format("%.2f", state.currentRate) or "nil"
+        print(string.format("[TimeDilation] Day/night transition: %s -> %.2f", currentRateStr, targetRate))
         ApplyRate(targetRate, true)
     end
 end

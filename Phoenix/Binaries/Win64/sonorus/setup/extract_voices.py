@@ -41,6 +41,8 @@ import wave
 # Path setup - this script is in sonorus/setup/, go up one level to sonorus/
 SETUP_DIR = Path(__file__).parent
 SONORUS_DIR = SETUP_DIR.parent
+if str(SONORUS_DIR) not in sys.path:
+    sys.path.insert(0, str(SONORUS_DIR))
 DATA_DIR = SONORUS_DIR / "data"
 GAME_DIR = SONORUS_DIR.parent.parent.parent  # Phoenix folder
 PAKS_DIR = GAME_DIR / "Content" / "Paks"
@@ -55,12 +57,17 @@ def get_language_paths(language: str = "EN_US") -> Dict[str, Path]:
 
     Args:
         language: Language code like EN_US, DE_DE, FR_FR, etc.
+                  Undubbed languages automatically fall back to EN_US.
 
     Returns:
         Dict with 'manifest' and 'output_dir' paths
         - EN_US uses voice_manifest.json and voice_references/ (backward compat)
         - Other languages use voice_manifest_xx_xx.json and voice_references/xx_xx/
     """
+    # Undubbed languages fall back to EN_US for voice manifests and references
+    from constants import get_voice_language
+    language = get_voice_language(language)
+
     if language == "EN_US":
         # Backward compatibility - English uses root paths
         return {

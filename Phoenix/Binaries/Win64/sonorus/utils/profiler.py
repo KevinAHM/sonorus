@@ -247,11 +247,14 @@ class Profiler:
                     print(f"  {'5. Play Turn + Setup':<35} {stream_setup:>9.0f}ms {cumulative:>9.0f}ms  {_wall_for('npc_audio_start'):>12}")
                     # Show sub-steps if available
                     setup_wait = self._get_duration_unlocked("tts_first_chunk", "setup_received")
-                    prev_turn_wait = self._get_duration_unlocked("setup_received", "prev_turn_done")
+                    viseme_gen = self._get_duration_unlocked("setup_received", "viseme_gen_done")
+                    prev_turn_wait = self._get_duration_unlocked("waiting_prev_turn", "prev_turn_done")
                     lipsync_send = self._get_duration_unlocked("prev_turn_done", "lipsync_sent")
                     lipsync_ack = self._get_duration_unlocked("lipsync_sent", "npc_audio_start")
                     if setup_wait > 0:
                         print(f"     {'└─ Wait for setup_event':<32} {setup_wait:>9.0f}ms            {_wall_for('setup_received'):>12}")
+                    if viseme_gen > 0:
+                        print(f"     {'└─ Viseme generation':<32} {viseme_gen:>9.0f}ms            {_wall_for('viseme_gen_done'):>12}")
                     if prev_turn_wait > 0:
                         print(f"     {'└─ Wait prev turn done':<32} {prev_turn_wait:>9.0f}ms            {_wall_for('prev_turn_done'):>12}")
                     if lipsync_send > 0:

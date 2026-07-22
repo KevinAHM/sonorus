@@ -1,0 +1,130 @@
+{
+  "_comment": "World facts derived from mission completion. Status: 0=PreActive 1=Activating 2=Active 3=PostActive 4=Complete 5=Failed 6=Invalid. Facts are milestone reminders, not narratives. The LLM knows the quests — these just confirm what has happened in this save.",
+  "probe_chains": [
+    ["FGS_01", "EVZ_01"],
+    ["CNF_01", "EVL_01", "EVL_02", "EVL_03"],
+    ["HER_01", "HER_02", "HER_03"],
+    ["AVM_02", "NTR_01", "NTR_02", "NTR_03"],
+    ["GDW_01", "DMS_01"],
+    ["COM_01"],
+    ["COM_19"]
+  ],
+  "global_facts": [
+    {
+      "mission": "FGS_01",
+      "min_status": 4,
+      "fact": "Professor Eleazar Fig gave his life helping to contain the power of the final repository. The goblin rebellion led by Ranrok has ended."
+    }
+  ],
+  "npc_facts": {
+    "SebastianSallow": [
+      {
+        "mission": "CNF_01",
+        "min_status": 4,
+        "fact": "You showed {player_name} the Undercroft and taught them Confringo."
+      },
+      {
+        "mission": "EVL_01",
+        "min_status": 4,
+        "fact": "You, {player_name}, and Ominis explored Salazar Slytherin's Scriptorium."
+      },
+      {
+        "mission": "EVL_02",
+        "min_status": 4,
+        "fact": "You and {player_name} found the Relic of the Dead. The events at Feldcroft with the goblin raid have transpired."
+      },
+      {
+        "mission": "EVL_03",
+        "min_status": 4,
+        "fact": "Solomon Sallow has died. The events surrounding Anne and the Relic of the Dead have come to a head."
+      },
+      {
+        "mission": "EVZ_01",
+        "min_status": 3,
+        "fact": "The truth about Rookwood's role in Anne's curse has come to light."
+      }
+    ],
+    "NatsaiOnai": [
+      {
+        "mission": "HER_01",
+        "min_status": 4,
+        "fact": "You and {player_name} helped find the lost child Archie near a Rookwood encampment."
+      },
+      {
+        "mission": "HER_02",
+        "min_status": 4,
+        "fact": "You and {player_name} investigated Rookwood's hold on Hogsmeade."
+      },
+      {
+        "mission": "HER_03",
+        "min_status": 4,
+        "fact": "The events with Theophilus Harlow have transpired. You were injured protecting {player_name}."
+      }
+    ],
+    "PoppySweeting": [
+      {
+        "mission": "AVM_02",
+        "min_status": 4,
+        "fact": "You and {player_name} discovered a dragon fighting ring operated by poachers."
+      },
+      {
+        "mission": "NTR_01",
+        "min_status": 4,
+        "fact": "You and {player_name} dealt with the dragon egg situation and found a poacher journal."
+      },
+      {
+        "mission": "NTR_02",
+        "min_status": 4,
+        "fact": "You and {player_name} worked with centaurs to help protect golden snidgets."
+      },
+      {
+        "mission": "NTR_03",
+        "min_status": 4,
+        "fact": "You and {player_name} found and rescued the hidden snidgets from poachers."
+      }
+    ],
+    "OminisGaunt": [
+      {
+        "mission": "EVL_01",
+        "min_status": 4,
+        "fact": "You reluctantly helped {player_name} and Sebastian access Salazar Slytherin's Scriptorium."
+      },
+      {
+        "mission": "EVL_03",
+        "min_status": 4,
+        "fact": "Solomon Sallow has died. The events surrounding Sebastian and the Relic of the Dead have come to a head."
+      },
+      {
+        "mission": "EVZ_01",
+        "min_status": 3,
+        "fact": "The truth about Rookwood's role in Anne's curse has come to light."
+      }
+    ],
+    "DuncanHobhouse": [
+      {
+        "mission": "COM_01",
+        "min_status": 4,
+        "fact": "You and {player_name} resolved the situation with the Hidden Herbology Corridor."
+      }
+    ],
+    "NellieOggspire": [
+      {
+        "mission": "COM_19",
+        "min_status": 4,
+        "fact": "You and {player_name} took on the Daedalian Key challenge together."
+      }
+    ],
+    "GladwinMoon": [
+      {
+        "mission": "GDW_01",
+        "min_status": 4,
+        "fact": "{player_name} helped you with the demiguise statue collection."
+      },
+      {
+        "mission": "DMS_01",
+        "min_status": 4,
+        "fact": "{player_name} continued collecting demiguise statues for you."
+      }
+    ]
+  }
+}

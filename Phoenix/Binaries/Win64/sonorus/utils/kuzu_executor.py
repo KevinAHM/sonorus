@@ -91,6 +91,10 @@ class KuzuExecutor:
         self._worker_thread: Optional[threading.Thread] = None
         self._running = False
         self._current_task: Optional[str] = None
+        self._active_tasks = 0
+        self._state_lock = threading.Lock()
+        self._idle_event = threading.Event()
+        self._idle_event.set()
         self._stats = {
             'total_tasks': 0,
             'successful_tasks': 0,
@@ -122,12 +126,13 @@ class KuzuExecutor:
 
     def _worker_loop(self):
         """Main worker loop - processes tasks from queue."""
-        while self._running:
+        while self._running or not self._queue.empty() or self._has_active_tasks():
             try:
                 # Wait for work with timeout (allows checking _running flag)
                 try:
                     _, work_item = self._queue.get(timeout=1.0)
                 except queue.Empty:
+                    self._update_idle_state()
                     continue
 
                 # Track queue depth
@@ -157,75 +162,73 @@ class KuzuExecutor:
                 self._stats['contentions'] += 1
             print(f"[KuzuExecutor] Task '{func_name}' waited {wait_time:.2f}s in queue")
 
-        self._current_task = func_name
-        last_error = None
-
-        for attempt in range(work_item.max_retries + 1):
-            work_item.attempt = attempt
-
-            if attempt > 0:
-                # Exponential backoff: 0.5s, 1s, 2s, 4s, ...
-                backoff = min(0.5 * (2 ** (attempt - 1)), 10.0)
-                print(f"[KuzuExecutor] Retry {attempt}/{work_item.max_retries} for '{func_name}' after {backoff:.1f}s")
-                with self._stats_lock:
-                    self._stats['total_retries'] += 1
-                time.sleep(backoff)
-
-            try:
-                start_time = time.time()
-                result = work_item.func(*work_item.args, **work_item.kwargs)
-                elapsed = time.time() - start_time
-
-                # Success
-                work_item.result = TaskResult(
-                    success=True,
-                    value=result,
-                    retries=attempt,
-                    wait_time=wait_time
-                )
-
-                with self._stats_lock:
-                    self._stats['total_tasks'] += 1
-                    self._stats['successful_tasks'] += 1
-                    self._stats['total_wait_time'] += wait_time
+        self._mark_task_started(func_name)
+        try:
+            for attempt in range(work_item.max_retries + 1):
+                work_item.attempt = attempt
 
                 if attempt > 0:
-                    print(f"[KuzuExecutor] Task '{func_name}' succeeded after {attempt} retries ({elapsed:.2f}s)")
+                    # Exponential backoff: 0.5s, 1s, 2s, 4s, ...
+                    backoff = min(0.5 * (2 ** (attempt - 1)), 10.0)
+                    print(f"[KuzuExecutor] Retry {attempt}/{work_item.max_retries} for '{func_name}' after {backoff:.1f}s")
+                    with self._stats_lock:
+                        self._stats['total_retries'] += 1
+                    time.sleep(backoff)
 
-                break
+                try:
+                    start_time = time.time()
+                    result = work_item.func(*work_item.args, **work_item.kwargs)
+                    elapsed = time.time() - start_time
 
-            except Exception as e:
-                last_error = e
-                error_str = str(e)
-
-                # Check if error is retryable
-                retryable = self._is_retryable_error(e)
-
-                if not retryable or attempt >= work_item.max_retries:
-                    # Final failure
-                    print(f"[KuzuExecutor] Task '{func_name}' failed: {error_str}")
-                    if attempt > 0:
-                        print(f"[KuzuExecutor] Failed after {attempt} retries")
-                    traceback.print_exc()
-
+                    # Success
                     work_item.result = TaskResult(
-                        success=False,
-                        error=e,
+                        success=True,
+                        value=result,
                         retries=attempt,
                         wait_time=wait_time
                     )
 
                     with self._stats_lock:
                         self._stats['total_tasks'] += 1
-                        self._stats['failed_tasks'] += 1
+                        self._stats['successful_tasks'] += 1
                         self._stats['total_wait_time'] += wait_time
 
-                    break
-                else:
-                    print(f"[KuzuExecutor] Task '{func_name}' failed (retryable): {error_str}")
+                    if attempt > 0:
+                        print(f"[KuzuExecutor] Task '{func_name}' succeeded after {attempt} retries ({elapsed:.2f}s)")
 
-        self._current_task = None
-        work_item.result_event.set()
+                    break
+
+                except Exception as e:
+                    error_str = str(e)
+
+                    # Check if error is retryable
+                    retryable = self._is_retryable_error(e)
+
+                    if not retryable or attempt >= work_item.max_retries:
+                        # Final failure
+                        print(f"[KuzuExecutor] Task '{func_name}' failed: {error_str}")
+                        if attempt > 0:
+                            print(f"[KuzuExecutor] Failed after {attempt} retries")
+                        traceback.print_exc()
+
+                        work_item.result = TaskResult(
+                            success=False,
+                            error=e,
+                            retries=attempt,
+                            wait_time=wait_time
+                        )
+
+                        with self._stats_lock:
+                            self._stats['total_tasks'] += 1
+                            self._stats['failed_tasks'] += 1
+                            self._stats['total_wait_time'] += wait_time
+
+                        break
+                    else:
+                        print(f"[KuzuExecutor] Task '{func_name}' failed (retryable): {error_str}")
+        finally:
+            work_item.result_event.set()
+            self._mark_task_finished()
 
     def _is_retryable_error(self, error: Exception) -> bool:
         """Determine if an error is worth retrying."""
@@ -286,6 +289,7 @@ class KuzuExecutor:
             self._start_worker()
 
         work_item = _WorkItem(func, args, kwargs, priority, timeout, max_retries)
+        self._idle_event.clear()
 
         # Add to queue (priority, work_item) - lower priority value = higher priority
         self._queue.put((priority.value, work_item))
@@ -330,6 +334,7 @@ class KuzuExecutor:
             return result
 
         work_item = _WorkItem(wrapped_with_callback, (), {}, priority, timeout, max_retries)
+        self._idle_event.clear()
 
         if callback:
             # Start a thread to wait for result and call callback
@@ -347,8 +352,34 @@ class KuzuExecutor:
             stats = self._stats.copy()
         stats['queue_depth'] = self._queue.qsize()
         stats['current_task'] = self._current_task
+        stats['active_tasks'] = self._active_tasks
         stats['worker_alive'] = self._worker_thread.is_alive() if self._worker_thread else False
         return stats
+
+    def _has_active_tasks(self) -> bool:
+        with self._state_lock:
+            return self._active_tasks > 0
+
+    def _update_idle_state(self) -> None:
+        with self._state_lock:
+            is_idle = self._active_tasks == 0 and self._queue.empty()
+        if is_idle:
+            self._idle_event.set()
+        else:
+            self._idle_event.clear()
+
+    def _mark_task_started(self, func_name: str) -> None:
+        with self._state_lock:
+            self._active_tasks += 1
+            self._current_task = func_name
+            self._idle_event.clear()
+
+    def _mark_task_finished(self) -> None:
+        with self._state_lock:
+            if self._active_tasks > 0:
+                self._active_tasks -= 1
+            self._current_task = None
+        self._update_idle_state()
 
     def shutdown(self, wait: bool = True, timeout: float = 30.0) -> bool:
         """
@@ -364,26 +395,23 @@ class KuzuExecutor:
         print(f"[KuzuExecutor] Shutdown requested (wait={wait}, timeout={timeout})")
 
         if wait:
-            # Wait for queue to drain
-            start = time.time()
-            while not self._queue.empty() and (time.time() - start) < timeout:
-                time.sleep(0.1)
-
-            if not self._queue.empty():
+            if not self._idle_event.wait(timeout=timeout):
                 remaining = self._queue.qsize()
-                print(f"[KuzuExecutor] Shutdown timeout with {remaining} tasks remaining")
+                active = self._active_tasks
+                print(f"[KuzuExecutor] Shutdown timeout with {remaining} queued and {active} active tasks")
 
         self._running = False
 
         if self._worker_thread and self._worker_thread.is_alive():
-            self._worker_thread.join(timeout=5.0)
+            join_timeout = timeout if wait else 5.0
+            self._worker_thread.join(timeout=join_timeout)
 
         stats = self.get_stats()
         print(f"[KuzuExecutor] Shutdown complete. Stats: {stats['total_tasks']} tasks, "
               f"{stats['failed_tasks']} failed, {stats['total_retries']} retries, "
               f"{stats['contentions']} contentions")
 
-        return self._queue.empty()
+        return self._queue.empty() and self._active_tasks == 0 and not stats['worker_alive']
 
 
 # Global executor instance

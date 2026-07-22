@@ -14,6 +14,7 @@ from .settings import (
     save_settings,
     deep_merge,
     get_setting,
+    is_llm_provider_feature_disabled,
     read_file,
     write_file,
     is_dev_mode,
@@ -81,6 +82,9 @@ from .game_context import (
 
 from .prompts import (
     substitute_placeholders,
+    get_speech_rules,
+    build_character_guidance_sections,
+    get_world_lore_block,
     get_character,
 )
 
@@ -99,7 +103,9 @@ from .llm_utils import (
 from .agents import (
     run_target_selection_agent,
     run_interjection_agent,
+    run_event_commentary_agent,
     run_move_classifier,
+    run_rhetorical_question_classifier,
     run_input_correction_agent,
     run_prompt_parser_agent,
 )

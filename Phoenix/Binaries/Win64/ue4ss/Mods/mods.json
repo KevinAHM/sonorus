@@ -9,7 +9,7 @@
     },
     {
         "mod_name": "ConsoleEnablerMod",
-        "mod_enabled": true
+        "mod_enabled": false
     },
     {
         "mod_name": "SonorusMod",

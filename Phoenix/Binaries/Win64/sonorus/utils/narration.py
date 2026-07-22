@@ -1,12 +1,12 @@
-"""Narration parsing utilities for inline *narration* in LLM output.
+"""Narration parsing utilities for inline *narration* in text output.
 
 Format convention:
   "Hello there." *He glanced nervously at the door.* "What brings you here?"
 
 Rules:
-  - "..." → dialogue (character voice, with lipsync)
-  - *multi-word standalone* → narration (narrator voice, no lipsync)
-  - *word* inline within quotes → emphasis (same voice, italic subtitle)
+  - "..." -> dialogue (character voice, with lipsync)
+  - *3+ word / punctuated standalone* -> narration (narrator voice, no lipsync)
+  - *word* or short emphasis phrase -> emphasis (same voice)
 """
 
 import re
@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import List
 
 # Matches *...* blocks (non-greedy, content can span multiple words)
-_ASTERISK_BLOCK = re.compile(r'\*([^*]+)\*')
+_ASTERISK_BLOCK = re.compile(r"\*([^*]+)\*")
 
 
 @dataclass
@@ -23,31 +23,46 @@ class Segment:
     is_narration: bool
 
 
-def parse_segments(text: str) -> List[Segment]:
-    """Parse LLM output into dialogue and narration segments.
+def _is_narration_block(content: str, narration_min_words: int = 3) -> bool:
+    """Return True when an asterisk block looks like narration, not emphasis."""
+    if not content:
+        return False
+
+    word_count = len(re.findall(r"\S+", content))
+    narration_min_words = max(1, int(narration_min_words or 1))
+    if word_count >= narration_min_words:
+        return True
+
+    return bool(re.search(r"[.!?,]", content))
+
+
+def parse_segments(text: str, narration_min_words: int = 3) -> List[Segment]:
+    """Parse text into dialogue and narration segments.
 
     Rules:
-    - *multi-word blocks* = narration (narrator voice, no lipsync)
-    - *single word* = emphasis (stays in dialogue, same voice)
+    - *narration_min_words+ word or punctuated blocks* = narration (narrator voice, no lipsync)
+    - *single word or short phrase* = emphasis (stays in dialogue, same voice)
     - Everything else = dialogue
 
     Note: We intentionally do NOT check if *blocks* are "inside quotes"
     because sentence splitting can produce text with orphaned/unbalanced
     quotes (e.g., a closing " from previous sentence), which causes
     naive quote-pairing to engulf narration blocks in false "quoted regions".
-    The multi-word check alone is sufficient: our LLM prompt instructs
-    *word* for emphasis and *multi-word* for narration.
+    Instead we use a conservative heuristic that works for both LLM output
+    and raw player text: short italic phrases stay emphasis, while longer or
+    punctuated blocks are treated as narration. `narration_min_words` lets
+    callers use a looser rule for player text without changing NPC behavior.
     """
     if not text or not text.strip():
         return []
 
     text = text.strip()
 
-    # Find all asterisk blocks that qualify as narration (multi-word)
+    # Find all asterisk blocks that qualify as narration.
     narration_spans = []
     for m in _ASTERISK_BLOCK.finditer(text):
         content = m.group(1).strip()
-        if ' ' in content:  # Multi-word = narration
+        if _is_narration_block(content, narration_min_words=narration_min_words):
             narration_spans.append((m.start(), m.end(), content))
 
     if not narration_spans:
@@ -90,11 +105,8 @@ def parse_segments(text: str) -> List[Segment]:
 def _strip_quotes(text: str) -> str:
     """Strip outer double quotes from dialogue text, preserving inner emphasis."""
     text = text.strip()
-    # Remove leading/trailing quotes
     if text.startswith('"'):
         text = text[1:]
     if text.endswith('"'):
         text = text[:-1]
     return text.strip()
-
-

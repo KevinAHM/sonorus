@@ -4,6 +4,7 @@ KuzuDriver is now modified directly in graphiti_core/driver/kuzu_driver.py.
 """
 
 import json
+import json_repair
 from typing import Any
 
 _patched = False
@@ -41,6 +42,7 @@ def patch_graphiti_reasoning():
         model_size: ModelSize = ModelSize.medium,
     ) -> dict[str, Any]:
         """Patched _generate_response that injects reasoning params."""
+        self._sonorus_last_usage = None
         openai_messages = []
         for m in messages:
             m.content = self._clean_input(m.content)
@@ -63,25 +65,34 @@ def patch_graphiti_reasoning():
                     },
                 }
 
+            # Respect Graphiti's requested model size so small prompts can use small_model.
+            if model_size == ModelSize.small:
+                model = self.small_model or self.model or 'gpt-4.1-mini'
+            else:
+                model = self.model or 'gpt-4.1-mini'
+
+            requested_max_tokens = max_tokens or self.max_tokens
+
             # Build request with reasoning params
             request_kwargs: dict[str, Any] = {
-                'model': self.model or 'gpt-4.1-mini',
+                'model': model,
                 'messages': openai_messages,
                 'temperature': self.temperature,
-                'max_tokens': self.max_tokens,
+                'max_tokens': requested_max_tokens,
                 'response_format': response_format,
             }
 
             # Get reasoning params - use model_size to determine context
             provider = llm_module._get_provider()
             context = 'graphiti_small' if model_size == ModelSize.small else 'graphiti'
-            extra_body = llm_module.get_reasoning_params(provider, self.model, self.max_tokens, context)
+            extra_body = llm_module.get_reasoning_params(provider, model, requested_max_tokens, context)
             if extra_body:
                 request_kwargs['extra_body'] = extra_body
 
             response = await self.client.chat.completions.create(**request_kwargs)
+            self._sonorus_last_usage = getattr(response, 'usage', None)
             result = response.choices[0].message.content or ''
-            return json.loads(result)
+            return json_repair.loads(result)
         except openai.RateLimitError as e:
             raise RateLimitError from e
         except Exception as e:
@@ -118,7 +129,7 @@ def patch_graphiti_reasoning():
                 request_kwargs: dict[str, Any] = {
                     'model': self.config.model or 'gpt-4.1-nano',
                     'messages': openai_messages,
-                    'temperature': 0,
+                    'temperature': 0.1,
                     'max_tokens': 1,
                     'logit_bias': {'6432': 1, '7983': 1},
                     'logprobs': True,
@@ -207,6 +218,7 @@ def patch_openai_no_responses_api():
         model_size: ModelSize = ModelSize.medium,
     ) -> dict[str, Any]:
         """Patched _generate_response: chat.completions instead of responses API."""
+        self._sonorus_last_usage = None
         openai_messages = self._convert_messages_to_openai_format(messages)
         model = self._get_model_for_size(model_size)
 
@@ -240,6 +252,7 @@ def patch_openai_no_responses_api():
                 request_kwargs['extra_body'] = extra_body
 
             response = await self.client.chat.completions.create(**request_kwargs)
+            self._sonorus_last_usage = getattr(response, 'usage', None)
             result = response.choices[0].message.content or '{}'
             return json.loads(result)
         except openai.RateLimitError as e:

@@ -134,24 +134,11 @@ function LipSync.ForceResetBlendshapes(actor)
     if not valid then return end
 
     -- Single batched call to reset all lip sync blendshapes to zero
-    BlueprintHelpers.CallSetBlendshapes(actor, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-
-    -- Reset new morph targets directly
-    pcall(function()
-        local mesh = actor.Mesh
-        if mesh then
-            mesh:SetMorphTarget(FName("mouth_press"), 0, false)
-            mesh:SetMorphTarget(FName("upr_lip_up_l"), 0, false)
-            mesh:SetMorphTarget(FName("upr_lip_up_r"), 0, false)
-            mesh:SetMorphTarget(FName("ee"), 0, false)
-            mesh:SetMorphTarget(FName("o"), 0, false)
-            mesh:SetMorphTarget(FName("shh"), 0, false)
-        end
-    end)
+    BlueprintHelpers.CallSetBlendshapes(actor, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 end
 
 --- Animate lips on the current speaker actor
---- Uses GetCurrentSpeakerActor and GetSonorusModActor from logic.lua (via _G)
+--- Uses GetCurrentSpeakerActor from logic.lua (via _G)
 function LipSync.AnimateLips()
     -- Get actor from logic.lua (via _G)
     local GetCurrentSpeakerActor = _G.GetCurrentSpeakerActor
@@ -171,13 +158,6 @@ function LipSync.AnimateLips()
 
     -- Store actor for CloseLips (survives cache clears)
     _G.LastSpeakerActorForClosing = actor
-
-    -- Cache modActor once for all blendshape calls (avoid 8+ lookups)
-    local modActor = BlueprintHelpers.GetSonorusModActor()
-    if not modActor then
-        print("[AnimateLips] No modActor from GetSonorusModActor")
-        return
-    end
 
     local data = _G.VisemeData
 
@@ -205,7 +185,7 @@ function LipSync.AnimateLips()
         local v = LipSync.GetVisemeAtTime(elapsed)
 
         -- Detailed timing diagnostic (every 500ms)
-        if _G.SonorusDevMode and (os.clock() - _lastDetailedLipsyncLog) > 0.5 then
+        if false and _G.SonorusDevMode and (os.clock() - _lastDetailedLipsyncLog) > 0.5 then
             _lastDetailedLipsyncLog = os.clock()
             local frameInfo = LipSync.GetCurrentFrameInfo(elapsed)
             _G.DevPrint(string.format(
@@ -250,13 +230,19 @@ function LipSync.AnimateLips()
     local funnel = data.currentFunnel * scale
 
     -- Debug: log jaw value periodically
-    if _G.SonorusDevMode and (os.clock() - _lastLipsyncDebugTime) > 1 then
+    if false and _G.SonorusDevMode and (os.clock() - _lastLipsyncDebugTime) > 1 then
         _lastLipsyncDebugTime = os.clock()
         local scaleStr = scale ~= 1.0 and string.format(" (scale=%.2f)", scale) or ""
         _G.DevPrint(string.format("[Lipsync] jaw=%.2f, frames=%d, loaded=%s%s", jaw, #data.frames, tostring(data.loaded), scaleStr))
     end
 
-    -- Single batched call for existing lip sync blendshapes (jaw, smile, funnel)
+    -- Single batched call for all lip sync blendshapes
+    local press = data.currentPress * scale
+    local lipUp = data.currentLipUp * scale
+    local ee = data.currentEE * scale
+    local o = data.currentO * scale
+    local shh = data.currentShh * scale
+
     BlueprintHelpers.CallSetBlendshapes(
         actor,
         jaw,                -- jaw_drop
@@ -268,27 +254,12 @@ function LipSync.AnimateLips()
         funnel * 0.7,       -- upr_lip_funl_r
         jaw * 0.3,          -- lwr_lip_dn_l
         jaw * 0.3,          -- lwr_lip_dn_r
-        modActor
+        press,              -- mouth_press
+        lipUp,              -- upr_lip_up_l + r
+        ee,                 -- ee
+        o,                  -- o
+        shh                 -- shh
     )
-
-    -- Apply new morph targets directly via mesh:SetMorphTarget
-    local mesh = nil
-    pcall(function() mesh = actor.Mesh end)
-    if mesh then
-        pcall(function()
-            local press = data.currentPress * scale
-            local lipUp = data.currentLipUp * scale
-            local ee = data.currentEE * scale
-            local o = data.currentO * scale
-            local shh = data.currentShh * scale
-            mesh:SetMorphTarget(FName("mouth_press"), press, false)
-            mesh:SetMorphTarget(FName("upr_lip_up_l"), lipUp, false)
-            mesh:SetMorphTarget(FName("upr_lip_up_r"), lipUp, false)
-            mesh:SetMorphTarget(FName("ee"), ee, false)
-            mesh:SetMorphTarget(FName("o"), o, false)
-            mesh:SetMorphTarget(FName("shh"), shh, false)
-        end)
-    end
 end
 
 --- Smoothly close lips over multiple frames (call in a loop until complete)
@@ -360,21 +331,13 @@ function LipSync.CloseLips()
     local smile = data.currentSmile * scale
     local funnel = data.currentFunnel * scale
 
-    -- Apply smoothed + scaled values (existing blendshapes)
-    BlueprintHelpers.CallSetBlendshapes(actor, jaw, smile, smile, funnel, funnel, funnel * 0.7, funnel * 0.7, jaw * 0.3, jaw * 0.3)
-
-    -- Apply new morph targets
-    pcall(function()
-        local mesh = actor.Mesh
-        if mesh then
-            mesh:SetMorphTarget(FName("mouth_press"), (data.currentPress or 0) * scale, false)
-            mesh:SetMorphTarget(FName("upr_lip_up_l"), (data.currentLipUp or 0) * scale, false)
-            mesh:SetMorphTarget(FName("upr_lip_up_r"), (data.currentLipUp or 0) * scale, false)
-            mesh:SetMorphTarget(FName("ee"), (data.currentEE or 0) * scale, false)
-            mesh:SetMorphTarget(FName("o"), (data.currentO or 0) * scale, false)
-            mesh:SetMorphTarget(FName("shh"), (data.currentShh or 0) * scale, false)
-        end
-    end)
+    -- Apply smoothed + scaled values (all blendshapes in single call)
+    local press = (data.currentPress or 0) * scale
+    local lipUp = (data.currentLipUp or 0) * scale
+    local ee = (data.currentEE or 0) * scale
+    local o = (data.currentO or 0) * scale
+    local shh = (data.currentShh or 0) * scale
+    BlueprintHelpers.CallSetBlendshapes(actor, jaw, smile, smile, funnel, funnel, funnel * 0.7, funnel * 0.7, jaw * 0.3, jaw * 0.3, press, lipUp, ee, o, shh)
 
     -- If values are near zero, fully reset and signal done
     local maxNew = math.max(data.currentPress or 0, data.currentLipUp or 0, data.currentEE or 0, data.currentO or 0, data.currentShh or 0)

@@ -19,8 +19,11 @@ class ConversationState:
         self.pending_player_input = None  # Player interrupted - handle after current
         self.interrupted = False  # Flag to stop interjection chain
         self.pending_history_entries = []  # History entries waiting for audio to complete
+        self.last_completed_ai_entry = None  # Last fully committed non-player AI line in this conversation
         # Memory system: track conversation participants for chapter evaluation at end
         self.conversation_speakers = set()  # NPC IDs who spoke this conversation
+        self.conversation_speaker_order = []  # First-seen NPC speaker order
+        self.conversation_turn_speakers = []  # Every NPC turn in spoken order
         self.conversation_location = None  # Location where conversation started
         self.conversation_context = None  # Game context snapshot for chapter eval
         # Director/Prompt mode: NPC-to-NPC conversations without player involvement
@@ -38,7 +41,10 @@ class ConversationState:
         self.pending_player_input = None
         self.interrupted = False
         self.pending_history_entries = []  # Discard uncommitted entries
+        self.last_completed_ai_entry = None
         self.conversation_speakers = set()
+        self.conversation_speaker_order = []
+        self.conversation_turn_speakers = []
         self.conversation_location = None
         self.conversation_context = None
         # Reset director/prompt mode state
@@ -50,7 +56,10 @@ class ConversationState:
 
     def track_speaker(self, speaker_id: str, location: str = None, context: dict = None):
         """Track an NPC who spoke in this conversation."""
+        if speaker_id not in self.conversation_speakers:
+            self.conversation_speaker_order.append(speaker_id)
         self.conversation_speakers.add(speaker_id)
+        self.conversation_turn_speakers.append(speaker_id)
         # Store location from first speaker (conversation start)
         if self.conversation_location is None and location:
             self.conversation_location = location
@@ -70,14 +79,20 @@ class ConversationState:
         """
         if self.pending_history_entries:
             from .dialogue_db import append_entry
+            from .tts_archive import flush_history_entry_archive
             now = int(time.time())
+            committed_entries = []
             for entry in self.pending_history_entries:
                 entry["timestamp"] = now  # Update to when audio finished
                 append_entry(entry)  # O(1) per entry
+                flush_history_entry_archive(entry)
+                committed_entries.append(entry.copy())
+                if entry.get("isAIResponse") and not entry.get("isPlayer"):
+                    self.last_completed_ai_entry = entry.copy()
             count = len(self.pending_history_entries)
             self.pending_history_entries = []
-            return count
-        return 0
+            return count, committed_entries
+        return 0, []
 
     def add_to_queue(self, speaker, target, full_text, segments=None, speaker_id=None):
         """Add a response to the queue with optional sentence segments

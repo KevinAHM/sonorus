@@ -2,10 +2,10 @@
 Memory Indexing Queue System for Sonorus.
 
 Provides robust, failure-tolerant processing of dialogue entries into
-NPC memory (Graphiti). Features:
+NPC long-term memory. Features:
 - SQLite-backed queue with per-entry checkpointing
 - Single worker thread prevents race conditions
-- Idempotent chapter sync prevents duplicate Graphiti entries
+- Idempotent chapter sync prevents duplicate memory entries
 - Graceful failure recovery from any point
 """
 
@@ -18,14 +18,17 @@ from contextlib import contextmanager
 from typing import Optional, List, Dict, Any, Callable
 from datetime import datetime
 
-from .settings import DATA_DIR
-from .kuzu_executor import shutdown_executor
+from .settings import DATA_DIR, load_settings
 
 # Database path
 QUEUE_DB_PATH = os.path.join(DATA_DIR, "memory_queue.db")
 
 # Thread-local storage for connections
 _local = threading.local()
+
+# Track all open connections across threads so we can close them all on restore.
+_all_connections: list = []
+_all_connections_lock = threading.Lock()
 
 # Lock for initialization
 _init_lock = threading.Lock()
@@ -34,8 +37,18 @@ _initialized = False
 # Current schema version
 SCHEMA_VERSION = 1
 
+# Processing locks can be left behind if the server exits mid-job.
+# Treat old locks as abandoned so queued NPCs can be picked up again.
+PROCESSING_STALE_TIMEOUT_SECONDS = 15 * 60
+
 # Global worker instance
 _worker: Optional['MemoryIndexWorker'] = None
+
+# Manual chapter recheck requests are routed through the normal worker, but we
+# keep a small in-memory request/result registry so the API can wait for the
+# specific NPC to finish.
+_manual_recheck_lock = threading.Lock()
+_manual_recheck_requests: Dict[str, Dict[str, Any]] = {}
 
 
 # =============================================================================
@@ -44,8 +57,7 @@ _worker: Optional['MemoryIndexWorker'] = None
 
 def _ensure_data_dir():
     """Ensure the data directory exists."""
-    if not os.path.exists(DATA_DIR):
-        os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(os.path.dirname(QUEUE_DB_PATH), exist_ok=True)
 
 
 def _create_connection():
@@ -56,7 +68,70 @@ def _create_connection():
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
+    with _all_connections_lock:
+        _all_connections.append(conn)
     return conn
+
+
+def close_thread_local_connection():
+    """Close the current thread's SQLite connection, if one is open."""
+    if hasattr(_local, 'conn') and _local.conn is not None:
+        try:
+            _local.conn.close()
+        except Exception:
+            pass
+        _local.conn = None
+
+
+def close_all_connections():
+    """Close every tracked SQLite connection across all threads.
+
+    Must be called before moving/deleting the queue DB file on Windows,
+    where open file handles prevent rename/delete.
+    """
+    with _all_connections_lock:
+        for conn in _all_connections:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        _all_connections.clear()
+    # Also clear the current thread's reference
+    if hasattr(_local, 'conn'):
+        _local.conn = None
+
+
+def reset_connection_state():
+    """Drop cached SQLite connection/init state so the next use reinitializes cleanly."""
+    global _initialized
+    close_all_connections()
+    _initialized = False
+
+
+def close_all():
+    """Close all connections across all threads, checkpoint WAL, reset state."""
+    global _initialized
+    with _all_connections_lock:
+        for conn in _all_connections:
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception:
+                pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+        _all_connections.clear()
+    if hasattr(_local, 'conn'):
+        _local.conn = None
+    _initialized = False
+
+
+def reinit(data_dir):
+    """Re-initialize with a new data directory."""
+    global QUEUE_DB_PATH
+    QUEUE_DB_PATH = os.path.join(data_dir, "memory_queue.db")
+    init_db()
 
 
 @contextmanager
@@ -159,7 +234,8 @@ def _run_migrations(conn, from_version: int) -> bool:
                 ON processing_queue(priority DESC, queued_at ASC)
             """)
 
-            # Chapter sync state (prevents Graphiti duplicates)
+            # Chapter sync state. The graphiti_synced column name is kept for
+            # compatibility with existing queue DBs, but it now means memory sync.
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS chapter_sync (
                     chapter_id TEXT PRIMARY KEY,
@@ -219,23 +295,117 @@ def init_db():
 def _ensure_initialized():
     """Ensure database is initialized before operations."""
     if not _initialized:
+        from . import player_context
+        if not player_context.is_ready():
+            return
         init_db()
+
+
+def recover_stale_processing(max_age_seconds: int = PROCESSING_STALE_TIMEOUT_SECONDS) -> int:
+    """Release abandoned processing locks left behind by interrupted workers."""
+    _ensure_initialized()
+    now = int(time.time())
+    cutoff = now - max_age_seconds
+
+    with get_connection() as conn:
+        stale_rows = conn.execute("""
+            SELECT npc_id FROM npc_state
+            WHERE is_processing = 1
+              AND COALESCE(updated_at, 0) < ?
+        """, (cutoff,)).fetchall()
+
+        if not stale_rows:
+            return 0
+
+        stale_ids = [row['npc_id'] for row in stale_rows]
+        placeholders = ",".join("?" for _ in stale_ids)
+
+        conn.execute(f"""
+            UPDATE npc_state
+            SET is_processing = 0,
+                updated_at = ?
+            WHERE npc_id IN ({placeholders})
+        """, [now] + stale_ids)
+        conn.commit()
+
+    print(f"[MemoryQueue] Recovered {len(stale_ids)} stale processing lock(s): {stale_ids}")
+    return len(stale_ids)
+
+
+def _manual_recheck_active(npc_id: str) -> bool:
+    """Check if an NPC has a manual recheck request pending."""
+    with _manual_recheck_lock:
+        request = _manual_recheck_requests.get(npc_id)
+        return bool(request and request.get("status") == "pending")
+
+
+def _complete_manual_recheck(npc_id: str, result: Dict[str, Any]):
+    """Store the result for a manual recheck and wake any waiter."""
+    with _manual_recheck_lock:
+        request = _manual_recheck_requests.get(npc_id)
+        if not request:
+            return
+        request["status"] = "completed"
+        request["result"] = result
+        request["event"].set()
+
+
+def _build_force_detection_entries(npc_id: str, pending_entries: List[Dict], chapter_mgr) -> List[Dict]:
+    """Build a richer context slice for manual chapter checks."""
+    from .dialogue_db import get_entries_for_npc
+    from .memory import should_include_entry_for_npc_chaptering
+    from .settings import load_settings
+
+    include_cutscene = load_settings().get('memory', {}).get('include_cutscene', True)
+
+    full_entries = [
+        e for e in get_entries_for_npc(npc_id)
+        if should_include_entry_for_npc_chaptering(npc_id, e, include_cutscene=include_cutscene)
+    ]
+    if not full_entries:
+        return []
+
+    open_chapter = chapter_mgr.get_open_chapter(npc_id)
+    start_ts = open_chapter.get('start_timestamp') if open_chapter else None
+
+    if not start_ts and pending_entries:
+        timestamps = [e.get('timestamp', 0) for e in pending_entries if e.get('timestamp', 0) > 0]
+        if timestamps:
+            start_ts = min(timestamps)
+
+    if start_ts:
+        before = [e for e in full_entries if e.get('timestamp', 0) < start_ts]
+        after = [e for e in full_entries if e.get('timestamp', 0) >= start_ts]
+        return before[-10:] + after
+
+    return full_entries[-40:]
 
 
 # =============================================================================
 # Queue Management API
 # =============================================================================
 
-def queue_npcs_for_processing(npc_ids: List[str], priority: int = 0):
+def queue_npcs_for_processing(npc_ids: List[str], priority: int = 0) -> List[str]:
     """
-    Queue NPCs for memory indexing. Idempotent - duplicates are ignored.
+    Queue NPCs for memory indexing. Existing rows are retained and can be promoted.
 
     Args:
         npc_ids: List of NPC voice IDs to queue
         priority: Higher priority = processed sooner (default 0)
+
+    Returns:
+        The NPC IDs that were actually admitted to the queue.
     """
     if not npc_ids:
-        return
+        return []
+
+    from .memory import filter_memory_enabled_npc_ids
+
+    requested_npc_ids = [npc_id for npc_id in npc_ids if npc_id]
+    npc_ids = filter_memory_enabled_npc_ids(requested_npc_ids)
+    if not npc_ids:
+        print(f"[MemoryQueue] No eligible NPCs to queue from {len(requested_npc_ids)} request(s)")
+        return []
 
     _ensure_initialized()
     now = int(time.time())
@@ -244,8 +414,10 @@ def queue_npcs_for_processing(npc_ids: List[str], priority: int = 0):
         for npc_id in npc_ids:
             try:
                 conn.execute("""
-                    INSERT OR IGNORE INTO processing_queue (npc_id, priority, queued_at)
+                    INSERT INTO processing_queue (npc_id, priority, queued_at)
                     VALUES (?, ?, ?)
+                    ON CONFLICT(npc_id) DO UPDATE SET
+                        priority = MAX(processing_queue.priority, excluded.priority)
                 """, (npc_id, priority, now))
             except sqlite3.Error as e:
                 print(f"[MemoryQueue] Error queueing {npc_id}: {e}")
@@ -256,6 +428,7 @@ def queue_npcs_for_processing(npc_ids: List[str], priority: int = 0):
 
     queued_count = len(npc_ids)
     print(f"[MemoryQueue] Queued {queued_count} NPCs for processing")
+    return npc_ids
 
 
 def get_queue_status() -> Dict[str, Any]:
@@ -296,7 +469,7 @@ def get_npc_state(npc_id: str) -> Optional[Dict[str, Any]]:
 
 
 def is_chapter_synced(chapter_id: str) -> bool:
-    """Check if a chapter has already been synced to Graphiti."""
+    """Check if a chapter has already been synced to long-term memory."""
     _ensure_initialized()
 
     with get_connection() as conn:
@@ -314,7 +487,7 @@ def get_chapter_id(npc_id: str, start_ts: int, end_ts: Optional[int] = None) -> 
 
 def mark_chapter_pending(npc_id: str, chapter_id: str, title: str,
                          start_ts: int, end_ts: Optional[int] = None):
-    """Record a chapter that needs to be synced to Graphiti."""
+    """Record a chapter that needs to be synced to long-term memory."""
     _ensure_initialized()
     now = int(time.time())
 
@@ -328,7 +501,7 @@ def mark_chapter_pending(npc_id: str, chapter_id: str, title: str,
 
 
 def mark_chapter_synced(chapter_id: str):
-    """Mark a chapter as successfully synced to Graphiti."""
+    """Mark a chapter as successfully synced to long-term memory."""
     _ensure_initialized()
     now = int(time.time())
 
@@ -363,7 +536,11 @@ def get_entries_since_id(npc_id: str, last_id: int, limit: int = 500) -> List[Di
     Get dialogue entries for an NPC since the given entry ID.
     Returns entries with their database IDs for checkpointing.
     """
-    from .dialogue_db import get_connection as get_dialogue_conn, _ensure_initialized as ensure_dialogue_init
+    from .dialogue_db import (
+        get_connection as get_dialogue_conn,
+        _ensure_initialized as ensure_dialogue_init,
+    )
+    from .localization import canonicalize_npc_id
 
     ensure_dialogue_init()
 
@@ -373,7 +550,7 @@ def get_entries_since_id(npc_id: str, last_id: int, limit: int = 500) -> List[Di
 
         rows = conn.execute("""
             SELECT id, timestamp, game_time, game_date, speaker, voice_name,
-                   target, text, is_player, is_ai_response, entry_type, earshot,
+                   target, target_id, text, is_player, is_ai_response, entry_type, earshot,
                    line_id, location
             FROM dialogue_entries
             WHERE id > ?
@@ -401,6 +578,7 @@ def get_entries_since_id(npc_id: str, last_id: int, limit: int = 500) -> List[Di
             'speaker': row['speaker'],
             'voiceName': row['voice_name'],
             'target': row['target'],
+            'targetId': canonicalize_npc_id(row['target_id']),
             'text': row['text'],
             'isPlayer': bool(row['is_player']),
             'isAIResponse': bool(row['is_ai_response']),
@@ -485,22 +663,34 @@ class MemoryIndexWorker:
 
         while self._running:
             try:
+                # Pause processing when mod is disabled
+                if not load_settings().get('server', {}).get('enabled', True):
+                    self._stop_event.wait(timeout=5.0)
+                    continue
+
                 npc_id = self._dequeue_next()
 
                 if npc_id:
+                    remove_from_queue = False
                     success = False
+                    result = None
                     try:
-                        self._process_npc(npc_id)
-                        success = True
+                        result = self._process_npc(npc_id) or {"status": "no_result"}
+                        status = result.get("status")
+                        remove_from_queue = status not in ("failed", "memory_unavailable", "memory_disabled")
+                        success = status not in ("failed", "memory_unavailable", "memory_disabled", "memory_filtered")
                     except Exception as e:
                         print(f"[MemoryQueue] Error processing {npc_id}: {e}")
                         import traceback
                         traceback.print_exc()
                         self._mark_failed(npc_id, str(e))
+                        result = {"status": "failed", "error": str(e)}
                     finally:
                         # Only remove from queue on success
                         # On failure, unlock but keep in queue for retry
-                        self._finish_npc(npc_id, remove_from_queue=success)
+                        self._finish_npc(npc_id, remove_from_queue=remove_from_queue)
+                        if _manual_recheck_active(npc_id):
+                            _complete_manual_recheck(npc_id, {"success": success, **(result or {})})
                 else:
                     # No work available, wait
                     self._stop_event.wait(timeout=2.0)
@@ -516,6 +706,7 @@ class MemoryIndexWorker:
     def _dequeue_next(self) -> Optional[str]:
         """Get next queued NPC that isn't already processing."""
         _ensure_initialized()
+        recover_stale_processing()
 
         MAX_ATTEMPTS = 5  # Give up after this many failures
 
@@ -567,30 +758,41 @@ class MemoryIndexWorker:
             conn.commit()
             return npc_id
 
-    def _process_npc(self, npc_id: str):
+    def _process_npc(self, npc_id: str, force_detection: bool = False):
         """Process all pending entries for an NPC."""
         print(f"[MemoryQueue] Processing NPC: {npc_id}")
+        force_detection = force_detection or _manual_recheck_active(npc_id)
 
         # Check if memory system is available
         try:
-            from .memory import is_memory_available, GraphitiManager, ChapterManager
+            from .memory import is_memory_available, MemoryManager, ChapterManager
             from .memory import detect_chapter_boundary, generate_episode_content
             from .memory import update_bio_incremental, load_settings
             from .localization import get_display_name
         except ImportError as e:
             print(f"[MemoryQueue] Memory system not available: {e}")
-            return
+            return {"status": "memory_unavailable", "error": str(e), "force_detection": force_detection}
 
         if not is_memory_available():
             print(f"[MemoryQueue] Memory system not enabled, skipping {npc_id}")
-            return
+            return {"status": "memory_unavailable", "force_detection": force_detection}
 
         settings = load_settings()
         memory_settings = settings.get('memory', {})
 
         if not memory_settings.get('enabled', True):
             print(f"[MemoryQueue] Memory disabled in settings, skipping {npc_id}")
-            return
+            return {"status": "memory_disabled", "force_detection": force_detection}
+
+        from .memory import get_npc_long_term_memory_status
+        memory_status = get_npc_long_term_memory_status(npc_id, settings=settings)
+        if not memory_status.get("enabled"):
+            print(f"[MemoryQueue] Long-term memory disabled for {npc_id} ({memory_status.get('reason')}), skipping")
+            return {
+                "status": "memory_filtered",
+                "force_detection": force_detection,
+                "reason": memory_status.get("reason"),
+            }
 
         # Get current state
         with get_connection() as conn:
@@ -607,24 +809,41 @@ class MemoryIndexWorker:
         # Get entries to process
         all_entries = get_entries_since_id(npc_id, last_id)
 
-        if not all_entries:
-            print(f"[MemoryQueue] No new entries for {npc_id}")
-            return
-
         # Track max ID from full fetch for checkpointing (so we don't re-fetch filtered entries)
-        all_max_entry_id = max(e['id'] for e in all_entries)
+        all_max_entry_id = max((e['id'] for e in all_entries), default=last_id)
 
-        # Filter out ambient dialogue from insignificant NPCs
-        from .text_utils import is_significant_npc
+        chapter_mgr = ChapterManager()
+        open_chapter = chapter_mgr.get_open_chapter(npc_id)
+
+        # Filter to the shared set of entries that actually count for chaptering.
+        from .memory import should_include_entry_for_npc_chaptering, collect_chapter_context_characters
+        include_cutscene = memory_settings.get('include_cutscene', True)
         entries = [e for e in all_entries
-                   if e.get('isPlayer') or e.get('isAIResponse')
-                   or is_significant_npc(e.get('voiceName', ''))]
+                   if should_include_entry_for_npc_chaptering(npc_id, e, include_cutscene=include_cutscene)]
+
+        if force_detection:
+            if not entries and not open_chapter:
+                print(f"[MemoryQueue] No pending dialogue or open chapter to recheck for {npc_id}")
+                return {"status": "no_new_entries", "processed_entries": 0, "force_detection": True}
+            entries = _build_force_detection_entries(npc_id, entries, chapter_mgr)
+            if not entries:
+                print(f"[MemoryQueue] No dialogue context available for forced recheck of {npc_id}")
+                return {"status": "no_new_entries", "processed_entries": 0, "force_detection": True}
+
+        elif not all_entries:
+            print(f"[MemoryQueue] No new entries for {npc_id}")
+            return {"status": "no_new_entries", "processed_entries": 0, "force_detection": False}
 
         if not entries:
             # Only ambient lines - checkpoint past them so we don't re-fetch
             self._checkpoint_progress(npc_id, all_max_entry_id)
             print(f"[MemoryQueue] No significant entries for {npc_id}, checkpointed past ambient")
-            return
+            return {
+                "status": "ambient_only",
+                "processed_entries": 0,
+                "checkpointed_entry_id": all_max_entry_id,
+                "force_detection": force_detection,
+            }
 
         print(f"[MemoryQueue] Found {len(entries)} entries to process for {npc_id} (filtered from {len(all_entries)})")
 
@@ -637,25 +856,21 @@ class MemoryIndexWorker:
         game_date = recent_entry.get('gameDate', '')
         game_time = recent_entry.get('gameTime', '')
 
-        # Get characters in earshot from entries
-        characters_in_earshot = set()
-        for entry in entries:
-            for char in entry.get('earshot', []):
-                if char != npc_id:
-                    characters_in_earshot.add(char)
-        characters_in_earshot = list(characters_in_earshot)
+        characters_in_earshot = collect_chapter_context_characters(npc_id, entries)
 
         # Check entry threshold before calling LLM
         # Always require minimum entries regardless of location change
         threshold = memory_settings.get('chapter_entry_threshold', 30)
 
-        if len(entries) < threshold:
+        threshold_bypassed = force_detection and len(entries) < threshold
+
+        if len(entries) < threshold and not force_detection:
             # Under threshold - do NOT checkpoint so entries accumulate
             # across multiple turns until we hit the threshold
             print(f"[MemoryQueue] Under threshold ({len(entries)} < {threshold}), waiting for more entries")
-            return
-
-        chapter_mgr = ChapterManager()
+            return {"status": "under_threshold", "processed_entries": len(entries), "threshold": threshold}
+        elif threshold_bypassed:
+            print(f"[MemoryQueue] Force bypassing threshold for {npc_id} ({len(entries)} < {threshold})")
 
         # Run chapter detection
         result = detect_chapter_boundary(
@@ -663,20 +878,27 @@ class MemoryIndexWorker:
             npc_name=npc_name,
             dialogue_entries=entries,
             current_location=current_location,
-            characters_in_earshot=characters_in_earshot
+            characters_in_earshot=characters_in_earshot,
+            force_detection=force_detection
         )
 
         if result.get('_failed'):
             # LLM call failed - don't checkpoint so entries are retried
             print(f"[MemoryQueue] Chapter detection LLM failed, will retry")
-            return
+            return {"status": "failed", "processed_entries": len(entries), "force_detection": force_detection}
 
         if result.get('_skipped'):
             # Detection legitimately skipped (same location, under threshold, or meta initialized)
             # Safe to checkpoint since detect_chapter_boundary made an informed decision
             self._checkpoint_progress(npc_id, all_max_entry_id)
             print(f"[MemoryQueue] Chapter detection skipped, checkpointed to {all_max_entry_id}")
-            return
+            return {
+                "status": "skipped",
+                "processed_entries": len(entries),
+                "checkpointed_entry_id": all_max_entry_id,
+                "threshold_bypassed": threshold_bypassed,
+                "force_detection": force_detection,
+            }
 
         # Process the result
         self._apply_chapter_result(
@@ -690,13 +912,22 @@ class MemoryIndexWorker:
             chapter_mgr=chapter_mgr
         )
 
-        # Sync any pending chapters to Graphiti
+        # Sync any pending chapters to long-term memory.
         self._sync_pending_chapters(npc_id)
 
         # Checkpoint progress
         self._checkpoint_progress(npc_id, all_max_entry_id)
 
         print(f"[MemoryQueue] Completed processing {npc_id}, checkpointed to entry {all_max_entry_id}")
+        return {
+            "status": "processed",
+            "processed_entries": len(entries),
+            "checkpointed_entry_id": all_max_entry_id,
+            "current_chapter_action": result.get('current_chapter_action', 'continue'),
+            "new_chapters": len(result.get('new_chapters', [])),
+            "threshold_bypassed": threshold_bypassed,
+            "force_detection": force_detection,
+        }
 
     def _migrate_from_timestamp(self, npc_id: str) -> int:
         """Migrate from old timestamp-based tracking to ID-based."""
@@ -778,7 +1009,7 @@ class MemoryIndexWorker:
                         player_name = entry['speaker']
                         break
 
-                # Record chapter for Graphiti sync (idempotent)
+                # Record chapter for memory sync (idempotent)
                 start_ts = open_chapter.get('start_timestamp', 0)
                 end_ts = chapter_entries[-1].get('timestamp') if chapter_entries else None
                 chapter_id = get_chapter_id(npc_id, start_ts, end_ts)
@@ -855,7 +1086,7 @@ class MemoryIndexWorker:
             return
 
         if status == 'closed' and start_ts and end_ts:
-            # Closed chapter - queue for Graphiti sync
+            # Closed chapter - queue for memory sync
             chapter_entries = [e for e in entries if start_ts <= e.get('timestamp', 0) <= end_ts]
 
             player_name = "the student"
@@ -909,7 +1140,7 @@ class MemoryIndexWorker:
     def _store_chapter_content(self, chapter_id: str, npc_name: str, chapter: Dict,
                                 entries: List[Dict], player_name: str,
                                 game_date: str, game_time: str):
-        """Store chapter content for later Graphiti sync."""
+        """Store chapter content for later memory sync."""
         # Store in a separate file to avoid bloating the SQLite DB
         content_dir = os.path.join(DATA_DIR, "chapter_content")
         os.makedirs(content_dir, exist_ok=True)
@@ -935,7 +1166,7 @@ class MemoryIndexWorker:
             json.dump(content_data, f)
 
     def _load_chapter_content(self, chapter_id: str) -> Optional[Dict]:
-        """Load stored chapter content for Graphiti sync."""
+        """Load stored chapter content for later memory sync."""
         content_dir = os.path.join(DATA_DIR, "chapter_content")
         safe_id = chapter_id.replace(':', '_').replace('/', '_')
         content_path = os.path.join(content_dir, f"{safe_id}.json")
@@ -950,36 +1181,65 @@ class MemoryIndexWorker:
             print(f"[MemoryQueue] Error loading chapter content: {e}")
             return None
 
-    def _cleanup_chapter_content(self, chapter_id: str):
-        """Remove stored chapter content after successful sync."""
+    def _cleanup_chapter_content(self, chapter_id: str, content_data: Optional[Dict] = None):
+        """Archive stored chapter content after successful sync for later debugging."""
         content_dir = os.path.join(DATA_DIR, "chapter_content")
         safe_id = chapter_id.replace(':', '_').replace('/', '_')
         content_path = os.path.join(content_dir, f"{safe_id}.json")
+        synced_dir = os.path.join(content_dir, "synced")
+        synced_path = os.path.join(synced_dir, f"{safe_id}.json")
 
         try:
             if os.path.exists(content_path):
-                os.remove(content_path)
+                os.makedirs(synced_dir, exist_ok=True)
+                if content_data is not None:
+                    with open(content_path, 'w', encoding='utf-8') as f:
+                        json.dump(content_data, f, ensure_ascii=False, indent=2)
+                if os.path.exists(synced_path):
+                    os.remove(synced_path)
+                os.replace(content_path, synced_path)
         except Exception as e:
-            print(f"[MemoryQueue] Error cleaning up chapter content: {e}")
+            print(f"[MemoryQueue] Error archiving chapter content: {e}")
 
     def _sync_pending_chapters(self, npc_id: str):
-        """Sync all pending chapters to Graphiti."""
-        from .memory import GraphitiManager, generate_episode_content, update_bio_incremental
+        """Sync all pending chapters to long-term memory."""
+        from .memory import (
+            MemoryManager,
+            generate_episode_content,
+            get_npc_long_term_memory_status,
+            save_generated_episode_audit,
+            update_bio_incremental,
+        )
+
+        memory_status = get_npc_long_term_memory_status(npc_id)
+        if not memory_status.get("enabled"):
+            print(f"[MemoryQueue] Skipping memory sync for {npc_id} ({memory_status.get('reason')})")
+            return
 
         with get_connection() as conn:
             pending = conn.execute("""
                 SELECT chapter_id, title, start_timestamp, end_timestamp
                 FROM chapter_sync
-                WHERE npc_id = ? AND graphiti_synced = 0
+                WHERE npc_id = ? AND (graphiti_synced = 0
+                    OR (graphiti_synced = -1 AND error_message NOT LIKE '%not found%'))
                 ORDER BY start_timestamp ASC
             """, (npc_id,)).fetchall()
 
         if not pending:
             return
 
-        graphiti_mgr = GraphitiManager()
-        if not graphiti_mgr.init_graphiti():
-            print(f"[MemoryQueue] Graphiti not available for sync")
+        # Check for retries by querying failed count
+        with get_connection() as conn:
+            retry_count = conn.execute(
+                "SELECT COUNT(*) FROM chapter_sync WHERE npc_id = ? AND graphiti_synced = -1 AND error_message NOT LIKE '%not found%'",
+                (npc_id,)
+            ).fetchone()[0]
+        if retry_count:
+            print(f"[MemoryQueue] Retrying {retry_count} previously failed chapter(s) for {npc_id}")
+
+        memory_mgr = MemoryManager()
+        if not memory_mgr.init_graphiti():
+            print(f"[MemoryQueue] Memory backend not available for sync")
             return
 
         for chapter_row in pending:
@@ -1007,9 +1267,11 @@ class MemoryIndexWorker:
                     dialogue_entries=content_data['entries'],
                     player_name=content_data['player_name']
                 )
+                content_data['generated_episode_content'] = episode_content
+                save_generated_episode_audit(npc_id, content_data['title'], episode_content, content_data)
 
-                # Send to Graphiti
-                success = graphiti_mgr.add_episode(
+                # Send to long-term memory
+                success = memory_mgr.add_episode(
                     npc_id=npc_id,
                     chapter_title=content_data['title'],
                     content=episode_content,
@@ -1019,8 +1281,8 @@ class MemoryIndexWorker:
 
                 if success:
                     mark_chapter_synced(chapter_id)
-                    self._cleanup_chapter_content(chapter_id)
-                    print(f"[MemoryQueue] Synced chapter '{content_data['title']}' to Graphiti")
+                    self._cleanup_chapter_content(chapter_id, content_data)
+                    print(f"[MemoryQueue] Synced chapter '{content_data['title']}' to memory")
 
                     # Trigger bio update using timestamps from DB
                     try:
@@ -1033,7 +1295,7 @@ class MemoryIndexWorker:
                     except Exception as e:
                         print(f"[MemoryQueue] Bio update failed (non-fatal): {e}")
                 else:
-                    mark_chapter_failed(chapter_id, "Graphiti add_episode returned False")
+                    mark_chapter_failed(chapter_id, "Memory add_episode returned False")
 
             except Exception as e:
                 print(f"[MemoryQueue] Error syncing chapter {chapter_id}: {e}")
@@ -1095,6 +1357,8 @@ def ensure_worker_running():
     """Ensure the memory index worker is running."""
     global _worker
 
+    recover_stale_processing()
+
     if _worker is None:
         _worker = MemoryIndexWorker()
 
@@ -1127,11 +1391,11 @@ def is_processing() -> bool:
             if row and row['cnt'] > 0:
                 return True
 
-    # Also check if Graphiti is busy
+    # Also check if the memory backend is busy.
     try:
-        from .memory import GraphitiManager
-        gm = GraphitiManager()
-        if hasattr(gm, '_busy') and gm._busy:
+        from .memory import MemoryManager
+        memory_mgr = MemoryManager()
+        if hasattr(memory_mgr, '_busy') and memory_mgr._busy:
             return True
     except:
         pass
@@ -1151,8 +1415,16 @@ def graceful_shutdown(max_wait: float = 30.0) -> bool:
     """
     global _worker
 
+    def _close_memory_connection():
+        try:
+            from .memory import reset_memory_connection
+            return reset_memory_connection()
+        except Exception as e:
+            print(f"[MemoryQueue] Error closing memory connection: {e}")
+            return False
+
     if _worker is None:
-        return True
+        return _close_memory_connection()
 
     print("[MemoryQueue] Graceful shutdown requested...")
 
@@ -1166,9 +1438,11 @@ def graceful_shutdown(max_wait: float = 30.0) -> bool:
         if not is_processing():
             print("[MemoryQueue] All operations complete")
             stop_worker(timeout=2.0)
-            # Shutdown kuzu executor (serializes all db access)
-            shutdown_executor(wait=True, timeout=5.0)
-            return True
+            close_ok = _close_memory_connection()
+            close_all_connections()
+            if not close_ok:
+                print("[MemoryQueue] Memory connection did not close cleanly")
+            return close_ok
 
         elapsed = int(time.time() - start_time)
         print(f"[MemoryQueue] Waiting for operations to complete... ({elapsed}s)")
@@ -1177,8 +1451,10 @@ def graceful_shutdown(max_wait: float = 30.0) -> bool:
     print(f"[MemoryQueue] Timeout after {max_wait}s, forcing shutdown")
     stop_worker(timeout=2.0)
 
-    # Shutdown kuzu executor (serializes all db access)
-    shutdown_executor(wait=True, timeout=5.0)
+    close_ok = _close_memory_connection()
+    close_all_connections()
+    if not close_ok:
+        print("[MemoryQueue] Memory connection did not close cleanly during forced shutdown")
 
     return False
 
@@ -1198,6 +1474,109 @@ def reset_npc_state(npc_id: str):
         conn.commit()
 
     print(f"[MemoryQueue] Reset state for {npc_id}")
+
+
+def reset_all_processing_state():
+    """Reset processing checkpoints/locks without dropping chapter sync history."""
+    _ensure_initialized()
+
+    with get_connection() as conn:
+        conn.execute("DELETE FROM npc_state")
+        conn.execute("DELETE FROM processing_queue")
+        conn.commit()
+
+    print("[MemoryQueue] Reset processing checkpoints for all NPCs")
+
+
+def clear_unsynced_chapters_for_npc(npc_id: str) -> int:
+    """Delete pending/failed unsynced chapter records and staged content for an NPC."""
+    _ensure_initialized()
+
+    with get_connection() as conn:
+        rows = conn.execute("""
+            SELECT chapter_id FROM chapter_sync
+            WHERE npc_id = ? AND graphiti_synced != 1
+        """, (npc_id,)).fetchall()
+
+        chapter_ids = [row['chapter_id'] for row in rows]
+        if chapter_ids:
+            conn.execute("""
+                DELETE FROM chapter_sync
+                WHERE npc_id = ? AND graphiti_synced != 1
+            """, (npc_id,))
+            conn.commit()
+
+    if not chapter_ids:
+        return 0
+
+    content_dir = os.path.join(DATA_DIR, "chapter_content")
+    for chapter_id in chapter_ids:
+        safe_id = chapter_id.replace(':', '_').replace('/', '_')
+        content_path = os.path.join(content_dir, f"{safe_id}.json")
+        try:
+            if os.path.exists(content_path):
+                os.remove(content_path)
+        except Exception as e:
+            print(f"[MemoryQueue] Error removing staged chapter content for {chapter_id}: {e}")
+
+    print(f"[MemoryQueue] Cleared {len(chapter_ids)} unsynced chapter(s) for {npc_id}")
+    return len(chapter_ids)
+
+
+def force_chapter_recheck(npc_id: str, wait_timeout: float = 60.0) -> Dict[str, Any]:
+    """Queue a manual chapter recheck and wait for the normal worker to finish it."""
+    from .memory import get_npc_long_term_memory_status
+
+    memory_status = get_npc_long_term_memory_status(npc_id)
+    if not memory_status.get("enabled"):
+        return {"success": False, "error": f"Long-term memory is disabled for {npc_id}"}
+
+    _ensure_initialized()
+    recover_stale_processing()
+
+    with get_connection() as conn:
+        state = conn.execute(
+            "SELECT is_processing FROM npc_state WHERE npc_id = ?",
+            (npc_id,)
+        ).fetchone()
+        if state and state['is_processing'] == 1:
+            return {"success": False, "error": f"{npc_id} is already being processed"}
+
+    with _manual_recheck_lock:
+        existing = _manual_recheck_requests.get(npc_id)
+        if existing and existing.get("status") == "pending":
+            return {"success": False, "error": f"{npc_id} already has a pending manual chapter recheck"}
+
+        event = threading.Event()
+        _manual_recheck_requests[npc_id] = {
+            "status": "pending",
+            "requested_at": time.time(),
+            "event": event,
+            "result": None,
+        }
+
+    queued_npc_ids = queue_npcs_for_processing([npc_id], priority=100)
+    if npc_id not in queued_npc_ids:
+        with _manual_recheck_lock:
+            _manual_recheck_requests.pop(npc_id, None)
+        memory_status = get_npc_long_term_memory_status(npc_id)
+        if not memory_status.get("enabled"):
+            return {"success": False, "error": f"Long-term memory is disabled for {npc_id}"}
+        return {"success": False, "error": f"Could not queue chapter recheck for {npc_id}"}
+
+    completed = event.wait(timeout=wait_timeout)
+    if not completed:
+        with _manual_recheck_lock:
+            _manual_recheck_requests.pop(npc_id, None)
+        return {"success": False, "error": f"Timed out waiting for chapter recheck for {npc_id}"}
+
+    with _manual_recheck_lock:
+        request = _manual_recheck_requests.pop(npc_id, None)
+
+    if not request:
+        return {"success": False, "error": f"Manual chapter recheck completed without a stored result for {npc_id}"}
+
+    return request.get("result") or {"success": False, "error": "Manual chapter recheck returned no result"}
 
 
 def reset_all_state():
@@ -1245,3 +1624,10 @@ def retry_failed_chapters(queue_npcs: bool = True) -> int:
             queue_npcs_for_processing(npc_ids, priority=1)  # Higher priority for retries
 
     return count
+
+
+try:
+    from . import player_context
+    player_context.register("memory_queue", close_all, reinit)
+except ImportError:
+    pass

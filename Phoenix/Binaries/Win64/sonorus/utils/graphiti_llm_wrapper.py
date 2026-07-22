@@ -30,7 +30,7 @@ class LoggingLLMClientWrapper(LLMClient if _graphiti_available else object):
 
     Logs to:
     - logs/llm_YYYY-MM-DD.txt (detailed request/response)
-    - data/system_events.json (structured event for dashboard)
+    - data/system_events.db (structured event store for dashboard)
     """
 
     # Session-level token tracking
@@ -71,6 +71,47 @@ class LoggingLLMClientWrapper(LLMClient if _graphiti_available else object):
     def _estimate_tokens(text: str) -> int:
         """Rough token estimate: ~4 characters per token."""
         return len(text) // 4 if text else 0
+
+    @staticmethod
+    def _usage_field(usage: Any, field: str, default: Any = None) -> Any:
+        """Read a usage field from either an SDK object or a dict-like payload."""
+        if usage is None:
+            return default
+        if isinstance(usage, dict):
+            return usage.get(field, default)
+        return getattr(usage, field, default)
+
+    @classmethod
+    def _extract_usage_metrics(cls, usage: Any) -> dict[str, Any]:
+        """Extract token and optional cost metrics from provider usage payloads."""
+        if usage is None:
+            return {
+                'input_tokens': None,
+                'output_tokens': None,
+                'total_tokens': None,
+                'cost_total': None,
+                'cost_upstream_inference': None,
+            }
+
+        cost_details = cls._usage_field(usage, 'cost_details')
+        input_tokens = cls._usage_field(usage, 'prompt_tokens')
+        output_tokens = cls._usage_field(usage, 'completion_tokens')
+        total_tokens = cls._usage_field(usage, 'total_tokens')
+        cost_total = cls._usage_field(usage, 'cost')
+        cost_upstream_inference = cls._usage_field(cost_details, 'upstream_inference_cost')
+
+        if total_tokens is None and input_tokens is not None and output_tokens is not None:
+            total_tokens = input_tokens + output_tokens
+        if cost_total == 0 and cost_upstream_inference not in (None, 0):
+            cost_total = cost_upstream_inference
+
+        return {
+            'input_tokens': input_tokens,
+            'output_tokens': output_tokens,
+            'total_tokens': total_tokens,
+            'cost_total': cost_total,
+            'cost_upstream_inference': cost_upstream_inference,
+        }
 
     @classmethod
     def reset_session_tokens(cls):
@@ -120,10 +161,14 @@ class LoggingLLMClientWrapper(LLMClient if _graphiti_available else object):
 
         # Simplify prompt name for display
         simple_name = self._simplify_prompt_name(prompt_name)
-        context = f"graphiti:{simple_name}" if simple_name else "graphiti"
+        base_context = "graphiti_small" if model_size == ModelSize.small else "graphiti"
+        context = f"{base_context}:{simple_name}" if simple_name else base_context
 
-        # Get model name - simplify if it has a provider prefix
-        model_name = self.model or "unknown"
+        # Log the actual model selected for this call, including Graphiti's small-model path.
+        if model_size == ModelSize.small:
+            model_name = self.small_model or self.model or "unknown"
+        else:
+            model_name = self.model or "unknown"
         display_model = model_name.split('/')[-1] if '/' in model_name else model_name
 
         # Estimate input tokens
@@ -143,6 +188,8 @@ class LoggingLLMClientWrapper(LLMClient if _graphiti_available else object):
         error_msg = None
 
         try:
+            self._inner._sonorus_last_usage = None
+
             # Call the inner client
             response = await self._inner.generate_response(
                 messages=messages,
@@ -157,8 +204,18 @@ class LoggingLLMClientWrapper(LLMClient if _graphiti_available else object):
 
             # Estimate output tokens from response
             response_str = json.dumps(response, indent=2) if response else ""
-            output_tokens = self._estimate_tokens(response_str)
-            total_tokens = input_tokens + output_tokens
+            usage_metrics = self._extract_usage_metrics(getattr(self._inner, '_sonorus_last_usage', None))
+
+            if usage_metrics['input_tokens'] is not None:
+                input_tokens = usage_metrics['input_tokens']
+
+            output_tokens = usage_metrics['output_tokens']
+            if output_tokens is None:
+                output_tokens = self._estimate_tokens(response_str)
+
+            total_tokens = usage_metrics['total_tokens']
+            if total_tokens is None:
+                total_tokens = input_tokens + output_tokens
 
             # Track session tokens
             LoggingLLMClientWrapper._session_tokens += total_tokens
@@ -173,6 +230,8 @@ class LoggingLLMClientWrapper(LLMClient if _graphiti_available else object):
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
+                cost_total=usage_metrics['cost_total'],
+                cost_upstream_inference=usage_metrics['cost_upstream_inference'],
                 duration_ms=duration_ms,
                 status="success"
             )

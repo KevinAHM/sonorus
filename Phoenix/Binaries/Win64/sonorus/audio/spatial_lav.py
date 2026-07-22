@@ -418,7 +418,7 @@ class Audio3DPlayer:
 
     def play_stream(self, tts_stream, on_chunk_callback=None, on_start=None, use_3d=True,
                     reverb_auxbus=None, reverb_send=1.0, abort_check=None,
-                    sentence_boundaries=None):
+                    sentence_boundaries=None, centered=False):
         """Play streaming TTS audio with 3D positioning and reverb using PushNode.
 
         Args:
@@ -427,6 +427,8 @@ class Audio3DPlayer:
             sentence_boundaries: Optional list of dicts with 'is_narration' and 'start_bytes'
                 keys. When provided, narration segments play non-spatially (centered)
                 while dialogue plays 3D. Only meaningful when use_3d=True.
+            centered: If True with use_3d=True, routes through EnvironmentNode for reverb
+                but positions source fixed in front of listener (no tracking). For FPV/VR player voice.
         """
         if not self.initialized:
             if not self.init():
@@ -446,13 +448,13 @@ class Audio3DPlayer:
         try:
             return self._play_stream_locked(tts_stream, on_chunk_callback, on_start, use_3d,
                                             reverb_auxbus, reverb_send, abort_check,
-                                            sentence_boundaries)
+                                            sentence_boundaries, centered)
         finally:
             self._playback_lock.release()
 
     def _play_stream_locked(self, tts_stream, on_chunk_callback=None, on_start=None, use_3d=True,
                             reverb_auxbus=None, reverb_send=1.0, abort_check=None,
-                            sentence_boundaries=None):
+                            sentence_boundaries=None, centered=False):
         """Internal play_stream with lock already held."""
         # Reset pause state for new playback
         self._paused = False
@@ -531,19 +533,37 @@ class Audio3DPlayer:
             # Keep references to prevent GC
             self._push_node = push_node
 
-            if use_3d:
+            if use_3d and centered:
+                # FPV/VR player voice: route through EnvironmentNode for reverb
+                # but fixed position in front of listener — no tracking needed
+                # Disconnect position reader so stale socket updates can't move the source
+                self.position_reader.set_socket(None)
+                self.position_reader.cam_pos = (0, 0, 0)
+                self.position_reader.npc_pos = (0, 0, 0)
+                self.position_reader.cam_yaw = 0
+                self.position_reader.vr_cam_yaw = None
+                self.position_reader.vr_cam_pitch = None
+
+                source = lav.SourceNode(self.server, self.environment)
+                push_node.connect(0, source, 0)
+                self._source = source
+                source.position.value = (0, 0, -0.5)  # 0.5m directly in front of listener
+                print(f"[Audio3D] CENTERED branch hit: source=(0,0,-0.5), socket disconnected, no tracking thread")
+
+            elif use_3d:
                 # 3D audio: route through EnvironmentNode for HRTF spatialization
                 # PushNode -> SourceNode -> Environment (HRTF) -> Server
+                print(f"[Audio3D] NORMAL 3D branch hit: use_3d={use_3d}, centered={centered}")
                 source = lav.SourceNode(self.server, self.environment)
                 push_node.connect(0, source, 0)
                 self._source = source
 
-                # Read actual camera rotation from UEVR (polled by VRManager thread)
+                # Use actual HMD direction for audio listener orientation
                 from vr import get_vr_tracker as _get_vr
                 vr = _get_vr()
                 if vr and vr.initialized:
-                    self.position_reader.vr_cam_yaw = vr.cam_yaw
-                    self.position_reader.vr_cam_pitch = vr.cam_pitch
+                    self.position_reader.vr_cam_yaw = vr.head_yaw
+                    self.position_reader.vr_cam_pitch = vr.head_pitch
 
                 pos = self.position_reader.get_source_position()
                 # Apply camera height offset (positive = listener higher = NPC appears lower)
@@ -561,7 +581,7 @@ class Audio3DPlayer:
                 self._update_thread.start()
 
             else:
-                # Non-3D audio (player voice): bypass HRTF entirely
+                # Non-3D audio (player voice in third person): bypass HRTF entirely
                 # Connect PushNode directly to server for clean centered playback
                 # This avoids HRTF processing issues on some audio configurations
                 push_node.connect(0, self.server)
@@ -573,6 +593,7 @@ class Audio3DPlayer:
 
             tts_stream.playback_started = True
             playback_start = time.time()
+            self._underrun_time = None  # set below after underrun_time list is created
             if on_start:
                 try:
                     on_start(playback_start)
@@ -584,6 +605,13 @@ class Audio3DPlayer:
             total_bytes_fed = 0  # Track raw PCM bytes for narration routing
             aborted = False
             bytes_per_second = max(1, sample_rate * 2 * channels)
+            # Track push_node buffer underruns.  When the push_node runs dry
+            # (TTS still generating the next sentence), it outputs silence but
+            # the wall clock keeps ticking.  Without correction, audio_pos
+            # drifts ahead of reality — subtitles advance early and the drain
+            # wait at the end is too short, cutting off the tail.
+            underrun_time = [0.0]  # mutable so closures can read it
+            self._underrun_time = underrun_time
             def _switch_push_route(is_narration):
                 """Switch route atomically to avoid dual-path loudness artifacts."""
                 current_is_narr = bool(getattr(self, '_narr_active', False))
@@ -607,7 +635,7 @@ class Audio3DPlayer:
                 total_pause = self._total_pause_duration
                 if self._pause_start > 0:
                     total_pause += time.time() - self._pause_start
-                elapsed = max(0.0, time.time() - playback_start - total_pause)
+                elapsed = max(0.0, time.time() - playback_start - total_pause - underrun_time[0])
                 est = int(elapsed * bytes_per_second)
                 # Can't have played more than we've fed.
                 return min(est, total_bytes_fed)
@@ -670,6 +698,15 @@ class Audio3DPlayer:
                 except queue.Empty:
                     if tts_stream.stream_complete:
                         break
+                    # Detect underrun: if wall clock has passed all fed audio,
+                    # the push_node is outputting silence right now.
+                    fed_duration = total_samples / sample_rate if total_samples > 0 else 0
+                    total_pause = self._total_pause_duration
+                    if self._pause_start > 0:
+                        total_pause += time.time() - self._pause_start
+                    wall = time.time() - playback_start - total_pause
+                    if wall > fed_duration:
+                        underrun_time[0] = wall - fed_duration
                     continue
 
             # Wait for remaining audio to play out (skip if aborted)
@@ -679,10 +716,13 @@ class Audio3DPlayer:
                 total_pause = self._total_pause_duration
                 if self._pause_start > 0:
                     total_pause += time.time() - self._pause_start
-                elapsed = time.time() - playback_start - total_pause
+                elapsed = time.time() - playback_start - total_pause - underrun_time[0]
                 remaining = total_duration - elapsed + 0.3
+                if underrun_time[0] > 0.05:
+                    print(f"[Audio3D] Underrun correction: {underrun_time[0]:.2f}s")
                 if remaining > 0:
-                    print(f"[Audio3D] Fed {total_samples} samples in {elapsed:.1f}s, waiting {remaining:.1f}s more...")
+                    print(f"[Audio3D] Fed {total_samples} samples ({total_duration:.2f}s audio) "
+                          f"in {elapsed:.1f}s, waiting {remaining:.1f}s more...")
                     # Wait in small increments so we can check abort
                     wait_end = time.time() + remaining
                     while time.time() < wait_end:
@@ -703,6 +743,7 @@ class Audio3DPlayer:
                 print("[Audio3D] Skipping wait (aborted)")
 
             # Cleanup
+            self._underrun_time = None
             self._stop_event.set()
             if self._update_thread:
                 self._update_thread.join(timeout=1.0)
@@ -752,8 +793,8 @@ class Audio3DPlayer:
                 vr = _get_vr()
                 if vr and vr.initialized:
                     vr.update()
-                    self.position_reader.vr_cam_yaw = vr.cam_yaw
-                    self.position_reader.vr_cam_pitch = vr.cam_pitch
+                    self.position_reader.vr_cam_yaw = vr.head_yaw
+                    self.position_reader.vr_cam_pitch = vr.head_pitch
                 pos = self.position_reader.get_source_position()
                 # Apply camera height offset
                 pos = (pos[0], pos[1] - camera_offset, pos[2])

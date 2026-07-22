@@ -1006,7 +1006,7 @@ class Audio3DPlayer:
 
     def play_stream(self, tts_stream, on_chunk_callback=None, on_start=None, use_3d=True,
                     reverb_auxbus=None, reverb_send=1.0, abort_check=None,
-                    sentence_boundaries=None):
+                    sentence_boundaries=None, centered=False):
         """
         Play streaming TTS audio with optional 3D positioning and reverb.
 
@@ -1054,7 +1054,14 @@ class Audio3DPlayer:
             self.source = SourceStream(tts_stream)
 
             # Configure audio - 3D or centered stereo
-            if use_3d:
+            if use_3d and centered:
+                # FPV/VR player voice: source-relative, fixed in front of listener, reverb still applies
+                self.source.set_source_relative(True)
+                self.source.set_position((0, 0, -0.5))  # 0.5m in front
+                self.source.set_gain(1.5)
+                self._source_gain = 1.5
+                print("[Audio3D] Centered 3D mode: fixed at (0, 0, -0.5) with reverb")
+            elif use_3d:
                 # NOTE: Initial positions are set via set_initial_positions() BEFORE this call
                 # No need to call update() here - positions are passed explicitly through the call chain
 

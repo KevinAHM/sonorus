@@ -98,6 +98,18 @@ class InworldWSContext:
             if ends:
                 word_alignment["wordEndTimeSeconds"] = [t + offset_secs for t in ends]
 
+        if word_alignment and word_alignment.get("words"):
+            starts = word_alignment.get("wordStartTimeSeconds", []) or []
+            ends = word_alignment.get("wordEndTimeSeconds", []) or []
+            first_start = starts[0] if starts else None
+            last_end = ends[-1] if ends else None
+            print(f"[InworldWS] Chunk timestamps: words={len(word_alignment.get('words', []))} "
+                  f"range={first_start if first_start is not None else 'n/a'}-"
+                  f"{last_end if last_end is not None else 'n/a'} "
+                  f"completed_bytes={self._completed_sentences_bytes} "
+                  f"current_sentence_bytes={self._current_sentence_bytes} "
+                  f"total_bytes={self.bytes_received}")
+
         with self._lock:
             handler = self._on_chunk
         if handler:
@@ -133,7 +145,16 @@ class InworldWSContext:
                 word_alignment["wordEndTimeSeconds"] = [t + offset_secs for t in ends]
 
         words = len(word_alignment.get("words", []))
-        print(f"[InworldWS] Async timestamps: {words} words")
+        starts = word_alignment.get("wordStartTimeSeconds", []) or []
+        ends = word_alignment.get("wordEndTimeSeconds", []) or []
+        first_start = starts[0] if starts else None
+        last_end = ends[-1] if ends else None
+        print(f"[InworldWS] Async timestamps: {words} words "
+              f"range={first_start if first_start is not None else 'n/a'}-"
+              f"{last_end if last_end is not None else 'n/a'} "
+              f"completed_bytes={self._completed_sentences_bytes} "
+              f"current_sentence_bytes={self._current_sentence_bytes} "
+              f"total_bytes={self.bytes_received}")
 
         with self._lock:
             handler = self._on_chunk
@@ -204,6 +225,7 @@ class InworldWebSocket:
         self._shutdown = threading.Event()
         self._reconnect_lock = threading.Lock()
         self._generation = 0
+        self.last_error = ""
 
         # Monotonic counter for unique context IDs
         self._next_ctx_id = 0
@@ -297,6 +319,7 @@ class InworldWebSocket:
         Returns:
             True on success, False on error
         """
+        self.last_error = ""
         if not self.connected:
             return False
 
@@ -334,6 +357,7 @@ class InworldWebSocket:
 
             if error_msg[0]:
                 print(f"[InworldWS] Synthesis error: {error_msg[0]}")
+                self.last_error = error_msg[0]
                 return False
 
             return ctx.chunks_received > 0
@@ -371,6 +395,7 @@ class InworldWebSocket:
         Returns:
             True on success, False on error
         """
+        self.last_error = ""
         if not self.connected:
             return False
 
@@ -387,7 +412,10 @@ class InworldWebSocket:
             if on_sentence_flushed:
                 on_sentence_flushed()
             elapsed = (time.time() - ctx.stream_start_time) * 1000
-            print(f"[InworldWS] Flush completed at {elapsed:.0f}ms (total: {flush_count[0]})")
+            print(f"[InworldWS] Flush completed at {elapsed:.0f}ms "
+                  f"(flushes={flush_count[0]}, sent_sentences={sent_count}, "
+                  f"bytes_received={ctx.bytes_received}, "
+                  f"completed_bytes={ctx._completed_sentences_bytes})")
             flush_event.set()
 
         def on_error(msg):
@@ -429,7 +457,7 @@ class InworldWebSocket:
                     self._send_text(ctx.context_id, sentence.strip(), flush=True)
                     sent_count += 1
                     elapsed = (time.time() - _synth_start) * 1000
-                    print(f"[InworldWS] Sent sentence #{sent_count} at {elapsed:.0f}ms: \"{sentence.strip()[:80]}\"")
+                    print(f"[InworldWS] Sent sentence #{sent_count} at {elapsed:.0f}ms: \"{sentence.strip()}\"")
                     if sent_count == 1:
                         ctx._first_send_time = send_t  # Track for latency measurement
                 except Exception as e:
@@ -469,12 +497,17 @@ class InworldWebSocket:
                             idle_start = time.time()
                             continue
                         if time.time() - idle_start >= idle_timeout:
-                            print(f"[InworldWS] Idle timeout ({flush_count[0]}/{sent_count} flushes received)")
+                            print(f"[InworldWS] Idle timeout ({flush_count[0]}/{sent_count} flushes received, "
+                                  f"bytes_received={ctx.bytes_received}, "
+                                  f"completed_bytes={ctx._completed_sentences_bytes})")
                             break
                     else:
                         idle_start = time.time()
 
-            print(f"[InworldWS] Synthesis {'aborted' if aborted else 'complete'} ({flush_count[0]} flushes, {sent_count} sentences)")
+            print(f"[InworldWS] Synthesis {'aborted' if aborted else 'complete'} "
+                  f"({flush_count[0]} flushes, {sent_count} sentences, "
+                  f"bytes_received={ctx.bytes_received}, "
+                  f"completed_bytes={ctx._completed_sentences_bytes})")
             ctx.log_summary()
 
             if aborted:
@@ -482,6 +515,7 @@ class InworldWebSocket:
 
             if error_msg[0]:
                 print(f"[InworldWS] Synthesis error: {error_msg[0]}")
+                self.last_error = error_msg[0]
                 return False
 
             return ctx.chunks_received > 0
@@ -505,6 +539,7 @@ class InworldWebSocket:
         At voice boundaries, flushes the current context and waits for completion before
         switching to ensure correct audio order. Within same-voice runs, pipelines normally.
         """
+        self.last_error = ""
         if not self.connected:
             return False
 
@@ -656,7 +691,7 @@ class InworldWebSocket:
                     if sent_count == 1:
                         ctx._first_send_time = send_t
                     elapsed = (time.time() - _synth_start) * 1000
-                    print(f"[InworldWS] Multi-voice sent #{sent_count} [{vid[:20]}] at {elapsed:.0f}ms: \"{text.strip()[:60]}\"")
+                    print(f"[InworldWS] Multi-voice sent #{sent_count} [{vid[:20]}] at {elapsed:.0f}ms: \"{text.strip()}\"")
                 except Exception as e:
                     print(f"[InworldWS] Multi-voice send failed: {e}")
                     error_msg[0] = str(e)
@@ -675,6 +710,7 @@ class InworldWebSocket:
 
             if error_msg[0]:
                 print(f"[InworldWS] Multi-voice error: {error_msg[0]}")
+                self.last_error = error_msg[0]
                 return False
 
             return total_chunks[0] > 0

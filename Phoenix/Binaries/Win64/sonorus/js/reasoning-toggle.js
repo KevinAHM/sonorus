@@ -11,13 +11,16 @@
     let capabilitiesLoaded = false;
     const debounceTimers = {};   // inputId -> timer
 
-    // Memory model inputs - don't show "slower" hint for these (background processing)
+    // Background model inputs - don't show "slower" hint for these (background processing)
     const MEMORY_MODEL_INPUTS = new Set([
         'chapterModel',
         'proseModel',
         'graphitiModel',
         'graphitiSmallModel',
-        'rerankerModel'
+        'rerankerModel',
+        'owlPostOrchestratorModel',
+        'owlPostMailModel',
+        'owlPostBoardModel'
     ]);
 
     // ============================================
@@ -162,6 +165,9 @@
             'conv_interjection_model': 'conversation.interjection_model_reasoning',
             'conv_input_correction_model': 'conversation.input_correction_model_reasoning',
             'agent_vision_llm_model': 'agents.vision_reasoning',
+            'owlPostOrchestratorModel': 'owl_post.orchestrator_model_reasoning',
+            'owlPostMailModel': 'owl_post.mail_model_reasoning',
+            'owlPostBoardModel': 'owl_post.board_model_reasoning',
             'chapterModel': 'memory.chapter_model_reasoning',
             'proseModel': 'memory.prose_model_reasoning',
             'graphitiModel': 'memory.graphiti_model_reasoning',
@@ -351,6 +357,9 @@
             { id: 'conv_interjection_model', path: 'conversation.interjection_model_reasoning' },
             { id: 'conv_input_correction_model', path: 'conversation.input_correction_model_reasoning' },
             { id: 'agent_vision_llm_model', path: 'agents.vision_reasoning' },
+            { id: 'owlPostOrchestratorModel', path: 'owl_post.orchestrator_model_reasoning' },
+            { id: 'owlPostMailModel', path: 'owl_post.mail_model_reasoning' },
+            { id: 'owlPostBoardModel', path: 'owl_post.board_model_reasoning' },
             { id: 'chapterModel', path: 'memory.chapter_model_reasoning' },
             { id: 'proseModel', path: 'memory.prose_model_reasoning' },
             { id: 'graphitiModel', path: 'memory.graphiti_model_reasoning' },
