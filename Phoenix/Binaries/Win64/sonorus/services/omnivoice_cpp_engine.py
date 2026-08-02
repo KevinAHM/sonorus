@@ -9,13 +9,16 @@ on any Vulkan GPU (or CPU) without CUDA.
 
 The ctypes structs below mirror omnivoice.h (OV_ABI_VERSION 4) field for
 field.  Defaults are always populated via ov_init_default_params_v4 /
-ov_tts_default_params rather than hand-filled.
+ov_tts_default_params_v4 rather than hand-filled.
 """
 import ctypes as C
 import gc
 import hashlib
+import json
 import os
 import queue as _queue_mod
+import subprocess
+import sys
 import time
 import threading
 import multiprocessing as mp
@@ -71,7 +74,45 @@ _RUNTIME_MIN_BYTES = {
     "ggml-cpu.dll": 128 * 1024,
     "ggml-vulkan.dll": 1024 * 1024,
 }
-_upscaler_validation_cache: dict[tuple[str, int, int], bool] = {}
+_upscaler_validation_cache: dict[tuple[str, int, int, int], bool] = {}
+_upscaler_validation_lock = threading.Lock()
+_runtime_abi_cache: dict[tuple, Optional[str]] = {}
+_runtime_abi_lock = threading.Lock()
+
+_ABI_PROBE_SNIPPET = r"""
+import ctypes, json, os, sys
+bin_dir, dll_path, expected_abi = sys.argv[1], sys.argv[2], int(sys.argv[3])
+try:
+    dll_dir_handle = None
+    if hasattr(os, "add_dll_directory"):
+        dll_dir_handle = os.add_dll_directory(bin_dir)
+    os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+    lib = ctypes.CDLL(dll_path)
+    values = {}
+    for symbol, key in (
+        ("ov_init_default_params_v4", "init_abi"),
+        ("ov_tts_default_params_v4", "tts_abi"),
+    ):
+        try:
+            fn = getattr(lib, symbol)
+        except AttributeError:
+            raise RuntimeError("missing required export " + symbol)
+        fn.restype = None
+        fn.argtypes = [ctypes.c_void_p]
+        buffer = ctypes.create_string_buffer(4096)
+        fn(ctypes.cast(buffer, ctypes.c_void_p))
+        values[key] = ctypes.c_int.from_buffer(buffer).value
+    if values["init_abi"] != expected_abi or values["tts_abi"] != expected_abi:
+        raise RuntimeError(
+            "default parameter ABI mismatch: init={init_abi}, tts={tts_abi}, expected={expected}".format(
+                expected=expected_abi, **values
+            )
+        )
+    print(json.dumps(values))
+except Exception as exc:
+    print(json.dumps({"error": str(exc)}))
+    raise SystemExit(2)
+"""
 
 
 def _serialized_worker_io(func):
@@ -111,37 +152,141 @@ def dll_present() -> bool:
     return _find_dll() is not None
 
 
+def _runtime_dll_identity() -> tuple:
+    """Return identities for every DLL that can affect ABI/load readiness."""
+    identities = []
+    for name in _DLL_NAMES + RUNTIME_DLL_FILENAMES:
+        path = BIN_DIR / name
+        try:
+            file_stat = path.stat()
+            identity = (str(path.resolve()), file_stat.st_size,
+                        file_stat.st_ctime_ns, file_stat.st_mtime_ns)
+        except OSError:
+            identity = (str(path.absolute()), None, None, None)
+        identities.append(identity)
+    return tuple(identities)
+
+
+def _probe_runtime_abi(dll_path: Path) -> Optional[str]:
+    """Return None for an ABI-v4 runtime, otherwise a user-facing error."""
+    with _runtime_abi_lock:
+        cache_key = _runtime_dll_identity()
+        if cache_key in _runtime_abi_cache:
+            return _runtime_abi_cache[cache_key]
+
+        cacheable = False
+        try:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    _ABI_PROBE_SNIPPET,
+                    str(BIN_DIR),
+                    str(dll_path),
+                    str(OV_ABI_VERSION),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            error = "ABI readiness probe timed out"
+        except Exception as exc:
+            error = f"ABI readiness probe could not start: {exc}"
+        else:
+            payload = None
+            for line in reversed(result.stdout.splitlines()):
+                try:
+                    candidate = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(candidate, dict):
+                    payload = candidate
+                    break
+            if result.returncode != 0:
+                detail = payload.get("error") if payload else None
+                if not detail:
+                    detail = (result.stderr or result.stdout or "no diagnostic output").strip()[:300]
+                error = f"ABI readiness probe failed (exit code {result.returncode}): {detail}"
+                cacheable = bool(
+                    result.returncode == 2
+                    and isinstance(detail, str)
+                    and (
+                        detail.startswith("missing required export ")
+                        or detail.startswith("default parameter ABI mismatch:")
+                    )
+                )
+            elif payload is None:
+                error = "ABI readiness probe returned no result"
+            elif payload.get("init_abi") != OV_ABI_VERSION or payload.get("tts_abi") != OV_ABI_VERSION:
+                error = (
+                    "ABI readiness probe reported incompatible defaults "
+                    f"(init={payload.get('init_abi')}, tts={payload.get('tts_abi')}; "
+                    f"required={OV_ABI_VERSION})"
+                )
+                cacheable = True
+            else:
+                error = None
+                cacheable = True
+
+        if cacheable:
+            _runtime_abi_cache.clear()
+            _runtime_abi_cache[cache_key] = error
+        return error
+
+
 def missing_runtime_files() -> list[str]:
-    """Return bundled runtime DLLs that are missing or fail PE sanity checks."""
+    """Return missing runtime DLLs or a meaningful ABI incompatibility."""
     missing = [name for name in RUNTIME_DLL_FILENAMES if not _is_valid_runtime_dll(BIN_DIR / name)]
-    if not dll_present():
+    dll_path = _find_dll()
+    if dll_path is None:
         missing.insert(0, _DLL_NAMES[0])
-    return missing
+    if missing:
+        return missing
+
+    abi_error = _probe_runtime_abi(dll_path)
+    if abi_error:
+        return [f"{dll_path.name} ({abi_error})"]
+    return []
 
 
 def runtime_present() -> bool:
-    """Check that the OmniVoice library and every bundled ggml DLL are present."""
+    """Check that the OmniVoice library and every bundled ggml DLL are ABI-ready."""
     return not missing_runtime_files()
+
+
+def _upscaler_file_identity(path: Path) -> tuple[str, int, int, int]:
+    file_stat = path.stat()
+    return (
+        str(path.resolve()),
+        file_stat.st_size,
+        file_stat.st_ctime_ns,
+        file_stat.st_mtime_ns,
+    )
 
 
 def _is_valid_upscaler_model(path: Path) -> bool:
     """Verify the separately hosted AudioVAE asset by exact size and SHA-256."""
     try:
-        stat = path.stat()
-        if not path.is_file() or stat.st_size != UPSCALER_EXPECTED_BYTES:
-            return False
-        cache_key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
-        cached = _upscaler_validation_cache.get(cache_key)
-        if cached is not None:
-            return cached
-        digest = hashlib.sha256()
-        with path.open("rb") as model_file:
-            for chunk in iter(lambda: model_file.read(4 * 1024 * 1024), b""):
-                digest.update(chunk)
-        valid = digest.hexdigest().lower() == UPSCALER_SHA256
-        _upscaler_validation_cache.clear()
-        _upscaler_validation_cache[cache_key] = valid
-        return valid
+        with _upscaler_validation_lock:
+            cache_key = _upscaler_file_identity(path)
+            if not path.is_file() or cache_key[1] != UPSCALER_EXPECTED_BYTES:
+                return False
+            cached = _upscaler_validation_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+            digest = hashlib.sha256()
+            with path.open("rb") as model_file:
+                for chunk in iter(lambda: model_file.read(4 * 1024 * 1024), b""):
+                    digest.update(chunk)
+
+            if _upscaler_file_identity(path) != cache_key:
+                return False
+            valid = digest.hexdigest().lower() == UPSCALER_SHA256
+            _upscaler_validation_cache.clear()
+            _upscaler_validation_cache[cache_key] = valid
+            return valid
     except OSError:
         return False
 
@@ -257,6 +402,10 @@ def _download_upscaler_url(url: str, destination: Path) -> None:
         response = urlopen(Request(url, headers=headers), timeout=60)
     except HTTPError as exc:
         if exc.code == 416 and offset:
+            if _is_valid_upscaler_model(partial):
+                partial.replace(destination)
+                print(f"[OmniVoiceCpp] Downloaded {destination.name}")
+                return
             partial.unlink(missing_ok=True)
             return _download_upscaler_url(url, destination)
         raise
@@ -380,12 +529,19 @@ def _bind_dll(lib):
         ) from exc
     init_defaults_v4.restype = None
     init_defaults_v4.argtypes = [C.POINTER(OvInitParams)]
+    try:
+        tts_defaults_v4 = lib.ov_tts_default_params_v4
+    except AttributeError as exc:
+        raise RuntimeError(
+            "The bundled omnivoice.dll does not expose ov_tts_default_params_v4; "
+            "install the ABI v4 runtime required for 48 kHz upscaling"
+        ) from exc
+    tts_defaults_v4.restype = None
+    tts_defaults_v4.argtypes = [C.POINTER(OvTtsParams)]
     lib.ov_init.restype = C.c_void_p          # opaque struct ov_context *
     lib.ov_init.argtypes = [C.POINTER(OvInitParams)]
     lib.ov_free.restype = None
     lib.ov_free.argtypes = [C.c_void_p]
-    lib.ov_tts_default_params.restype = None
-    lib.ov_tts_default_params.argtypes = [C.POINTER(OvTtsParams)]
     lib.ov_synthesize.restype = C.c_int       # enum ov_status
     lib.ov_synthesize.argtypes = [C.c_void_p, C.POINTER(OvTtsParams), C.POINTER(OvAudio)]
     lib.ov_audio_free.restype = None
@@ -431,7 +587,7 @@ def _omnivoice_cpp_worker_main(
         # DLL load (BIN_DIR also holds the dependent ggml DLLs)
         # --------------------------------------------------------------
         bin_dir = Path(config.get("bin_dir", str(BIN_DIR)))
-        os.add_dll_directory(str(bin_dir))
+        dll_dir_handle = os.add_dll_directory(str(bin_dir))
         os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
 
         dll_path = None
@@ -588,7 +744,12 @@ def _omnivoice_cpp_worker_main(
                 ref = _get_voice_ref(voice_path)
 
                 params = OvTtsParams()
-                lib.ov_tts_default_params(C.byref(params))
+                lib.ov_tts_default_params_v4(C.byref(params))
+                if params.abi_version != OV_ABI_VERSION:
+                    raise RuntimeError(
+                        "Incompatible omnivoice.dll TTS ABI "
+                        f"({params.abi_version}; Sonorus requires {OV_ABI_VERSION})"
+                    )
                 # Keep encoded bytes alive for the duration of the call
                 text_b = text.encode("utf-8")
                 params.text = text_b
@@ -790,37 +951,135 @@ class OmniVoiceCppProcessManager:
                 self._cleanup()
                 return False
 
-    def _cleanup(self):
-        """Terminate and clean up the worker process."""
-        if self._process is not None:
-            if self._process.is_alive():
-                self._request_queue.put(None)  # shutdown signal
-                self._process.join(timeout=10.0)
-                if self._process.is_alive():
-                    self._process.terminate()
-            self._process = None
-        self._request_queue = None
-        self._response_queue = None
+    def _cleanup(self, force: bool = False):
+        """Stop the current worker and discard all process/queue handles."""
+        process = self._process
+        request_queue = self._request_queue
+        response_queue = self._response_queue
         self._ready = False
 
-    def _await_response(self, timeout: float) -> Optional[Dict[str, Any]]:
-        """Wait for a worker response, bailing out early if the worker dies."""
+        if process is not None:
+            try:
+                if process.is_alive():
+                    if force:
+                        process.terminate()
+                    else:
+                        try:
+                            request_queue.put_nowait(None)
+                        except Exception:
+                            process.terminate()
+                process.join(timeout=10.0)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=10.0)
+                if process.is_alive() and hasattr(process, "kill"):
+                    process.kill()
+                    process.join(timeout=10.0)
+            except Exception as exc:
+                print(f"[OmniVoiceCpp] Worker cleanup error: {exc}")
+            finally:
+                try:
+                    process.close()
+                except Exception:
+                    pass
+
+        for worker_queue in (request_queue, response_queue):
+            if worker_queue is None:
+                continue
+            try:
+                worker_queue.cancel_join_thread()
+            except Exception:
+                pass
+            try:
+                worker_queue.close()
+            except Exception:
+                pass
+
+        self._process = None
+        self._request_queue = None
+        self._response_queue = None
+
+    def _submit_request(self, request: Dict[str, Any]) -> Optional[Tuple[Any, Any]]:
+        """Submit to one worker generation and return its immutable wait handles."""
+        with self._lock:
+            process = self._process
+            request_queue = self._request_queue
+            response_queue = self._response_queue
+            if (
+                not self._ready
+                or process is None
+                or request_queue is None
+                or response_queue is None
+                or not process.is_alive()
+            ):
+                return None
+            try:
+                request_queue.put_nowait(request)
+            except Exception as exc:
+                print(f"[OmniVoiceCpp] Failed to submit worker request: {exc}")
+                self._cleanup(force=True)
+                return None
+            return process, response_queue
+
+    def _invalidate_worker(self, process, response_queue, reason: str) -> None:
+        """Force-discard one failed worker without touching a newer generation."""
+        with self._lock:
+            if self._process is not process or self._response_queue is not response_queue:
+                return
+            print(f"[OmniVoiceCpp] Invalidating worker: {reason}")
+            self._cleanup(force=True)
+
+    def _await_response(
+        self,
+        process,
+        response_queue,
+        timeout: float,
+    ) -> Optional[Dict[str, Any]]:
+        """Wait on one worker generation; invalidate only that generation."""
+        if process is None or response_queue is None:
+            self._invalidate_worker(process, response_queue, "worker handles are unavailable")
+            return None
+
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                self._invalidate_worker(
+                    process,
+                    response_queue,
+                    f"response timed out after {timeout:.1f}s",
+                )
                 return None
-            if self._process is None or not self._process.is_alive():
-                # Drain any final message the worker managed to send
+            if not process.is_alive():
+                # Multiprocessing queue feeder threads can publish the final
+                # response just after the process exit becomes observable.
                 try:
-                    return self._response_queue.get_nowait()
-                except Exception:
-                    print("[OmniVoiceCpp] Worker process died while waiting for response")
+                    return response_queue.get(timeout=min(0.1, remaining))
+                except _queue_mod.Empty:
+                    self._invalidate_worker(
+                        process,
+                        response_queue,
+                        "worker died without a final response",
+                    )
+                    return None
+                except Exception as exc:
+                    self._invalidate_worker(
+                        process,
+                        response_queue,
+                        f"response queue failed after worker exit: {exc}",
+                    )
                     return None
             try:
-                return self._response_queue.get(timeout=min(2.0, remaining))
+                return response_queue.get(timeout=min(2.0, remaining))
             except _queue_mod.Empty:
                 continue
+            except Exception as exc:
+                self._invalidate_worker(
+                    process,
+                    response_queue,
+                    f"response queue failed: {exc}",
+                )
+                return None
 
     # ------------------------------------------------------------------
     # Synthesis
@@ -879,10 +1138,13 @@ class OmniVoiceCppProcessManager:
         if seed is not None:
             request["seed"] = seed
 
-        self._request_queue.put(request)
+        handles = self._submit_request(request)
+        if handles is None:
+            print("[OmniVoiceCpp] Worker process became unavailable before synthesis")
+            return (False, 0)
 
         # Generous timeout — CPU-backend synthesis can be slow.
-        resp = self._await_response(timeout=300.0)
+        resp = self._await_response(*handles, timeout=300.0)
         if resp is None:
             print("[OmniVoiceCpp] Timeout waiting for synthesis response")
             return (False, 0)
@@ -925,12 +1187,14 @@ class OmniVoiceCppProcessManager:
         if not self.ensure_started():
             return False
 
-        self._request_queue.put({
+        handles = self._submit_request({
             "type": "pretokenize",
             "voice_path": voice_path,
         })
+        if handles is None:
+            return False
 
-        resp = self._await_response(timeout=120.0)
+        resp = self._await_response(*handles, timeout=120.0)
         if resp is None:
             print("[OmniVoiceCpp] Timeout waiting for pretokenize response")
             return False
@@ -942,11 +1206,12 @@ class OmniVoiceCppProcessManager:
         if not self.ensure_started():
             return
 
-        self._request_queue.put({
+        handles = self._submit_request({
             "type": "clear_voice_prompt",
             "voice_path": voice_path,
         })
-        self._await_response(timeout=5.0)
+        if handles is not None:
+            self._await_response(*handles, timeout=5.0)
 
     # ------------------------------------------------------------------
     # Warmup
@@ -958,11 +1223,12 @@ class OmniVoiceCppProcessManager:
         if not self.ensure_started():
             return
 
-        self._request_queue.put({
+        handles = self._submit_request({
             "type": "warmup",
             "voice_path": voice_path,
         })
-        self._await_response(timeout=120.0)
+        if handles is not None:
+            self._await_response(*handles, timeout=120.0)
 
     # ------------------------------------------------------------------
     # Shutdown
@@ -970,9 +1236,10 @@ class OmniVoiceCppProcessManager:
 
     def shutdown(self):
         """Shut down the worker process."""
-        with self._lock:
-            self._cleanup()
-            print("[OmniVoiceCpp] Worker process shut down")
+        with self._synthesis_lock:
+            with self._lock:
+                self._cleanup()
+                print("[OmniVoiceCpp] Worker process shut down")
 
 
 # ============================================================================
