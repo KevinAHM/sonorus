@@ -37,8 +37,8 @@ workaround was used to unblock local acceptance testing, then reverted before ha
 this branch leaves pre-release 5 networking unchanged.
 
 `docs/OMNIVOICE_CPP_PLAN.md` records the original provider design. This file describes the
-provider through `2dc4ee1` plus the 48 kHz follow-up implemented here and in companion
-omnivoice.cpp commit `b29e1ee`.
+provider through `2dc4ee1` plus the 48 kHz and release-distribution follow-ups implemented
+here and in the companion `omnivoice.cpp` branch.
 
 ---
 
@@ -67,11 +67,11 @@ documents:
 | `routes/config.py` | +444/-2 | GPU lifecycle, installer/status/voice-prep routes, setup-flag bugfix |
 | `js/config.js` | +290 | Provider controls, model/voice progress, GPU picker, restart, local-provider and action-visibility fixes |
 | `config.html` | +55 | OmniVoice (Vulkan) setup panel |
-| `install_omnivoice_cpp.bat` | +83 plus 48 kHz follow-up | Three-model installer for the embedded Python |
+| `install_omnivoice_cpp.bat` | +83 plus follow-up | Verified runtime and three-model installer for the embedded Python |
 | `services/tts/__init__.py` | +17 | Provider registration, cache clearing, availability |
 | `utils/settings.py` | +1 | `tts.omnivoice_cpp` defaults |
-| `.gitignore` | +12/-1 | Ignore generated models while admitting the runtime DLLs and notices |
-| `omnivoice_cpp/bin/*.dll` | five LFS objects | Bundled native runtime; exact list in §4 |
+| `.gitignore` | +12/-1 | Ignore downloaded runtime/models while admitting manifests and notices |
+| `omnivoice_cpp/runtime-manifest.json` | new | Pinned runtime release and per-file integrity metadata |
 | `omnivoice_cpp/licenses/*.LICENSE` | two new files | Exact upstream omnivoice.cpp and ggml MIT notices |
 
 The **2,650 insertions and 3 deletions** figure is the historical delta through `1f72c9d`.
@@ -119,10 +119,9 @@ avoiding the PCM16 file round trip used by the torch integration.
 The installation path is deliberately separate from synthesis:
 
 ```text
-five DLLs bundled in the mod
-    +
 install_omnivoice_cpp.bat or POST /install-models
-    -> downloads three GGUFs into omnivoice_cpp/models
+    -> downloads and verifies five runtime DLLs into omnivoice_cpp/bin
+    -> downloads three pinned GGUFs into omnivoice_cpp/models
     -> GET /status reports readiness
 
 optional POST /prepare-voices
@@ -134,23 +133,28 @@ optional POST /prepare-voices
 
 ## 4. Packaging and installation
 
-### Bundled native runtime
+### Downloaded native runtime
 
-These are the complete production runtime DLLs. They live in
-`Phoenix/Binaries/Win64/sonorus/omnivoice_cpp/bin/` and are tracked through Git LFS.
+The five production DLLs are distributed in the versioned
+[`sonorus-runtime-v1.0.0` GitHub Release](https://github.com/Jrjy3/omnivoice.cpp/releases/tag/sonorus-runtime-v1.0.0).
+The repository tracks only `omnivoice_cpp/runtime-manifest.json`, which pins the archive
+URL, byte size, SHA-256, and every extracted DLL's size and SHA-256.
 
 | File | Bytes | MiB |
 |---|---:|---:|
-| `ggml-vulkan.dll` | 73,998,848 | 70.57 |
-| `ggml-cpu.dll` | 833,024 | 0.79 |
-| `ggml-base.dll` | 656,896 | 0.63 |
-| `omnivoice.dll` | 394,752 | 0.38 |
+| `ggml-vulkan.dll` | 50,652,160 | 48.31 |
+| `ggml-cpu.dll` | 812,032 | 0.77 |
+| `ggml-base.dll` | 666,112 | 0.64 |
+| `omnivoice.dll` | 396,800 | 0.38 |
 | `ggml.dll` | 68,608 | 0.07 |
-| **Total** | **75,952,128** | **72.43** |
+| **Total** | **52,595,712** | **50.16** |
 
-The table records the packaged ABI-v4 build from companion commit `b29e1ee`; its
-`omnivoice.dll` SHA-256 is
-`3147a51e0b84da400d0926989222c1fdaa82290a3fb4745791372b4ed07722a7`.
+The 16,479,008-byte release archive has SHA-256
+`a1fd71977e424c110a0ff86e70a37b87022128668709d3c6fb9ed0f9275dbbe9`.
+It records the ABI-v4 runtime source at companion commit `cac4a81` and ggml commit
+`9fcaed18`. The CPU backend was compiled for an AVX2/FMA/F16C/BMI2 baseline with
+`GGML_NATIVE=OFF`; all AVX-512 variants were disabled and a disassembly audit found no
+`zmm` or opmask instructions.
 `omnivoice-tts.exe`
 and `omnivoice-upscale.exe` are useful for native debugging but are ignored and **not shipped**.
 The package also includes exact upstream MIT notices at
@@ -199,14 +203,14 @@ a fresh temporary directory after upload.
 Users may run `Phoenix/Binaries/Win64/sonorus/install_omnivoice_cpp.bat` directly or click
 **Download OmniVoice Models** in the config UI. The batch file:
 
-1. checks for the embedded Python and all five bundled DLLs;
-2. rejects truncated files and unexpanded Git LFS pointers using file-specific minimum
-   sizes and the PE `MZ` signature;
-3. checks that the core `huggingface_hub` requirement is installed;
-4. calls `omnivoice_cpp_engine.download_models()`;
-5. reuses complete files, Hugging Face's cache, and the VAE release asset's resumable
+1. checks for the embedded Python;
+2. downloads the pinned runtime release with resumable partial-file support;
+3. verifies the archive hash, exact member list, and every DLL before installing it;
+4. runs the ABI-v4 readiness probe, then checks that `huggingface_hub` is installed;
+5. calls `omnivoice_cpp_engine.download_models()`;
+6. reuses complete files, Hugging Face's cache, and the VAE release asset's resumable
    `.incomplete` download;
-6. records `installing`, `complete`, or `error` in
+7. records `installing`, `complete`, or `error` in
    `data/.omnivoice_cpp_install_status`.
 
 The UI launches the same batch file in a visible console and polls every three seconds.
@@ -221,27 +225,14 @@ both upstream OmniVoice GGUFs exist, and the VAE passes its exact size/SHA-256 c
 An incomplete DLL bundle is reported as an update/reinstall error rather than starting a
 download that could never run.
 
-### Git LFS impact
+### Binary distribution and Git LFS
 
-As of July 2026, GitHub Free, Pro, and Free-for-organizations include **10 GiB of Git LFS
-storage and 10 GiB of download bandwidth per month**; Team and Enterprise Cloud include
-250 GiB of each. The older remembered 1 GB allowance is no longer current. See GitHub's
-official [Git LFS billing documentation](https://docs.github.com/en/billing/concepts/product-billing/git-lfs)
-and [included-usage table](https://docs.github.com/en/billing/reference/product-usage-included).
-
-One 72.40 MiB runtime revision uses about 0.71% of the free storage allowance. Uploads do
-not consume LFS bandwidth, but each changed binary revision stores the complete new file,
-and each download is charged to the repository owner's bandwidth. A 10 GiB bandwidth
-allowance is roughly 141 complete runtime fetches if no other LFS objects are downloaded.
-This is why the DLLs should be rebuilt and committed deliberately and the roughly 1.47 GiB models
-must remain outside LFS. GitHub Free/Pro's 2 GB per-file limit also easily accommodates
-the largest DLL; see [GitHub's LFS file-size limits](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-git-large-file-storage).
-
-Release archives must contain the hydrated LFS objects, not Git's small pointer files.
-Enable GitHub's **Include Git LFS objects in archives** repository setting, or build the
-release zip from a checkout after `git lfs pull`. The runtime and installer reject pointer
-or truncated DLLs through minimum-size and `MZ` PE-signature checks, but such an archive
-would still be unusable until repackaged correctly.
+The runtime DLLs are no longer present in the branch's current Git LFS tree. GitHub charges
+LFS downloads to the repository owner and retains each changed binary as another storage
+object. GitHub Releases are intended for distributing binaries and do not impose aggregate
+release-asset bandwidth limits, so runtime installations use the companion release instead.
+Historical PR commits still reference their old LFS objects; removing those objects would
+require coordinated history rewriting and is intentionally outside this branch update.
 
 ---
 
@@ -281,27 +272,33 @@ native worker.
 ## 6. Building or updating the native runtime
 
 The current runtime was built from `https://github.com/Jrjy3/omnivoice.cpp` branch
-`voxcpm2-upscaler` at `b29e1ee` (based on fork commit `98a5d5f`, with ggml submodule
-`9e2947f`). Both the fork and upstream project are MIT licensed.
+`voxcpm2-upscaler` at `cac4a81`, with ggml submodule `9fcaed18`. Packaging support and
+release metadata were added in later commits without changing the DLL payload. Both
+projects are MIT licensed.
 
-Prerequisites: Visual Studio 2022 with Desktop development with C++, CMake, Git, and the
-LunarG Vulkan SDK.
+Prerequisites: Visual Studio with Desktop development with C++, CMake, Ninja, Git, and the
+LunarG Vulkan SDK. Use the 64-bit-hosted compiler.
 
 ```bat
 git clone --recurse-submodules https://github.com/Jrjy3/omnivoice.cpp
 cd omnivoice.cpp
 git checkout voxcpm2-upscaler
-call "<VS install>\VC\Auxiliary\Build\vcvars64.bat"
-cmake -B build -DGGML_VULKAN=ON -DOMNIVOICE_SHARED=ON
-cmake --build build --config Release -j %NUMBER_OF_PROCESSORS%
+call "<VS install>\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release ^
+  -DGGML_VULKAN=ON -DOMNIVOICE_SHARED=ON -DGGML_NATIVE=OFF ^
+  -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON ^
+  -DGGML_BMI2=ON -DGGML_AVX512=OFF -DGGML_AVX512_VBMI=OFF ^
+  -DGGML_AVX512_VNNI=OFF -DGGML_AVX512_BF16=OFF -DGGML_AVX_VNNI=OFF
+cmake --build build-release -j %NUMBER_OF_PROCESSORS%
+powershell -ExecutionPolicy Bypass -File tools\package-sonorus-runtime.ps1 ^
+  -BuildDirectory build-release
 ```
 
 `-DOMNIVOICE_SHARED=ON` is mandatory for ctypes. The 48 kHz integration also requires the
 ABI-v4 branch (`OV_ABI_VERSION == 4` and `ov_init_params.upscaler_path`). Copy
-only the five DLLs listed in §4 from
-the Release output, verify them together, and commit them once through LFS. Do not commit
-the CLI tools or any GGUF. Avoid normalizing unrelated source-file line endings when updating
-the Python integration.
+only the five DLLs listed in §4. The packaging script refuses files that do not match the
+reviewed release manifest and emits the uploadable ZIP plus its SHA-256. Do not commit the
+DLLs, CLI tools, release ZIP, or any GGUF to Sonorus.
 
 ---
 
@@ -399,12 +396,11 @@ Windows 11. Device enumeration was `Vulkan0` RTX 5080, `Vulkan1` AMD iGPU, `Vulk
 - Python compilation succeeds for the engine, provider, Vulkan utility, and config routes.
 - `node --check` succeeds for `js/config.js`.
 - `git diff --check` and `git lfs fsck` pass.
-- All five required DLLs are present, valid PE files, and LFS-tracked; models are not
-  tracked. Runtime checks reject LFS pointer stubs and undersized/truncated files.
+- The historical package carried all five valid PE DLLs through LFS. The current package
+  instead downloads the reviewed AVX2 runtime release and verifies the archive and DLLs.
 - Exact upstream MIT notices for omnivoice.cpp and ggml are included.
-- A clean package with no GGUFs installed all five DLLs and both notices successfully.
-- The config UI launched the models-only installer, downloaded both GGUFs, and reached the
-  ready state on the clean installation.
+- A clean package with no GGUFs used the same installer entry point and reached the ready
+  state after downloading its dependencies.
 - A temporary local HTTP 5400/socket 8420 workaround allowed acceptance testing on a system
   where port 5000 was occupied and 8173 was Windows-reserved. That workaround is not part
   of the handoff branch.
@@ -467,6 +463,7 @@ validation.
   and load state but null VRAM values.
 - UI download progress is file-level; byte-level progress is visible only in the installer
   console.
-- GGUF filenames are fixed but the Hugging Face download does not pin a repository
-  revision, so future model replacement could create native/model skew.
+- The two upstream OmniVoice GGUF downloads are pinned to Hugging Face revision
+  `361609388ae572a820d085185bbbe2a2aac4b30e`; changing them requires an explicit source
+  update and retest.
 - RVQ voice codes are cached only for the worker lifetime and are recomputed after restart.

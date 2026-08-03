@@ -88,24 +88,28 @@ synthesis lock, so it cannot close queues underneath active inference.
   and voice-preparation progress.
 - `utils/vulkan_gpu_info.py` enumerates the same ggml Vulkan device order used by the
   native runtime, allowing a secondary GPU to be selected without assuming CUDA.
-- `install_omnivoice_cpp.bat` uses Sonorus's embedded Python to install models. The web UI
-  and batch entry point call the same engine download logic.
+- `install_omnivoice_cpp.bat` uses Sonorus's embedded Python to install the native runtime
+  and models. The web UI and batch entry point call the same engine download logic.
 - The branch retains two setup fixes: a config save no longer erases TTS/LLM test flags
   written during the same session, and Prepare Voices remains visible before STT is
   configured so the UI can explain its prerequisite.
 
 ### Runtime and model packaging
 
-Five mutually compatible DLLs are bundled under `omnivoice_cpp/bin`: `omnivoice.dll`,
-`ggml.dll`, `ggml-base.dll`, `ggml-cpu.dll`, and `ggml-vulkan.dll`. They and their license
-notices ship with the mod; the approximately 1.5 GiB of GGUF models does not.
+Five mutually compatible DLLs are published as one versioned GitHub Release archive:
+`omnivoice.dll`, `ggml.dll`, `ggml-base.dll`, `ggml-cpu.dll`, and `ggml-vulkan.dll`.
+Sonorus tracks only a small manifest containing the release URL, exact archive hash, and
+per-DLL hashes. This keeps native revisions out of Git LFS while preserving a self-service
+installation path. The archive also carries the omnivoice.cpp and ggml license notices.
 
-The installer downloads the OmniVoice base model, tokenizer/codec model, and AudioVAE.
-Runtime checks reject missing, truncated, non-PE, or unexpanded Git LFS DLLs. A subprocess
-ABI probe calls both required ABI-v4 default initializers before the UI reports the runtime
-ready. The AudioVAE has stricter validation than the upstream GGUFs: exact byte size and
-SHA-256 are required, including after a resumed download. A complete `.incomplete` file
-returned with HTTP 416 is validated and promoted rather than discarded.
+The installer downloads and verifies the runtime archive before downloading the OmniVoice
+base model, tokenizer/codec model, and AudioVAE. Extraction accepts only the expected flat
+file list, validates every DLL before replacing the installed runtime, and rejects path
+traversal or extra entries. Runtime checks then reject missing, truncated, or non-PE DLLs.
+A subprocess ABI probe calls both required ABI-v4 default initializers before the UI reports
+the runtime ready. The AudioVAE has exact byte-size and SHA-256 validation, including after
+a resumed download. A complete `.incomplete` file returned with HTTP 416 is validated and
+promoted rather than discarded.
 
 ## Native library changes
 

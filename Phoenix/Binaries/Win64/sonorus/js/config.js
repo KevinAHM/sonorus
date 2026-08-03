@@ -1284,14 +1284,14 @@ function renderOmniVoiceCppPanel(data) {
     const modelsReady = data.models_present === true;
     const backendReady = runtimeReady && modelsReady;
 
-    // Bundled runtime state
+    // Downloaded runtime state
     const hintGroup = document.getElementById('omnivoiceCppRuntimeHint');
     const hintText = document.getElementById('omnivoiceCppRuntimeHintText');
     if (hintGroup && hintText) {
         if (!runtimeReady) {
             const missing = Array.isArray(data.missing_runtime_files) ? data.missing_runtime_files.join(', ') : 'runtime DLLs';
-            hintText.textContent = 'The bundled OmniVoice runtime is incomplete (' + missing + '). Reinstall or update Sonorus.';
-            hintText.style.color = 'var(--error)';
+            hintText.textContent = 'The OmniVoice runtime is not installed or needs repair (' + missing + '). Use the installer below.';
+            hintText.style.color = 'var(--warning)';
             hintGroup.style.display = 'block';
         } else if (gpus.length === 0) {
             hintText.textContent = 'No Vulkan GPU was detected. Auto may fall back to CPU, which is much slower.';
@@ -1326,7 +1326,7 @@ function renderOmniVoiceCppInstall(data, runtimeReady, modelsReady) {
 
     const progress = data.install_progress || {};
     const installing = progress.status === 'installing';
-    section.style.display = runtimeReady && (!modelsReady || installing) ? 'block' : 'none';
+    section.style.display = (!runtimeReady || !modelsReady || installing) ? 'block' : 'none';
 
     const btn = document.getElementById('omnivoiceCppInstallBtn');
     const hint = document.getElementById('omnivoiceCppInstallHint');
@@ -1339,12 +1339,14 @@ function renderOmniVoiceCppInstall(data, runtimeReady, modelsReady) {
 
     if (btn) {
         btn.disabled = installing;
-        btn.textContent = installing ? 'Downloading Models...' : 'Download OmniVoice Models';
+        btn.textContent = installing
+            ? 'Installing OmniVoice...'
+            : 'Install OmniVoice Runtime and Models';
     }
     if (hint) {
         hint.textContent = progress.status === 'error'
             ? progress.message
-            : 'Downloads three GGUF models (approximately 1.5 GB), including the 48 kHz AudioVAE upscaler. Existing partial downloads are resumed.';
+            : 'Downloads the verified portable runtime (16 MB) and three GGUF models (approximately 1.5 GB), including the 48 kHz AudioVAE upscaler. Existing partial downloads are resumed.';
         hint.style.color = progress.status === 'error' ? 'var(--error)' : '';
     }
     if (progressBox) progressBox.style.display = installing ? 'block' : 'none';

@@ -1615,26 +1615,27 @@ def get_omnivoice_cpp_status():
             process_exit_code = process.poll()
             process_running = process_exit_code is None
 
-    if models_present:
+    runtime_present = omnivoice_cpp_engine.runtime_present()
+    if models_present and runtime_present:
         install_state = "complete"
-        install_message = "OmniVoice (Vulkan) models are ready."
+        install_message = "OmniVoice (Vulkan) runtime and models are ready."
     elif process_running:
         install_state = "installing"
-        install_message = "Downloading OmniVoice (Vulkan) models..."
+        install_message = "Downloading OmniVoice (Vulkan) runtime and models..."
     elif marker_state == "installing" and _omnivoice_cpp_download_active():
         # Installer launched manually (or the server restarted mid-download):
         # no process handle, but the download is demonstrably progressing.
         install_state = "installing"
-        install_message = "Downloading OmniVoice (Vulkan) models..."
+        install_message = "Downloading OmniVoice (Vulkan) runtime and models..."
     elif marker_state == "error" or (process_exit_code is not None and process_exit_code != 0):
         install_state = "error"
-        install_message = "Model download failed. Check the installer window and try again."
+        install_message = "OmniVoice installation failed. Check the installer window and try again."
     elif marker_state == "installing":
         install_state = "error"
-        install_message = "A previous model download did not finish. Start the installer again to retry."
+        install_message = "A previous OmniVoice installation did not finish. Start it again to retry."
     else:
         install_state = "idle"
-        install_message = "The three GGUF models have not been downloaded."
+        install_message = "The portable runtime or three GGUF models have not been downloaded."
 
     current_model = next((name for name in model_files if name not in completed_models), "")
     stt_configured = _omnivoice_cpp_stt_available()
@@ -1647,7 +1648,7 @@ def get_omnivoice_cpp_status():
 
     return jsonify({
         "dll_present": omnivoice_cpp_engine.dll_present(),
-        "runtime_present": omnivoice_cpp_engine.runtime_present(),
+        "runtime_present": runtime_present,
         "missing_runtime_files": omnivoice_cpp_engine.missing_runtime_files(),
         "models_present": models_present,
         "install_progress": {
@@ -1665,18 +1666,12 @@ def get_omnivoice_cpp_status():
 
 @config_bp.route('/api/tts/omnivoice-cpp/install-models', methods=['POST'])
 def install_omnivoice_cpp_models():
-    """Launch the models-only installer in a visible console window."""
+    """Launch the runtime and model installer in a visible console window."""
     global _omnivoice_cpp_installer_process
 
     from services import omnivoice_cpp_engine
 
-    if not omnivoice_cpp_engine.runtime_present():
-        missing = ", ".join(omnivoice_cpp_engine.missing_runtime_files())
-        return jsonify({
-            "status": "error",
-            "error": f"Bundled runtime is incomplete ({missing}). Reinstall or update Sonorus.",
-        }), 400
-    if omnivoice_cpp_engine.models_present():
+    if omnivoice_cpp_engine.runtime_present() and omnivoice_cpp_engine.models_present():
         return jsonify({"status": "already_installed"}), 200
     if _read_omnivoice_cpp_install_state() == "installing" and _omnivoice_cpp_download_active():
         # A manually launched installer is already downloading - don't start

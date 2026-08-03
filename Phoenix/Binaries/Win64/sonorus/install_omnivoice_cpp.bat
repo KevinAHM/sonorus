@@ -1,10 +1,10 @@
 @echo off
 setlocal
 :: ============================================
-:: OmniVoice (Vulkan) Models Installer
+:: OmniVoice (Vulkan) Runtime + Models Installer
 :: ============================================
-:: Downloads the three GGUF models used by the
-:: bundled omnivoice.cpp/ggml runtime.
+:: Downloads the verified portable runtime and
+:: the three GGUF models used by Sonorus.
 :: ============================================
 
 cd /d "%~dp0"
@@ -14,7 +14,7 @@ set "STATUS_FILE=data\.omnivoice_cpp_install_status"
 
 echo.
 echo  ===================================================
-echo   Installing OmniVoice (Vulkan) Models
+echo   Installing OmniVoice (Vulkan)
 echo  ===================================================
 echo.
 
@@ -25,18 +25,16 @@ if not exist "%PYTHON%" (
     goto :failed
 )
 
-for %%F in (omnivoice.dll ggml.dll ggml-base.dll ggml-cpu.dll ggml-vulkan.dll) do (
-    if not exist "omnivoice_cpp\bin\%%F" (
-        echo ERROR: Missing bundled runtime file: %%F
-        echo Reinstall or update Sonorus, then try again.
-        >"%STATUS_FILE%" echo error
-        goto :failed
-    )
-)
+>"%STATUS_FILE%" echo installing
 
-"%PYTHON%" -c "import sys; sys.path.insert(0, '.'); from services.omnivoice_cpp_engine import missing_runtime_files; missing=missing_runtime_files(); print('ERROR: Invalid or truncated runtime file(s): ' + ', '.join(missing)) if missing else None; sys.exit(1 if missing else 0)"
+echo Downloading and verifying the portable OmniVoice runtime.
+echo.
+
+"%PYTHON%" -c "import sys; sys.path.insert(0, '.'); from services.omnivoice_cpp_engine import download_runtime; download_runtime(lambda current, total, message: print(f'[{current}/{total}] {message}', flush=True))"
 if errorlevel 1 (
-    echo Reinstall or update Sonorus, then try again.
+    echo.
+    echo ERROR: OmniVoice runtime installation failed.
+    echo Check your internet connection and try again.
     >"%STATUS_FILE%" echo error
     goto :failed
 )
@@ -48,8 +46,6 @@ if errorlevel 1 (
     >"%STATUS_FILE%" echo error
     goto :failed
 )
-
->"%STATUS_FILE%" echo installing
 
 echo Downloading approximately 1.5 GB from the model hosts.
 echo Existing and partially downloaded files will be reused.
@@ -68,7 +64,7 @@ if errorlevel 1 (
 
 echo.
 echo  ===================================================
-echo   OmniVoice (Vulkan) models installed successfully!
+echo   OmniVoice (Vulkan) installed successfully!
 echo  ===================================================
 echo.
 goto :finish

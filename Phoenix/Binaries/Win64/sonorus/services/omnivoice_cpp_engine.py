@@ -17,10 +17,13 @@ import hashlib
 import json
 import os
 import queue as _queue_mod
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import threading
+import zipfile
 import multiprocessing as mp
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -37,6 +40,7 @@ from utils.settings import load_settings
 # ============================================================================
 
 HF_REPO_ID = "Serveurperso/OmniVoice-GGUF"
+HF_REPO_REVISION = "361609388ae572a820d085185bbbe2a2aac4b30e"
 # The AudioVAE is produced separately from the two upstream OmniVoice GGUFs.
 # Environment overrides keep development/private mirrors testable without
 # changing the distributed source.
@@ -53,6 +57,8 @@ OV_ABI_VERSION = 4
 _SONORUS_ROOT = Path(__file__).resolve().parent.parent
 BIN_DIR = _SONORUS_ROOT / "omnivoice_cpp" / "bin"
 MODEL_DIR = _SONORUS_ROOT / "omnivoice_cpp" / "models"
+RUNTIME_MANIFEST_PATH = _SONORUS_ROOT / "omnivoice_cpp" / "runtime-manifest.json"
+RUNTIME_DOWNLOAD_DIR = _SONORUS_ROOT / "omnivoice_cpp" / ".downloads"
 
 MODEL_FILENAME = "omnivoice-base-Q8_0.gguf"
 TOKENIZER_FILENAME = "omnivoice-tokenizer-F32.gguf"
@@ -127,7 +133,7 @@ def _serialized_worker_io(func):
 # ============================================================================
 
 def _is_valid_runtime_dll(path: Path) -> bool:
-    """Reject missing, truncated, or unexpanded Git LFS pointer files."""
+    """Reject missing, truncated, or non-PE runtime files."""
     try:
         minimum_size = _RUNTIME_MIN_BYTES.get(path.name, 16 * 1024)
         if not path.is_file() or path.stat().st_size < minimum_size:
@@ -251,8 +257,189 @@ def missing_runtime_files() -> list[str]:
 
 
 def runtime_present() -> bool:
-    """Check that the OmniVoice library and every bundled ggml DLL are ABI-ready."""
+    """Check that the OmniVoice library and every installed ggml DLL are ABI-ready."""
     return not missing_runtime_files()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as input_file:
+        for chunk in iter(lambda: input_file.read(4 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest().lower()
+
+
+def _load_runtime_manifest() -> dict:
+    try:
+        manifest = json.loads(RUNTIME_MANIFEST_PATH.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise RuntimeError(f"Could not read the OmniVoice runtime manifest: {exc}") from exc
+
+    required_files = set(RUNTIME_DLL_FILENAMES) | {"omnivoice.dll"}
+    files = manifest.get("files")
+    archive = manifest.get("archive")
+    if (
+        manifest.get("schema_version") != 1
+        or not isinstance(files, dict)
+        or set(files) != required_files
+        or not isinstance(archive, dict)
+    ):
+        raise RuntimeError("The OmniVoice runtime manifest has an unsupported format")
+
+    for name, metadata in files.items():
+        if (
+            not isinstance(metadata, dict)
+            or not isinstance(metadata.get("size"), int)
+            or metadata["size"] <= 0
+            or not isinstance(metadata.get("sha256"), str)
+            or len(metadata["sha256"]) != 64
+        ):
+            raise RuntimeError(f"The OmniVoice runtime manifest entry for {name} is invalid")
+
+    archive_filename = archive.get("filename")
+    if (
+        not isinstance(archive_filename, str)
+        or not archive_filename
+        or Path(archive_filename).name != archive_filename
+        or not isinstance(archive.get("url"), str)
+        or not archive["url"].startswith("https://")
+        or not isinstance(archive.get("size"), int)
+        or archive["size"] <= 0
+        or not isinstance(archive.get("sha256"), str)
+        or len(archive["sha256"]) != 64
+    ):
+        raise RuntimeError("The OmniVoice runtime archive entry is invalid")
+    return manifest
+
+
+def _file_matches_metadata(path: Path, metadata: dict) -> bool:
+    try:
+        return (
+            path.is_file()
+            and path.stat().st_size == metadata["size"]
+            and _sha256_file(path) == metadata["sha256"].lower()
+        )
+    except OSError:
+        return False
+
+
+def _download_runtime_archive(url: str, destination: Path, metadata: dict) -> None:
+    """Download a pinned runtime archive, retaining a resumable partial file."""
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    partial = destination.with_name(destination.name + ".incomplete")
+    offset = partial.stat().st_size if partial.is_file() else 0
+    headers = {"User-Agent": "Sonorus-OmniVoiceCpp-Installer"}
+    if offset:
+        headers["Range"] = f"bytes={offset}-"
+
+    print("[OmniVoiceCpp] Downloading portable Windows runtime...")
+    try:
+        response = urlopen(Request(url, headers=headers), timeout=60)
+    except HTTPError as exc:
+        if exc.code == 416 and offset:
+            if _file_matches_metadata(partial, metadata):
+                partial.replace(destination)
+                return
+            partial.unlink(missing_ok=True)
+            return _download_runtime_archive(url, destination, metadata)
+        raise
+
+    with response:
+        status = getattr(response, "status", response.getcode())
+        append = bool(offset and status == 206)
+        expected_chunk = response.headers.get("Content-Length")
+        expected_size = (offset if append else 0) + int(expected_chunk) if expected_chunk else None
+        with partial.open("ab" if append else "wb") as output:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                output.write(chunk)
+
+    if expected_size is not None and partial.stat().st_size != expected_size:
+        raise RuntimeError(
+            "Incomplete OmniVoice runtime download: "
+            f"received {partial.stat().st_size} of {expected_size} bytes"
+        )
+    if not _file_matches_metadata(partial, metadata):
+        partial.unlink(missing_ok=True)
+        raise RuntimeError("OmniVoice runtime archive failed its size or SHA-256 check")
+    partial.replace(destination)
+
+
+def download_runtime(progress_cb=None) -> None:
+    """Install the pinned release runtime after archive and per-DLL verification."""
+    manifest = _load_runtime_manifest()
+    files = manifest["files"]
+    if all(_file_matches_metadata(BIN_DIR / name, metadata)
+           for name, metadata in files.items()):
+        print("[OmniVoiceCpp] Portable runtime already present")
+        return
+
+    if progress_cb:
+        progress_cb(0, 1, "Downloading OmniVoice portable runtime...")
+    RUNTIME_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    archive_name = manifest["archive"].get("filename", "omnivoice-runtime.zip")
+    archive_path = RUNTIME_DOWNLOAD_DIR / archive_name
+    if not _file_matches_metadata(archive_path, manifest["archive"]):
+        archive_path.unlink(missing_ok=True)
+        _download_runtime_archive(
+            manifest["archive"]["url"], archive_path, manifest["archive"]
+        )
+
+    expected_entries = set(files) | {
+        "RUNTIME-MANIFEST.json",
+        "omnivoice.cpp.LICENSE",
+        "ggml.LICENSE",
+    }
+    with tempfile.TemporaryDirectory(prefix="sonorus-omnivoice-runtime-") as temp_dir:
+        staging = Path(temp_dir)
+        try:
+            with zipfile.ZipFile(archive_path) as runtime_archive:
+                entries = {
+                    info.filename: info
+                    for info in runtime_archive.infolist()
+                    if not info.is_dir()
+                }
+                if (
+                    set(entries) != expected_entries
+                    or len(entries) != len(runtime_archive.infolist())
+                ):
+                    raise RuntimeError("OmniVoice runtime archive contains unexpected files")
+                for name in files:
+                    with runtime_archive.open(entries[name]) as source, \
+                            (staging / name).open("wb") as destination:
+                        shutil.copyfileobj(source, destination)
+        except (OSError, zipfile.BadZipFile) as exc:
+            archive_path.unlink(missing_ok=True)
+            raise RuntimeError(f"Could not extract the OmniVoice runtime: {exc}") from exc
+
+        invalid = [
+            name for name, metadata in files.items()
+            if not _file_matches_metadata(staging / name, metadata)
+        ]
+        if invalid:
+            archive_path.unlink(missing_ok=True)
+            raise RuntimeError(
+                "Extracted OmniVoice runtime failed verification: " + ", ".join(invalid)
+            )
+
+        BIN_DIR.mkdir(parents=True, exist_ok=True)
+        for name in files:
+            (staging / name).replace(BIN_DIR / name)
+
+    _runtime_abi_cache.clear()
+    missing = missing_runtime_files()
+    if missing:
+        raise RuntimeError(
+            "Installed OmniVoice runtime failed its ABI readiness check: "
+            + ", ".join(missing)
+        )
+    if progress_cb:
+        progress_cb(1, 1, "OmniVoice portable runtime ready")
+    print(f"[OmniVoiceCpp] Portable runtime ready in {BIN_DIR}")
 
 
 def _upscaler_file_identity(path: Path) -> tuple[str, int, int, int]:
@@ -343,7 +530,12 @@ def download_models(progress_cb=None):
             print(f"[OmniVoiceCpp] Model already present: {filename}")
             continue
         print(f"[OmniVoiceCpp] Downloading {filename} from {HF_REPO_ID}...")
-        hf_hub_download(repo_id=HF_REPO_ID, filename=filename, local_dir=str(MODEL_DIR))
+        hf_hub_download(
+            repo_id=HF_REPO_ID,
+            filename=filename,
+            revision=HF_REPO_REVISION,
+            local_dir=str(MODEL_DIR),
+        )
         print(f"[OmniVoiceCpp] Downloaded {filename}")
 
     upscaler_path = MODEL_DIR / UPSCALER_FILENAME
@@ -524,7 +716,7 @@ def _bind_dll(lib):
         init_defaults_v4 = lib.ov_init_default_params_v4
     except AttributeError as exc:
         raise RuntimeError(
-            "The bundled omnivoice.dll does not expose ov_init_default_params_v4; "
+            "The installed omnivoice.dll does not expose ov_init_default_params_v4; "
             "install the ABI v4 runtime required for 48 kHz upscaling"
         ) from exc
     init_defaults_v4.restype = None
@@ -533,7 +725,7 @@ def _bind_dll(lib):
         tts_defaults_v4 = lib.ov_tts_default_params_v4
     except AttributeError as exc:
         raise RuntimeError(
-            "The bundled omnivoice.dll does not expose ov_tts_default_params_v4; "
+            "The installed omnivoice.dll does not expose ov_tts_default_params_v4; "
             "install the ABI v4 runtime required for 48 kHz upscaling"
         ) from exc
     tts_defaults_v4.restype = None

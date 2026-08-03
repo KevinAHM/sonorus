@@ -1,4 +1,5 @@
 import hashlib
+import json
 import queue
 import subprocess
 import sys
@@ -6,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -263,6 +265,102 @@ class FakeDownloadResponse:
         chunk = self.body[self.offset:self.offset + size]
         self.offset += len(chunk)
         return chunk
+
+
+class RuntimeDistributionTests(unittest.TestCase):
+    FILE_PAYLOADS = {
+        "ggml.dll": b"MZ-ggml",
+        "ggml-base.dll": b"MZ-base",
+        "ggml-cpu.dll": b"MZ-cpu",
+        "ggml-vulkan.dll": b"MZ-vulkan",
+        "omnivoice.dll": b"MZ-omnivoice",
+    }
+
+    def _create_archive(self, path, extra_entries=None):
+        with zipfile.ZipFile(path, "w") as archive:
+            for name, payload in self.FILE_PAYLOADS.items():
+                archive.writestr(name, payload)
+            archive.writestr("RUNTIME-MANIFEST.json", "{}")
+            archive.writestr("omnivoice.cpp.LICENSE", "MIT")
+            archive.writestr("ggml.LICENSE", "MIT")
+            for name, payload in (extra_entries or {}).items():
+                archive.writestr(name, payload)
+
+    def _manifest(self, archive_payload):
+        return {
+            "schema_version": 1,
+            "version": "test",
+            "archive": {
+                "filename": "runtime.zip",
+                "url": "https://example/runtime.zip",
+                "size": len(archive_payload),
+                "sha256": hashlib.sha256(archive_payload).hexdigest(),
+            },
+            "files": {
+                name: {
+                    "size": len(payload),
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                }
+                for name, payload in self.FILE_PAYLOADS.items()
+            },
+        }
+
+    def test_download_runtime_installs_only_verified_dlls(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_archive = root / "source.zip"
+            self._create_archive(source_archive)
+            archive_payload = source_archive.read_bytes()
+            manifest_path = root / "runtime-manifest.json"
+            manifest_path.write_text(
+                json.dumps(self._manifest(archive_payload)), encoding="utf-8"
+            )
+            bin_dir = root / "bin"
+
+            with mock.patch.multiple(
+                engine,
+                RUNTIME_MANIFEST_PATH=manifest_path,
+                RUNTIME_DOWNLOAD_DIR=root / "downloads",
+                BIN_DIR=bin_dir,
+            ), mock.patch(
+                "urllib.request.urlopen",
+                return_value=FakeDownloadResponse(archive_payload),
+            ), mock.patch.object(
+                engine, "missing_runtime_files", return_value=[]
+            ):
+                engine.download_runtime()
+
+            self.assertEqual(
+                {path.name: path.read_bytes() for path in bin_dir.iterdir()},
+                self.FILE_PAYLOADS,
+            )
+
+    def test_download_runtime_rejects_unexpected_archive_entries(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_archive = root / "source.zip"
+            self._create_archive(source_archive, {"../outside.dll": b"MZ-escape"})
+            archive_payload = source_archive.read_bytes()
+            manifest_path = root / "runtime-manifest.json"
+            manifest_path.write_text(
+                json.dumps(self._manifest(archive_payload)), encoding="utf-8"
+            )
+            bin_dir = root / "bin"
+
+            with mock.patch.multiple(
+                engine,
+                RUNTIME_MANIFEST_PATH=manifest_path,
+                RUNTIME_DOWNLOAD_DIR=root / "downloads",
+                BIN_DIR=bin_dir,
+            ), mock.patch(
+                "urllib.request.urlopen",
+                return_value=FakeDownloadResponse(archive_payload),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "unexpected files"):
+                    engine.download_runtime()
+
+            self.assertFalse(bin_dir.exists())
+            self.assertFalse((root / "outside.dll").exists())
 
 
 class Download416Tests(unittest.TestCase):

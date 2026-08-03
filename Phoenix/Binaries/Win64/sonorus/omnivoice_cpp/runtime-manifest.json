@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "version": "1.0.0",
+  "platform": "windows-x64",
+  "cpu_baseline": "AVX2",
+  "archive": {
+    "filename": "omnivoice-runtime-windows-x64-avx2-vulkan-v1.0.0.zip",
+    "url": "https://github.com/Jrjy3/omnivoice.cpp/releases/download/sonorus-runtime-v1.0.0/omnivoice-runtime-windows-x64-avx2-vulkan-v1.0.0.zip",
+    "size": 16479008,
+    "sha256": "a1fd71977e424c110a0ff86e70a37b87022128668709d3c6fb9ed0f9275dbbe9"
+  },
+  "files": {
+    "ggml-base.dll": {
+      "size": 666112,
+      "sha256": "d3d1efc20917361aa8eec9cd569bc6b81d5b96a72f4e47d3a063443156bb3df1"
+    },
+    "ggml-cpu.dll": {
+      "size": 812032,
+      "sha256": "cfec1bf4e9fbe7d0ced6702150498e4205c57de7a8e2ed37f344f601d88743a3"
+    },
+    "ggml-vulkan.dll": {
+      "size": 50652160,
+      "sha256": "b210b54aea01ba7079e38fc0e44edb64d49c236c12db6449e42b26d124b2185e"
+    },
+    "ggml.dll": {
+      "size": 68608,
+      "sha256": "4dfc4bb24b86bc3d7703e35b7f08bf677c0bf2e2bfe0690921747d5224ff9e2d"
+    },
+    "omnivoice.dll": {
+      "size": 396800,
+      "sha256": "48e56bf3e79a4bab49d6af70a9f8844d087e7dc8b64ca01f9a650dba6f459b6b"
+    }
+  }
+}
