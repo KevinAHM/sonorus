@@ -1,5 +1,8 @@
 # OmniVoice (Vulkan) — `omnivoice_cpp` maintainer handoff
 
+For a shorter explanation of the base architecture and the complete branch-level delta,
+start with [`BRANCH_ARCHITECTURE_OVERVIEW.md`](BRANCH_ARCHITECTURE_OVERVIEW.md).
+
 This branch adds a third OmniVoice TTS provider that runs through
 [omnivoice.cpp](https://github.com/ServeurpersoCom/omnivoice.cpp) and ggml/Vulkan instead
 of torch/CUDA. It supports Vulkan devices from AMD, Intel, and NVIDIA, including selecting
