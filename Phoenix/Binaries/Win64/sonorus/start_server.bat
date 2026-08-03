@@ -31,6 +31,10 @@ cd /d "%~dp0"
 
 set PYTHON=python\python.exe
 
+:: Salad.Bowl.Service permanently occupies the default HTTP port 5000.
+:: Keep the environment override available for users who need another port.
+if not defined SONORUS_SERVER_PORT set "SONORUS_SERVER_PORT=5010"
+
 :: Detect Wine/Proton - native C extensions (numpy etc.) crash under Wine,
 :: so we must run the server with native Linux Python instead.
 reg query "HKLM\Software\Wine" >nul 2>&1
