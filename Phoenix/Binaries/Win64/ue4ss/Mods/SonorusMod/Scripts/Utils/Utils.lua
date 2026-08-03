@@ -714,7 +714,7 @@ end
 --- Works even when the NPC is not streamed in.
 --- @param voiceId string - entity name (e.g. "SebastianSallow", "PhineasBlack")
 --- @param staticData table|nil - optional static cache (will fetch if nil)
---- @return table|nil - { locationName, locationDesc, activity, activityType, isInTransit, inFlesh } or nil
+--- @return table|nil - { locationId, locationName, locationDesc, activity, activityType, isInTransit, inFlesh } or nil
 function Utils.GetNPCScheduleInfo(voiceId, staticData)
     if not voiceId or voiceId == "" then return nil end
 
@@ -733,6 +733,7 @@ function Utils.GetNPCScheduleInfo(voiceId, staticData)
     if not seValid then return nil end
 
     local info = {
+        locationId = nil,
         locationName = nil,
         locationDesc = nil,
         activity = nil,
@@ -758,6 +759,7 @@ function Utils.GetNPCScheduleInfo(voiceId, staticData)
             pcall(function() locKey = out.LocationKey:ToString() end)
 
             if locKey and locKey ~= "" then
+                info.locationId = locKey
                 info.locationName = LocationRegistry.ResolveDisplayName(locKey)
                 info.locationDesc = LocationRegistry.GetDescription(locKey)
             end

@@ -299,6 +299,10 @@ function Emotes.Play(actor, presetName, intensity, fadeIn, fadeOut)
         es.intensity = intensity or es.intensity or 1.0
         es.fadeOut = fadeOut or es.fadeOut or 0.5
         es.stopTime = nil
+        -- UE4SS may return a fresh wrapper for the same actor. Keep the stable
+        -- full-name identity, but refresh the wrapper used by subsequent ticks.
+        es.actor = actor
+        es.actorFullName = actorFullName
         _G.CurrentEmoteName = presetName
         _G.CurrentEmoteActor = actor
 
@@ -454,6 +458,7 @@ function Emotes._Finish()
     es.current = {}
     es.stopTime = nil
     es.actor = nil
+    es.actorFullName = nil
     _G.CurrentEmoteName = nil
     _G.CurrentEmoteActor = nil
     _G.CurrentEmoteGazeSide = nil

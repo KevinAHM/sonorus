@@ -295,9 +295,19 @@ NPCLock.CanLockNPCs = CanLockNPCs
 --- @return boolean true if inside Hogwarts Castle, defaults to true if location unavailable
 local function IsInsideHogwartsCastle()
     if not _G.GetCurrentLocation then return true end
-    local ok, loc = pcall(_G.GetCurrentLocation)
+    local ok, loc, locationId = pcall(_G.GetCurrentLocation)
     if not ok or not loc then return true end
-    return loc:find("Hogwarts") ~= nil
+
+    -- Prefer the language-independent region ID. Display names are localized,
+    -- and broad outdoor regions such as "Hogwarts Valley" also contain Hogwarts.
+    if locationId then
+        local normalizedId = locationId:gsub("[^%w]", ""):lower()
+        return normalizedId:find("hogwartscastle", 1, true) ~= nil
+    end
+
+    -- Keep the safe inside-castle fallback when only the old generic value is
+    -- available, but do not classify every Hogwarts-named outdoor area as inside.
+    return loc == "Hogwarts" or loc == "Hogwarts Castle"
 end
 
 --- Check if currently in a "follow NPC" mission (cached, updates every 2s)
@@ -1448,21 +1458,14 @@ function NPCLock.LockNPCToTarget(npc, targetActor, onLocked)
                 pcall(function() companionMgr:StopMovement(true) end)
                 pcall(function() companionMgr:StopMovement(false) end)
 
-                pcall(function()
-                    local npcLoc = npc:K2_GetActorLocation()
-                    local tgtLoc = targetActor:K2_GetActorLocation()
-                    local dx = tgtLoc.X - npcLoc.X
-                    local dy = tgtLoc.Y - npcLoc.Y
-                    local dist = math.sqrt(dx * dx + dy * dy)
-                    if dist > 1 then
-                        local yaw = math.atan(dy, dx) * 180 / math.pi
-                        npc:K2_SetActorRotation({Pitch = 0, Yaw = yaw, Roll = 0}, false)
-                    end
-                end)
+                local snapNpcId = npcName or BlueprintHelpers.ToVoiceId(npc)
+                local snapTargetId = BlueprintHelpers.ToVoiceId(targetActor)
+                local snapped = BlueprintHelpers.SnapNpcFaceTargetById(snapNpcId, snapTargetId)
 
                 -- Release after 50ms so the rotation sticks for at least a frame
                 _G._PendingCompanionSnapMgr = companionMgr
                 ExecuteInGameThreadWithDelay(50, function()
+                    BlueprintHelpers.SnapNpcFaceTargetById(snapNpcId, snapTargetId)
                     local mgr = _G._PendingCompanionSnapMgr
                     _G._PendingCompanionSnapMgr = nil
                     if mgr then
@@ -1470,7 +1473,11 @@ function NPCLock.LockNPCToTarget(npc, targetActor, onLocked)
                     end
                 end)
 
-                print("[NPCLock] Companion snap-rotated (id=" .. lockId .. ", angle=" .. math.floor(turnAngle) .. ")")
+                if snapped then
+                    print("[NPCLock] Companion snap-rotated via BP (id=" .. lockId .. ", angle=" .. math.floor(turnAngle) .. ")")
+                else
+                    print("[NPCLock] Companion BP snap failed (id=" .. lockId .. ")")
+                end
             else
                 print("[NPCLock] Companion snap skipped - player moving (speed=" .. math.floor(playerSpeed) .. ")")
             end
@@ -1569,6 +1576,7 @@ function NPCLock.LockNPCToTarget(npc, targetActor, onLocked)
     _G.LockedNPCs[lockId] = {
         npc = npc,
         targetActor = targetActor,
+        targetId = BlueprintHelpers.ToVoiceId(targetActor),
         scheduledEntity = scheduledEntity,
         locked = false,
         npcName = npcName,
@@ -1673,25 +1681,16 @@ function NPCLock.LockNPCToTarget(npc, targetActor, onLocked)
             end)
             pcall(function() currentScheduledEntity:EnableScheduling(false, true, true) end)
 
-            -- Snap rotate to face target (immediate + 50ms reinforcement)
-            local function applySnapRotation()
-                if not Utils.SafeIsValid(currentNpc) or not Utils.SafeIsValid(currentTargetActor) then
-                    return
-                end
-                pcall(function()
-                    local npcLoc = currentNpc:K2_GetActorLocation()
-                    local tgtLoc = currentTargetActor:K2_GetActorLocation()
-                    local dx = tgtLoc.X - npcLoc.X
-                    local dy = tgtLoc.Y - npcLoc.Y
-                    local dist = math.sqrt(dx * dx + dy * dy)
-                    if dist > 1 then
-                        local yaw = math.atan(dy, dx) * 180 / math.pi
-                        currentNpc:K2_SetActorRotation({Pitch = 0, Yaw = yaw, Roll = 0}, false)
-                    end
-                end)
+            -- Blueprint resolves both actors by stable ID and owns the rotation.
+            local snapNpcId = currentData.npcName
+            local snapTargetId = currentData.targetId
+            if not BlueprintHelpers.SnapNpcFaceTargetById(snapNpcId, snapTargetId) then
+                cleanupDeadLock("BP snap turn failed")
+                return
             end
-            applySnapRotation()
-            ExecuteInGameThreadWithDelay(50, applySnapRotation)
+            ExecuteInGameThreadWithDelay(50, function()
+                BlueprintHelpers.SnapNpcFaceTargetById(snapNpcId, snapTargetId)
+            end)
 
             if not markLockLocked(true) then
                 return
@@ -1859,21 +1858,12 @@ end
 -- Snap Re-face Helper
 -- ============================================
 
---- Re-face a snap-locked NPC to their target via K2_SetActorRotation.
+--- Re-face a snap-locked NPC to their target through the Blueprint bridge.
 --- Used by the re-face loop to avoid the full release/re-lock cycle.
 --- @param data table The lock data from _G.LockedNPCs
 function NPCLock.SnapRefaceNPC(data)
-    pcall(function()
-        local npcLoc = data.npc:K2_GetActorLocation()
-        local tgtLoc = data.targetActor:K2_GetActorLocation()
-        local dx = tgtLoc.X - npcLoc.X
-        local dy = tgtLoc.Y - npcLoc.Y
-        local dist = math.sqrt(dx * dx + dy * dy)
-        if dist > 1 then
-            local yaw = math.atan(dy, dx) * 180 / math.pi
-            data.npc:K2_SetActorRotation({Pitch = 0, Yaw = yaw, Roll = 0}, false)
-        end
-    end)
+    if not data then return false end
+    return BlueprintHelpers.SnapNpcFaceTargetById(data.npcName, data.targetId)
 end
 
 -- ============================================
