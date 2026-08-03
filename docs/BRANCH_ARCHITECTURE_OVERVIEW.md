@@ -108,8 +108,10 @@ file list, validates every DLL before replacing the installed runtime, and rejec
 traversal or extra entries. Runtime checks then reject missing, truncated, or non-PE DLLs.
 A subprocess ABI probe calls both required ABI-v4 default initializers before the UI reports
 the runtime ready. The AudioVAE has exact byte-size and SHA-256 validation, including after
-a resumed download. A complete `.incomplete` file returned with HTTP 416 is validated and
-promoted rather than discarded.
+a resumed fallback download. The upstream models and AudioVAE are pinned to immutable
+Hugging Face revisions; a checksum-identical GitHub Release mirrors the AudioVAE. A
+complete `.incomplete` fallback file returned with HTTP 416 is validated and promoted
+rather than discarded.
 
 ## Native library changes
 

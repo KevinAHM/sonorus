@@ -44,7 +44,14 @@ HF_REPO_REVISION = "361609388ae572a820d085185bbbe2a2aac4b30e"
 # The AudioVAE is produced separately from the two upstream OmniVoice GGUFs.
 # Environment overrides keep development/private mirrors testable without
 # changing the distributed source.
-UPSCALER_HF_REPO_ID = os.environ.get("SONORUS_OMNIVOICE_UPSCALER_REPO", "")
+UPSCALER_HF_REPO_ID = os.environ.get(
+    "SONORUS_OMNIVOICE_UPSCALER_REPO",
+    "Jrjy3/sonorus-omnivoice",
+)
+UPSCALER_HF_REVISION = os.environ.get(
+    "SONORUS_OMNIVOICE_UPSCALER_REVISION",
+    "cdcb598972c2f43e3d668d9152e35f3ecd9e8ad1",
+)
 UPSCALER_URL = os.environ.get(
     "SONORUS_OMNIVOICE_UPSCALER_URL",
     "https://github.com/Jrjy3/omnivoice.cpp/releases/download/"
@@ -550,11 +557,19 @@ def download_models(progress_cb=None):
         if UPSCALER_HF_REPO_ID:
             print(f"[OmniVoiceCpp] Downloading {UPSCALER_FILENAME} "
                   f"from {UPSCALER_HF_REPO_ID}...")
-            hf_hub_download(
-                repo_id=UPSCALER_HF_REPO_ID,
-                filename=UPSCALER_FILENAME,
-                local_dir=str(MODEL_DIR),
-            )
+            try:
+                hf_hub_download(
+                    repo_id=UPSCALER_HF_REPO_ID,
+                    filename=UPSCALER_FILENAME,
+                    revision=UPSCALER_HF_REVISION,
+                    local_dir=str(MODEL_DIR),
+                )
+            except Exception:
+                if not UPSCALER_URL:
+                    raise
+                print("[OmniVoiceCpp] Hugging Face AudioVAE download failed; "
+                      "trying the pinned GitHub release mirror")
+                _download_upscaler_url(UPSCALER_URL, upscaler_path)
             print(f"[OmniVoiceCpp] Downloaded {UPSCALER_FILENAME}")
         elif UPSCALER_URL:
             _download_upscaler_url(UPSCALER_URL, upscaler_path)

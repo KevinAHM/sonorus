@@ -11,3 +11,4 @@ Phoenix/Binaries/Win64/sonorus/omnivoice_cpp/licenses/*
 !Phoenix/Binaries/Win64/sonorus/omnivoice_cpp/licenses/ggml.LICENSE
 Phoenix/Binaries/Win64/sonorus/python/share/
 backup/
+/dist/

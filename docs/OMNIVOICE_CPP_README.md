@@ -192,11 +192,12 @@ at runtime. The converter and exact mapping contract live in the companion omniv
 repository under `tools/convert-voxcpm2-audiovae.py` and
 `docs/VOXCPM2_AUDIOVAE_TOOLING.md`.
 
-The VAE is hosted as the
-[`voxcpm2-audiovae-v1` prerelease asset](https://github.com/Jrjy3/omnivoice.cpp/releases/tag/voxcpm2-audiovae-v1).
-The direct downloader supports resuming a partial `.incomplete` file and accepts the final
-asset only when both its exact size and SHA-256 match. The release URL was exercised from
-a fresh temporary directory after upload.
+The VAE is hosted in
+[`Jrjy3/sonorus-omnivoice`](https://huggingface.co/Jrjy3/sonorus-omnivoice) and pinned to
+revision `cdcb598972c2f43e3d668d9152e35f3ecd9e8ad1`. The original
+[`voxcpm2-audiovae-v1` GitHub Release](https://github.com/Jrjy3/omnivoice.cpp/releases/tag/voxcpm2-audiovae-v1)
+remains a fallback mirror. Both paths accept the final asset only when its exact size and
+SHA-256 match; the direct fallback downloader also resumes `.incomplete` files.
 
 ### Installer behavior
 
@@ -466,4 +467,7 @@ validation.
 - The two upstream OmniVoice GGUF downloads are pinned to Hugging Face revision
   `361609388ae572a820d085185bbbe2a2aac4b30e`; changing them requires an explicit source
   update and retest.
+- The AudioVAE download is independently pinned to Hugging Face revision
+  `cdcb598972c2f43e3d668d9152e35f3ecd9e8ad1` and retains the checksum-identical GitHub
+  Release as a fallback mirror.
 - RVQ voice codes are cached only for the worker lifetime and are recomputed after restart.
