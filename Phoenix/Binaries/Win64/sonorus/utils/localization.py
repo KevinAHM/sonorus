@@ -260,6 +260,20 @@ def id_from_name(name, nearby_npcs=None):
             if npc_id.lower() == name_lower:
                 return npc_id
 
+        # If the LLM returns a display name like "Slytherin Student", prefer
+        # the live nearby actor over the global localization reverse map. Many
+        # generic and cut/scrapped characters share display names.
+        loc = load_localization()
+        for npc in nearby_npcs:
+            npc_id = npc.get('name', '')
+            if not npc_id:
+                continue
+            display_name = loc.get(npc_id) or get_display_name(npc_id)
+            display_lower = display_name.lower()
+            display_no_spaces = display_lower.replace(' ', '')
+            if name_lower_spaces == display_lower or name_lower == display_no_spaces:
+                return npc_id
+
     # 2. Check lowercase_map.json for IDs that are given by game in lowercase
     lowercase_map = get_lowercase_map()
     # e.g. NeridaRoberts or Nerida Roberts -> neridaroberts
@@ -282,7 +296,20 @@ def id_from_name(name, nearby_npcs=None):
     if name_no_spaces in loc:
         return canonicalize_npc_id(name_no_spaces)
 
-    # 4. Partial match - check if any display name STARTS with or CONTAINS the input
+    # 4. Partial match nearby display names before global localization, for
+    # ambiguous labels like "Slytherin Student".
+    if nearby_npcs:
+        for npc in nearby_npcs:
+            npc_id = npc.get('name', '')
+            if not npc_id:
+                continue
+            display_name = loc.get(npc_id) or get_display_name(npc_id)
+            display_lower = display_name.lower()
+            first_name = display_lower.split()[0] if ' ' in display_lower else display_lower
+            if display_lower.startswith(name_lower_spaces) or first_name == name_lower_spaces:
+                return npc_id
+
+    # 5. Partial match - check if any display name STARTS with or CONTAINS the input
     # (handles "Nellie" matching "Nellie Oggspire")
     for display_lower, slug in reverse_loc.items():
         # Check if input is the start of a display name
@@ -293,7 +320,7 @@ def id_from_name(name, nearby_npcs=None):
         if first_name == name_lower_spaces:
             return slug
 
-    # 5. Check nearby NPCs for partial match
+    # 6. Check nearby NPCs for partial match
     if nearby_npcs:
         for npc in nearby_npcs:
             npc_id = npc.get('name', '')
@@ -302,7 +329,7 @@ def id_from_name(name, nearby_npcs=None):
             if npc_lower.startswith(name_lower) or name_lower in npc_lower:
                 return npc_id
 
-    # 6. Fallback: return with spaces removed
+    # 7. Fallback: return with spaces removed
     print(f"[Localization] No ID found for '{name}', using fallback")
     return name.replace(" ", "")
 

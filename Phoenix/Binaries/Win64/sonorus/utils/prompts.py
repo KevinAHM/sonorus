@@ -3,10 +3,19 @@ Character prompt utilities for Sonorus.
 Handles prompt template substitution and character configuration.
 """
 
+import re
+
 from .settings import load_settings, DEFAULT_SETTINGS, get_setting
 from .localization import get_display_name
 from .character_bios import build_prompt_bio_sections
+from .emote_embeddings import is_freeform_emotes_enabled
+from .narration_subjects import get_narration_subject
 from constants import EMOTE_TAGS_PROMPT
+from services.tts.universal_client import (
+    UniversalAPIError,
+    UniversalSpeechClient,
+    select_tts_model,
+)
 
 # Language code to display name mapping for AI response instruction
 LANGUAGE_NAMES = {
@@ -25,6 +34,33 @@ LANGUAGE_NAMES = {
     "AR_AE": "Arabic",
 }
 
+_QUOTED_SPOKEN_LINE_RE = re.compile(
+    r'(?:"[^"\r\n]*\S[^"\r\n]*"|“[^”\r\n]*\S[^”\r\n]*”)'
+)
+_ASTERISK_NARRATION_RE = re.compile(r'(?<!\*)\*[^*\r\n]*\S[^*\r\n]*\*(?!\*)')
+
+
+def needs_narration_format_nudge(history_messages, conversation_settings) -> bool:
+    """Detect whether recent assistant history still uses the old unquoted format."""
+    if not conversation_settings.get("narration_enabled", False):
+        return False
+
+    recent_messages = [
+        message
+        for message in (history_messages or [])
+        if (message.get("content") or "").strip()
+    ][-5:]
+    recent_assistant_messages = [
+        message for message in recent_messages if message.get("role") == "assistant"
+    ]
+    if not recent_assistant_messages:
+        return False
+
+    content = recent_assistant_messages[-1].get("content") or ""
+    if not _QUOTED_SPOKEN_LINE_RE.search(content):
+        return True
+    return "*" in content and not _ASTERISK_NARRATION_RE.search(content)
+
 NARRATION_FORMAT_WITH_VOCAL_TAGS = (
     '## Output Format\n'
     'You can mix spoken dialogue with brief narration. Not every response requires narration. Examples:\n'
@@ -34,12 +70,13 @@ NARRATION_FORMAT_WITH_VOCAL_TAGS = (
     'Rules:\n'
     '- Spoken words go in double quotes\n'
     '- Actions, thoughts, or scene descriptions go in *asterisks* — always use third person ("He smirked" not "I smirked")\n'
+    '- Keep narration centered on the character you are playing. Do not write spoken dialogue, quoted lines, emotion tags, or independent actions for other characters.\n'
     "- A single *word* or short emphasis phrase can be emphasis: \"I *really* don't think so.\"\n"
     '- Narration/stage direction in *asterisks* should usually be at least 3 words or include punctuation.\n'
     "- Do NOT use double quotes for emphasis or irony around individual words — use *asterisks* instead\n"
     '- Always include at least one line of dialogue. Narration is optional and *should be used sparingly* for character depth.\n'
     '- The sentence limit in your instructions applies to the ENTIRE response — dialogue and narration combined. A narration block counts as a sentence.\n'
-    '- For brief audible vocal bursts that fit the allowed sound tags, prefer the tag (for example [laugh]) instead of only narrating it in prose.\n'
+    '- For brief audible vocal bursts that fit the allowed sound tags, prefer an allowed tag instead of only narrating it in prose.\n'
     '- It is fine to use both when natural: keep the audible sound in a tag and use narration for the visible action or tone around it.\n'
     '- `[Action: X]` tags (if applicable) go at the very end, after all dialogue and narration.'
 )
@@ -53,6 +90,7 @@ NARRATION_FORMAT_NO_VOCAL_TAGS = (
     'Rules:\n'
     '- Spoken words go in double quotes\n'
     '- Actions, thoughts, or scene descriptions go in *asterisks* — always use third person ("He smirked" not "I smirked")\n'
+    '- Keep narration centered on the character you are playing. Do not write spoken dialogue, quoted lines, emotion tags, or independent actions for other characters.\n'
     "- A single *word* or short emphasis phrase can be emphasis: \"I *really* don't think so.\"\n"
     '- Narration/stage direction in *asterisks* should usually be at least 3 words or include punctuation.\n'
     "- Do NOT use double quotes for emphasis or irony around individual words — use *asterisks* instead\n"
@@ -61,8 +99,73 @@ NARRATION_FORMAT_NO_VOCAL_TAGS = (
     '- `[Action: X]` tags (if applicable) go at the very end, after all dialogue and narration.'
 )
 
+_DEFAULT_OPENING_NARRATION_EXAMPLE = (
+    '*He scrunched his nose thoughtfully before answering* '
+    '"I suppose I can help you with that."'
+)
+_NARRATION_CENTERING_RULE = (
+    '- Keep narration centered on the character you are playing. Do not write '
+    'spoken dialogue, quoted lines, emotion tags, or independent actions for '
+    'other characters.\n'
+)
 
-def get_speech_rules(*, narration_enabled_override=None):
+
+def _personalize_narration_format(template, narration_subject):
+    """Insert an English character subject without changing locale fallbacks."""
+    if not narration_subject:
+        return template
+
+    opening_example = (
+        f'*{narration_subject} paused thoughtfully before answering.* '
+        '"I suppose I can help you with that."'
+    )
+    opening_rule = (
+        f'- If narration comes before the first spoken line, begin it with '
+        f'{narration_subject} instead of a pronoun. After spoken dialogue has '
+        'begun, use normal third-person pronouns.\n'
+    )
+    return (
+        template
+        .replace(_DEFAULT_OPENING_NARRATION_EXAMPLE, opening_example)
+        .replace(
+            _NARRATION_CENTERING_RULE,
+            _NARRATION_CENTERING_RULE + opening_rule,
+        )
+    )
+
+
+def _universal_paralinguistic_tags() -> list[dict]:
+    """Return tags for the one selected Universal model, failing closed."""
+    try:
+        settings = load_settings()
+        connection = settings.get("speech_server", {})
+        universal = settings.get("tts", {}).get("universal", {})
+        game_language = settings.get("setup", {}).get("language", "EN_US")
+        capabilities = UniversalSpeechClient(
+            connection.get("api_url") or "http://127.0.0.1:8100",
+            connection.get("api_key") or "",
+        ).enriched_capabilities(game_language)
+        model = select_tts_model(capabilities, universal.get("model"))
+        return list(model.get("paralinguisticTags", [])) if model else []
+    except (AttributeError, TypeError, UniversalAPIError, ValueError):
+        return []
+
+
+def _selected_paralinguistic_tags(provider: str) -> list[dict]:
+    if provider == "omnivoice":
+        return [
+            {
+                "token": "[laugh]",
+                "aliases": [],
+                "description": "Inserts natural laughter.",
+            }
+        ]
+    if provider == "universal":
+        return _universal_paralinguistic_tags()
+    return []
+
+
+def get_speech_rules(*, narration_enabled_override=None, narration_subject=None):
     """
     Build TTS speech rules based on the active TTS provider and model settings.
 
@@ -71,13 +174,24 @@ def get_speech_rules(*, narration_enabled_override=None):
     """
     provider = get_setting('tts.provider', 'inworld')
     stt_enabled = get_setting('stt.provider', 'none') != 'none'
+    sound_example_tag = None
 
     if narration_enabled_override is None:
         narration_enabled = get_setting('conversation.narration_enabled', False)
     else:
         narration_enabled = bool(narration_enabled_override)
 
+    narration_format_with_vocal_tags = _personalize_narration_format(
+        NARRATION_FORMAT_WITH_VOCAL_TAGS,
+        narration_subject,
+    )
+    narration_format_no_vocal_tags = _personalize_narration_format(
+        NARRATION_FORMAT_NO_VOCAL_TAGS,
+        narration_subject,
+    )
+
     if provider in ('inworld', 'elevenlabs'):
+        sound_example_tag = '[laugh]'
         lines = [
             '## Voice Performance',
             'Your text is converted to speech. Follow these rules:',
@@ -100,15 +214,18 @@ def get_speech_rules(*, narration_enabled_override=None):
 
         if narration_enabled:
             lines.append('')
-            lines.append(NARRATION_FORMAT_WITH_VOCAL_TAGS)
+            lines.append(narration_format_with_vocal_tags)
         else:
             lines.append('')
             lines.append('**Output ONLY spoken dialogue** (plus allowed vocal tags above, and `[Action: X]` tags if applicable — see Actions section). Do not use quotation marks around dialogue. No narration, no action descriptions, no stage directions, no internal thoughts — in ANY format (asterisks, parentheses, brackets, or prose). Action tags never replace dialogue; always speak first.')
 
         rules = '\n'.join(lines)
 
-    # OmniVoice — supports only [laugh] as an audio tag
-    elif provider == 'omnivoice':
+    # Local OmniVoice and Universal use the active model's exact tag contract.
+    elif provider in ('omnivoice', 'universal'):
+        paralinguistic_tags = _selected_paralinguistic_tags(provider)
+        if paralinguistic_tags:
+            sound_example_tag = paralinguistic_tags[0]['token']
         lines = [
             '## Voice Performance',
             'Your text is converted to speech. Follow these rules:',
@@ -119,17 +236,54 @@ def get_speech_rules(*, narration_enabled_override=None):
         ]
         if not narration_enabled:
             lines.append('- You can wrap a word in *asterisks* to stress it')
-        lines.append('')
-        lines.append('**Non-verbal sounds** (use sparingly where natural): [laugh]')
-        lines.append('Use [laugh] for short audible laughs the listener would hear. This is the only sound tag available.')
-        if narration_enabled:
-            lines.append('Keep [laugh] inside the quoted spoken line it belongs to, for example "[laugh] That\'s absurd." Never place it outside quotes or in narration.')
+        if paralinguistic_tags:
+            tokens = ', '.join(tag['token'] for tag in paralinguistic_tags)
+            definitions = '; '.join(
+                f"{tag['token']}: {tag['description']}"
+                for tag in paralinguistic_tags
+            )
+            example_tag = paralinguistic_tags[0]['token']
             lines.append('')
-            lines.append(NARRATION_FORMAT_WITH_VOCAL_TAGS)
+            lines.append(
+                f'**Non-verbal sounds** (use sparingly where natural): {tokens}'
+            )
+            lines.append(f'Use only these exact sound tags. {definitions}')
+            if narration_enabled:
+                lines.append(
+                    f'Keep sound tags inside the quoted spoken line they belong to, '
+                    f'for example "{example_tag} That\'s absurd." Never place them '
+                    'outside quotes or in narration.'
+                )
+                lines.append('')
+                lines.append(narration_format_with_vocal_tags)
+            else:
+                lines.append(
+                    f'Keep sound tags inside the spoken line they belong to, for '
+                    f'example {example_tag} That\'s absurd. Do not use quotation marks '
+                    'around dialogue.'
+                )
+                lines.append('')
+                lines.append(
+                    '**Output ONLY spoken dialogue** (plus the allowed sound tags above, '
+                    'and `[Action: X]` tags if applicable — see Actions section). Do not '
+                    'use quotation marks around dialogue. No narration, no action '
+                    'descriptions, no stage directions, no internal thoughts — in ANY '
+                    'format (asterisks, parentheses, brackets, or prose). Action tags '
+                    'never replace dialogue; always speak first.'
+                )
         else:
-            lines.append('Keep [laugh] inside the spoken line it belongs to, for example [laugh] That\'s absurd. Do not use quotation marks around dialogue.')
             lines.append('')
-            lines.append('**Output ONLY spoken dialogue** (plus [laugh] where natural, and `[Action: X]` tags if applicable — see Actions section). Do not use quotation marks around dialogue. No narration, no action descriptions, no stage directions, no internal thoughts — in ANY format (asterisks, parentheses, brackets, or prose). Action tags never replace dialogue; always speak first.')
+            if narration_enabled:
+                lines.append(narration_format_no_vocal_tags)
+            else:
+                lines.append(
+                    '**Output ONLY spoken dialogue** (plus `[Action: X]` tags if '
+                    'applicable — see Actions section). Do not use quotation marks around '
+                    'dialogue. No narration, no action descriptions, no stage directions, '
+                    'no internal thoughts — in ANY format (asterisks, parentheses, '
+                    'brackets, or prose). Action tags never replace dialogue; always '
+                    'speak first.'
+                )
         rules = '\n'.join(lines)
 
     # Pocket TTS / none / unknown providers - plain text only
@@ -140,7 +294,7 @@ def get_speech_rules(*, narration_enabled_override=None):
             "- Use contractions naturally (don't, can't, I'm, we're)\n"
             '- Vary sentence length\n'
             '\n'
-            + NARRATION_FORMAT_NO_VOCAL_TAGS
+            + narration_format_no_vocal_tags
         )
 
     else:
@@ -154,12 +308,36 @@ def get_speech_rules(*, narration_enabled_override=None):
         )
 
     # Facial emote tags: global setting, all providers
-    # Tags are stripped before TTS by each provider's filter; they drive facial animation only
+    # Facial parsing is provider-independent; providers decide whether tags also reach TTS.
     if get_setting('conversation.emotes_enabled', False):
+        freeform_emotes = is_freeform_emotes_enabled(load_settings())
+        if freeform_emotes:
+            emotion_instruction = (
+                f'examples only (not a comprehensive list): {EMOTE_TAGS_PROMPT}. '
+                'Choose or improvise the single best-fitting concise English emotion-state '
+                'tag for the sentence. Use the base emotion or state label, such as [happy], '
+                '[angry], or [wistful], not a manner-of-speaking adverb or vocal direction '
+                'such as [happily], [angrily], [softly], [whispering], or [shouting]'
+            )
+        else:
+            emotion_instruction = EMOTE_TAGS_PROMPT
         if narration_enabled:
+            opening_narration_example = (
+                f"*{narration_subject} hesitated.*"
+                if narration_subject
+                else "*He hesitated.*"
+            )
+            sound_tag_note = (
+                ' Can combine with a sound tag.' if sound_example_tag else ''
+            )
+            sound_tag_example = (
+                f'\n"[happy] {sound_example_tag} I can\'t believe it worked!"'
+                if sound_example_tag
+                else ''
+            )
             rules += (
-                f'\n**Emotion** (optional, at start of a quoted spoken line, skip if does not match the emotion of the sentence): {EMOTE_TAGS_PROMPT}'
-                '\nPlace the emotion tag inside the opening quote, before the first word. Can combine with a sound tag. Examples:'
+                f'\n**Emotion** (optional, at start of a quoted spoken line, skip if does not match the emotion of the sentence): {emotion_instruction}'
+                f'\nPlace the emotion tag inside the opening quote, before the first word.{sound_tag_note} Examples:'
                 '\n"[happy] That\'s wonderful news!" *She clapped her hands.*'
                 '\n"[content] This is nice. I could stay here awhile."'
                 '\n"[tired] I need a moment. It has been a very long day."'
@@ -168,18 +346,18 @@ def get_speech_rules(*, narration_enabled_override=None):
                 '\n"[beam] There you are. I was so hoping to see you."'
                 '\n"[proud] Well done. I knew you had it in you."'
                 '\n"[smug] Oh, I knew I was right."'
-                '\n*He hesitated.* "[concerned] Are you sure about this?"'
+                f'\n{opening_narration_example} "[concerned] Are you sure about this?"'
                 '\n"[sympathy] I\'m sorry. That must have been difficult."'
                 '\n"[annoyed] Must you do that here and now?"'
                 '\n"[confused] Wait. What are you talking about?"'
                 '\n"[cringe] Oh no. Please do not say that again."'
                 '\n"[curious] And what, exactly, were you doing in the Restricted Section?"'
-                '\n"[happy] [laugh] I can\'t believe it worked!"'
+                f'{sound_tag_example}'
                 '\n"[angry] You had no right to do that." *His jaw clenched.*'
                 '\nNever place an emotion tag outside quotes or in narration.'
             )
         else:
-            rules += f'\n**Emotion** (optional, at sentence start, skip if does not match the emotion of the sentence): {EMOTE_TAGS_PROMPT}'
+            rules += f'\n**Emotion** (optional, at sentence start, skip if does not match the emotion of the sentence): {emotion_instruction}'
 
     if stt_enabled:
         rules += '\n\n{player} may be using voice input, so interpret the intent behind their words rather than reacting to odd phrasing or apparent misspellings. e.g. "Hogs meet" likely means "Hogsmeade".'
@@ -261,12 +439,14 @@ def get_character(npc_id, game_context=None, speaking_to=None, prompt_mode=False
     settings = load_settings()
     prompts = settings.get('prompts', {})
     default_prompt = prompts.get('default', DEFAULT_SETTINGS['prompts']['default'])
+    language = settings.get('setup', {}).get('language', 'EN_US')
 
     # Get display name from ID using localization
     display_name = get_display_name(npc_id) if npc_id else "Hogwarts Resident"
 
     # Build context for placeholder substitution
-    speech_rules = get_speech_rules()
+    narration_subject = get_narration_subject(npc_id, display_name, language)
+    speech_rules = get_speech_rules(narration_subject=narration_subject)
     # If the user's prompt already has the voice input line baked in, don't duplicate it
     if 'voice input' in default_prompt:
         speech_rules = speech_rules.split('\n\n{player} may be using voice input')[0]
@@ -303,7 +483,6 @@ def get_character(npc_id, game_context=None, speaking_to=None, prompt_mode=False
 
     # In prompt mode (NPC-to-NPC), remove player-specific voice input instruction
     if prompt_mode:
-        import re
         prompt = re.sub(r"\n*.+ may be using voice input[^\n]*", "", prompt)
         prompt = re.sub(r"\n{3,}", "\n\n", prompt).strip()  # Clean up extra blank lines
 
@@ -332,7 +511,6 @@ def get_character(npc_id, game_context=None, speaking_to=None, prompt_mode=False
         prompt += f"\n\n{world_lore_block}"
 
     # Add language instruction for non-English games
-    language = settings.get('setup', {}).get('language', 'EN_US')
     if language != 'EN_US':
         lang_name = LANGUAGE_NAMES.get(language, 'the game language')
         prompt += f"\n\n**Response Language:** You MUST respond ONLY in {lang_name}. Do not use English."

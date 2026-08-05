@@ -429,6 +429,7 @@ class TTSStream:
         self.stream_complete = False  # Alias for compatibility with spatial_lav
         self.exists = True
         self._total_fed = 0
+        self._metrics_lock = threading.Lock()
         self.playback_started = False  # Set by Audio3DPlayer after source.play()
 
         # DIAGNOSTIC: Streaming metrics for debugging audio hitches
@@ -459,7 +460,8 @@ class TTSStream:
                 print(f"[TTSStream] FIRST CHUNK at t=0.000s, size={len(pcm_bytes)} bytes")
 
             self._chunk_count += 1
-            self._total_fed += len(pcm_bytes)
+            with self._metrics_lock:
+                self._total_fed += len(pcm_bytes)
             self._feed_times.append(now)
             self._chunk_sizes.append(len(pcm_bytes))
 
@@ -521,7 +523,8 @@ class TTSStream:
         try:
             # Non-blocking get - return immediately
             data = self.buffer_queue.get_nowait()
-            self._total_pulled += len(data)
+            with self._metrics_lock:
+                self._total_pulled += len(data)
 
             # DIAGNOSTIC: Log every 50th pull to avoid spam (but always log first few)
             pull_count = len(self._pull_times)
@@ -546,6 +549,12 @@ class TTSStream:
             # Return small silence chunk to keep stream alive
             silence = b'\x00\x00' * 512
             return (silence, len(silence))
+
+    def buffered_audio_seconds(self):
+        bytes_per_second = self.sample_rate * self.channels * (self.bits // 8)
+        with self._metrics_lock:
+            buffered = max(0, self._total_fed - self._total_pulled)
+        return buffered / bytes_per_second if bytes_per_second > 0 else 0.0
 
     def _print_summary(self):
         """Print streaming summary on completion - helps diagnose audio issues"""

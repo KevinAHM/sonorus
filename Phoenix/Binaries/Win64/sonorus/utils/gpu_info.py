@@ -48,7 +48,7 @@ def _parse_cuda_version(nvidia_smi_path: str) -> Optional[str]:
             [nvidia_smi_path],
             capture_output=True, text=True, timeout=10,
         )
-        match = re.search(r"CUDA Version:\s*(\d+\.\d+)", result.stdout)
+        match = re.search(r"CUDA (?:UMD )?Version:\s*(\d+\.\d+)", result.stdout)
         if match:
             return match.group(1)
     except Exception:

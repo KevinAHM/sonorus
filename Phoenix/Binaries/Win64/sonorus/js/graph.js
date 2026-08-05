@@ -41,6 +41,8 @@ const MEMORY_CATEGORY_COLORS = {
     other: '#666'
 };
 
+const EDITABLE_MEMORY_CATEGORIES = ['lore', 'relationship', 'preference', 'milestone'];
+
 function escapeHtml(value) {
     return String(value ?? '')
         .replace(/&/g, '&amp;')
@@ -51,7 +53,7 @@ function escapeHtml(value) {
 }
 
 function getFactCategory(fact) {
-    return String(fact.target_type || fact.name || 'memory').toLowerCase();
+    return String(fact.target_type || fact.category || fact.name || 'memory').toLowerCase();
 }
 
 function getCategoryLabel(category) {
@@ -60,6 +62,14 @@ function getCategoryLabel(category) {
 
 function getCategoryColor(category) {
     return MEMORY_CATEGORY_COLORS[category] || MEMORY_CATEGORY_COLORS.other;
+}
+
+function renderMemoryCategoryOptions(selectedCategory) {
+    const selected = EDITABLE_MEMORY_CATEGORIES.includes(selectedCategory) ? selectedCategory : 'lore';
+    return EDITABLE_MEMORY_CATEGORIES.map(category => {
+        const isSelected = category === selected ? ' selected' : '';
+        return `<option value="${escapeHtml(category)}"${isSelected}>${escapeHtml(getCategoryLabel(category))}</option>`;
+    }).join('');
 }
 
 function getFactMeta(fact) {
@@ -266,9 +276,14 @@ function renderFactCard(fact, index) {
                 <span class="memory-category-badge" style="border-color:${getCategoryColor(category)}; color:${getCategoryColor(category)};">
                     ${escapeHtml(getCategoryLabel(category))}
                 </span>
-                <button type="button" class="memory-delete-btn" onclick="event.stopPropagation(); deleteFactByVisibleIndex(${index})" title="Delete fact">
-                    <i data-lucide="x"></i>
-                </button>
+                <div class="memory-fact-actions">
+                    <button type="button" class="memory-icon-btn memory-edit-btn" onclick="event.stopPropagation(); editFactByVisibleIndex(${index})" title="Edit fact">
+                        <i data-lucide="pencil"></i>
+                    </button>
+                    <button type="button" class="memory-icon-btn memory-delete-btn" onclick="event.stopPropagation(); deleteFactByVisibleIndex(${index})" title="Delete fact">
+                        <i data-lucide="x"></i>
+                    </button>
+                </div>
             </div>
             <div class="memory-fact-text">${factText}</div>
             <div class="memory-fact-meta">${metaText}</div>
@@ -287,12 +302,14 @@ function showFactDetails(fact) {
     document.getElementById('edgeDetailTitle').textContent = `${getCategoryLabel(category)} Fact`;
     document.getElementById('edgeDetailFact').innerHTML = `
         <div style="display:flex; gap:8px; align-items:flex-start;">
-            <button onclick="deleteSpecificFact(0)" title="Delete this fact" style="background:none; border:none; color:var(--ember-red); cursor:pointer; padding:0; font-size:1.1em; line-height:1;">&times;</button>
+            <button type="button" class="memory-icon-btn memory-edit-btn" onclick="editSpecificFact(0)" title="Edit this fact"><i data-lucide="pencil"></i></button>
+            <button type="button" class="memory-icon-btn memory-delete-btn" onclick="deleteSpecificFact(0)" title="Delete this fact"><i data-lucide="x"></i></button>
             <span>${escapeHtml(fact.fact || 'No details available')}</span>
         </div>`;
     document.getElementById('edgeDetailChapters').textContent = fact.chapters?.length ? `Chapter: ${fact.chapters.join(', ')}` : '';
     document.getElementById('edgeDetailTime').textContent = meta.length ? meta.join(' · ') : '';
     document.getElementById('edgeDetailsPanel').style.display = 'block';
+    refreshMemoryInspectorIcons();
 }
 
 async function searchNpcMemory() {
@@ -319,8 +336,18 @@ async function searchNpcMemory() {
         if (data.success && data.results && data.results.length > 0) {
             const facts = data.results.map(result => {
                 if (typeof result === 'string') return { fact: result, target_type: 'memory' };
-                const exact = graphEdgesData.find(edge => edge.fact === result.fact);
-                return exact || { fact: result.fact, source: result.source, target: result.target, target_type: 'memory' };
+                const memoryId = result.memory_id || result.id || '';
+                const exact = memoryId
+                    ? graphEdgesData.find(edge => edge.memory_id === memoryId)
+                    : graphEdgesData.find(edge => edge.fact === result.fact);
+                return exact || {
+                    memory_id: memoryId,
+                    fact: result.fact,
+                    source: result.source,
+                    target: result.target,
+                    target_type: result.target_type || result.category || 'memory',
+                    category: result.category || ''
+                };
             });
             resultsList.innerHTML = facts.map((fact, index) => {
                 const category = getFactCategory(fact);
@@ -444,6 +471,14 @@ async function deleteFactByVisibleIndex(index) {
     }
 }
 
+function editFactByVisibleIndex(index) {
+    const fact = getVisibleFacts()[index];
+    if (fact) {
+        currentEdgeContext = { edges: [fact] };
+        showFactEditor(fact);
+    }
+}
+
 async function deleteGraphNode(npcId, nodeName) {
     showToast('Entity deletion is not available in fact memory. Delete individual facts instead.', 'info');
 }
@@ -465,6 +500,7 @@ async function deleteSpecificFact(index) {
             method: 'DELETE',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
+                memory_id: fact.memory_id || '',
                 source: fact.source || '',
                 target: fact.target || '',
                 fact: fact.fact
@@ -476,11 +512,101 @@ async function deleteSpecificFact(index) {
             document.getElementById('edgeDetailsPanel').style.display = 'none';
             await loadNpcGraph();
         } else {
-            showToast(data.error || 'Delete failed', 'error');
+            showToast(data.error || data.message || 'Delete failed', 'error');
         }
     } catch (e) {
         console.error('Delete fact failed:', e);
         showToast('Delete failed', 'error');
+    }
+}
+
+function editSpecificFact(index) {
+    if (!currentEdgeContext || !currentEdgeContext.edges[index]) return;
+    showFactEditor(currentEdgeContext.edges[index]);
+}
+
+function showFactEditor(fact) {
+    if (!fact.memory_id) {
+        showToast('This fact cannot be edited until the full memory list is refreshed.', 'error');
+        return;
+    }
+
+    currentEdgeContext = { edges: [fact] };
+    const category = getFactCategory(fact);
+    const meta = getFactMeta(fact);
+    document.getElementById('edgeDetailTitle').textContent = 'Edit Fact';
+    document.getElementById('edgeDetailFact').innerHTML = `
+        <div class="memory-edit-form">
+            <label class="memory-edit-label" for="memoryEditFactText">Fact</label>
+            <textarea id="memoryEditFactText" class="memory-edit-textarea" rows="4">${escapeHtml(fact.fact || '')}</textarea>
+            <label class="memory-edit-label" for="memoryEditCategory">Category</label>
+            <select id="memoryEditCategory" class="memory-edit-select">
+                ${renderMemoryCategoryOptions(category)}
+            </select>
+            <div class="memory-edit-actions">
+                <button type="button" class="btn btn-primary" id="memoryEditSaveBtn" onclick="saveFactEdit(0)">Save</button>
+                <button type="button" class="btn btn-secondary" onclick="showFactDetails(currentEdgeContext.edges[0])">Cancel</button>
+            </div>
+        </div>`;
+    document.getElementById('edgeDetailChapters').textContent = fact.chapters?.length ? `Chapter: ${fact.chapters.join(', ')}` : '';
+    document.getElementById('edgeDetailTime').textContent = meta.length ? meta.join(' · ') : '';
+    document.getElementById('edgeDetailsPanel').style.display = 'block';
+}
+
+async function saveFactEdit(index) {
+    if (!currentEdgeContext || !currentEdgeContext.edges[index]) return;
+    const fact = currentEdgeContext.edges[index];
+    const npcId = document.getElementById('graphNpcSelect').value;
+    const textInput = document.getElementById('memoryEditFactText');
+    const categoryInput = document.getElementById('memoryEditCategory');
+    const saveBtn = document.getElementById('memoryEditSaveBtn');
+    const newFact = textInput?.value.trim() || '';
+    const category = categoryInput?.value || '';
+
+    if (!fact.memory_id) {
+        showToast('Missing memory id for fact edit', 'error');
+        return;
+    }
+    if (!newFact) {
+        showToast('Fact text cannot be empty', 'error');
+        return;
+    }
+
+    if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Saving...';
+    }
+
+    try {
+        const response = await fetch(`/api/memories/graph/${encodeURIComponent(npcId)}/fact/${encodeURIComponent(fact.memory_id)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fact: newFact, category })
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success) throw new Error(data.error || 'Edit failed');
+
+        showToast('Fact updated', 'success');
+        await loadNpcGraph();
+        const updated = graphEdgesData.find(edge => edge.memory_id === fact.memory_id);
+        if (updated) {
+            showFactDetails(updated);
+        } else {
+            showFactDetails({
+                ...fact,
+                fact: newFact,
+                category,
+                target_type: category,
+                name: category
+            });
+        }
+    } catch (e) {
+        console.error('Edit fact failed:', e);
+        showToast(e.message || 'Edit failed', 'error');
+        if (saveBtn) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+        }
     }
 }
 

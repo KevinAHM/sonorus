@@ -41,6 +41,19 @@ OWLPOST_HTML = os.path.join(SONORUS_DIR, "owlpost.html")
 
 owlpost_bp = Blueprint('owlpost', __name__, url_prefix='/owlpost')
 
+
+def _is_player_context_ready():
+    try:
+        from utils import player_context
+        return player_context.is_ready()
+    except Exception:
+        return False
+
+
+def _no_player_loaded_response():
+    return jsonify({"success": False, "error": "Player context not ready"}), 400
+
+
 # Injected by server.py
 _lua_socket = None
 _load_game_context = None
@@ -1005,10 +1018,13 @@ def serve_owl_archive(filename):
 @owlpost_bp.route('/api/log', methods=['GET'])
 def get_activity_log():
     """Return recent owl post activity log entries with resolved display names."""
+    if not _is_player_context_ready():
+        return jsonify([])
+
     from utils.localization import get_display_name
 
-    limit = request.args.get('limit', 20, type=int)
-    entries = get_owl_log(limit=min(limit, 50))
+    limit = request.args.get('limit', 200, type=int)
+    entries = get_owl_log(limit=min(limit, 200))
     for entry in entries:
         npc_id = entry.get('npc_id')
         if npc_id:
@@ -1019,6 +1035,9 @@ def get_activity_log():
 @owlpost_bp.route('/api/log', methods=['DELETE'])
 def clear_activity_log():
     """Clear all owl post activity log entries."""
+    if not _is_player_context_ready():
+        return _no_player_loaded_response()
+
     clear_owl_log()
     return jsonify({"success": True})
 
@@ -1026,6 +1045,9 @@ def clear_activity_log():
 @owlpost_bp.route('/api/boards/reset', methods=['DELETE'])
 def reset_all_boards():
     """Delete all board posts, preserving board definitions and unlocks."""
+    if not _is_player_context_ready():
+        return _no_player_loaded_response()
+
     clear_all_board_posts()
     return jsonify({"success": True})
 
@@ -1034,6 +1056,9 @@ def reset_all_boards():
 def reset_all_mail():
     """Delete all owl mail, mail generation state, and cached read-aloud audio."""
     try:
+        if not _is_player_context_ready():
+            return _no_player_loaded_response()
+
         rows = clear_all_mail()
 
         # Clean up cached audio WAVs for deleted mail, plus any orphaned archive files.

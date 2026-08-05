@@ -76,6 +76,59 @@ def _humanize_llm_test_error(error_msg, llm_provider):
     return error_msg
 
 
+def _get_default_embedding_model(llm_provider):
+    """Return the memory embedding default for the active LLM provider."""
+    if llm_provider == 'openrouter':
+        return 'openai/text-embedding-3-small'
+    if llm_provider == 'gemini':
+        return 'gemini-embedding-2'
+    return 'text-embedding-3-small'
+
+
+def _safe_positive_int(value):
+    try:
+        parsed = int(float(value))
+        return parsed if parsed > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _reasoning_request_is_off(reasoning_request):
+    """Return True when the request did not enable OpenRouter reasoning."""
+    if reasoning_request is None:
+        return True
+    if not isinstance(reasoning_request, dict):
+        return True
+    if reasoning_request.get('enabled') is False:
+        return True
+    if reasoning_request.get('max_tokens') == 0:
+        return True
+    if str(reasoning_request.get('effort', '')).lower() in ('minimal', 'none', 'off', 'disabled'):
+        return True
+    return False
+
+
+def _openrouter_reasoning_warning(llm_module):
+    """Build a warning if OpenRouter reports reasoning tokens despite reasoning being off."""
+    metadata = llm_module.get_last_response_metadata() if hasattr(llm_module, 'get_last_response_metadata') else {}
+    if metadata.get('warning'):
+        return metadata['warning']
+    if metadata.get('provider') != 'openrouter':
+        return None
+
+    reasoning_tokens = _safe_positive_int((metadata.get('usage') or {}).get('reasoning_tokens'))
+    if not reasoning_tokens:
+        return None
+
+    if not _reasoning_request_is_off(metadata.get('reasoning_requested')):
+        return None
+
+    return (
+        f"OpenRouter reported {reasoning_tokens} reasoning tokens even though Sonorus did not enable reasoning for this test. "
+        "This provider may ignore the reasoning toggle."
+    )
+
+
 def _run_setup_command(command, args=None):
     """Run a setup command in background thread."""
     global _setup_running, _setup_error
@@ -148,10 +201,12 @@ def _run_setup_command(command, args=None):
                     raise FileNotFoundError(f"Voice manifest not found. Ensure {manifest_name} exists in the data folder.")
                 else:
                     # For non-English dubbed languages, suggest using voice manager
+                    server_port = os.getenv("SONORUS_SERVER_PORT", "5000")
                     raise FileNotFoundError(
                         f"Voice manifest not found for {voice_language}. "
                         f"You need to build the voice manifest for this language first. "
-                        f"Visit the Voice Manager at http://localhost:5000/voice-manager/ to extract and build {manifest_name}."
+                        f"Visit the Voice Manager at http://localhost:{server_port}/voice-manager/ "
+                        f"to extract and build {manifest_name}."
                     )
 
             # Extract using voice language (undubbed languages extract EN_US audio)
@@ -537,19 +592,21 @@ def get_setup_status():
     vision_config = settings.get('agents', {}).get('vision', {})
     vision_settings = vision_config.get('llm', {})
     memory_settings = settings.get('memory', {})
+    current_llm_provider = status['current_llm_provider']
     models = {
         'chat': conv_settings.get('chat_model', GEMINI_CHAT_DEFAULT_OR),
         'target': conv_settings.get('target_selection_model', 'meta-llama/llama-4-scout:nitro'),
         'interject': conv_settings.get('interjection_model', 'google/gemini-3.1-flash-lite')
     }
     if vision_config.get('enabled', True) and not is_llm_provider_feature_disabled('vision', settings):
-        models['vision'] = vision_settings.get('model', 'google/gemini-2.5-flash-lite:nitro')
+        models['vision'] = vision_settings.get('model', 'google/gemini-3.1-flash-lite')
     # Include input correction model if enabled
     if (conv_settings.get('input_correction_enabled') and conv_settings.get('input_correction_model')
             and not is_llm_provider_feature_disabled('input_correction', settings)):
         models['input_correction'] = conv_settings['input_correction_model']
-    # Include memory models only when the active provider supports memory embeddings.
-    if memory_settings.get('enabled') and current_llm_provider in ('openai', 'openrouter'):
+    # Include memory models only when the active provider allows memory.
+    if memory_settings.get('enabled') and not is_llm_provider_feature_disabled('memory', settings):
+        models['embedding'] = memory_settings.get('embedding_model') or _get_default_embedding_model(current_llm_provider)
         for key, setting_key in [('chapter', 'chapter_model'), ('prose', 'prose_model'),
                                   ('graphiti', 'graphiti_model'), ('graphiti_small', 'graphiti_small_model'),
                                   ('reranker', 'reranker_model')]:
@@ -708,6 +765,11 @@ def setup_test_tts():
                 raise Exception("TTS not configured. Check your Inworld settings.")
             elif provider == 'elevenlabs':
                 raise Exception("TTS not configured. Please add your ElevenLabs API key in the TTS settings.")
+            elif provider == 'universal':
+                connection = settings.get('speech_server', {})
+                if not connection.get('api_url'):
+                    raise Exception("TTS not configured. Please add your Universal Speech Server URL in the TTS settings.")
+                raise Exception("TTS not configured. Check your Universal Speech Server settings.")
             else:
                 raise Exception(f"TTS not configured. Please add your {provider.title()} API key in the TTS settings.")
 
@@ -798,16 +860,16 @@ def setup_test_llm():
             # Core models (always tested)
             (conv_settings.get('chat_model', GEMINI_CHAT_DEFAULT_OR), 'chat',
              conv_settings.get('max_tokens', 8192)),
-            (conv_settings.get('target_selection_model', 'gemini-2.5-flash-lite'), 'target',
+            (conv_settings.get('target_selection_model', 'gemini-3.1-flash-lite'), 'target',
              conv_settings.get('speaker_selection_max_tokens', 512)),
-            (conv_settings.get('interjection_model', 'gemini-2.5-flash-lite'), 'interject',
+            (conv_settings.get('interjection_model', 'gemini-3.1-flash-lite'), 'interject',
              conv_settings.get('speaker_selection_max_tokens', 512)),
         ]
 
         # Vision model (only if vision is enabled)
         if vision_config.get('enabled', True) and not is_llm_provider_feature_disabled('vision', settings):
             models_list.append((
-                vision_settings.get('model', 'google/gemini-2.5-flash-lite:nitro'), 'vision',
+                vision_settings.get('model', 'google/gemini-3.1-flash-lite'), 'vision',
                 vision_settings.get('max_tokens', 8192),
             ))
 
@@ -818,8 +880,10 @@ def setup_test_llm():
                 (conv_settings['input_correction_model'], 'input_correction', 1024)
             )
 
-        # Memory models (only if memory is enabled and provider supports embeddings)
-        if memory_settings.get('enabled') and llm_provider in ('openai', 'openrouter'):
+        # Memory models (only if memory is enabled and provider allows memory)
+        embedding_model = None
+        if memory_settings.get('enabled') and not is_llm_provider_feature_disabled('memory', settings):
+            embedding_model = memory_settings.get('embedding_model') or _get_default_embedding_model(llm_provider)
             memory_models = [
                 (memory_settings.get('chapter_model'), 'chapter'),
                 (memory_settings.get('prose_model'), 'prose'),
@@ -873,12 +937,16 @@ def setup_test_llm():
                 duration_ms = (time.time() - start_time) * 1000
 
                 if response:
-                    results[model_id] = {
+                    result = {
                         'success': True,
                         'used_for': uses,
                         'response_excerpt': response[:50],
                         'duration_ms': round(duration_ms)
                     }
+                    warning = _openrouter_reasoning_warning(llm)
+                    if warning:
+                        result['warning'] = warning
+                    results[model_id] = result
                 else:
                     all_success = False
                     # Get the actual error from llm module
@@ -897,6 +965,44 @@ def setup_test_llm():
                 results[model_id] = {
                     'success': False,
                     'used_for': uses,
+                    'error': error_msg
+                }
+
+        if embedding_model:
+            result_key = f"{embedding_model} [embedding]"
+            try:
+                start_time = time.time()
+                embedding_result = llm.test_embedding(
+                    model=embedding_model,
+                    text="Sonorus setup embedding test"
+                )
+                duration_ms = (time.time() - start_time) * 1000
+
+                if embedding_result:
+                    dimensions = embedding_result.get('dimensions')
+                    results[result_key] = {
+                        'success': True,
+                        'used_for': ['embedding'],
+                        'response_excerpt': f"{dimensions} dimensions" if dimensions else "Embedding returned",
+                        'duration_ms': round(duration_ms)
+                    }
+                else:
+                    all_success = False
+                    error_msg = _humanize_llm_test_error(
+                        llm.get_last_error() or 'No embedding returned from model',
+                        llm_provider
+                    )
+                    results[result_key] = {
+                        'success': False,
+                        'used_for': ['embedding'],
+                        'error': error_msg
+                    }
+            except Exception as e:
+                all_success = False
+                error_msg = _humanize_llm_test_error(str(e), llm_provider)
+                results[result_key] = {
+                    'success': False,
+                    'used_for': ['embedding'],
                     'error': error_msg
                 }
 

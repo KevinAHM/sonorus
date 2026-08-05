@@ -30,6 +30,25 @@ from utils.game_context import format_static_context, format_dynamic_context
 from utils.llm_utils import call_llm_messages, strip_response_metadata
 
 
+def _format_history_output_reminder(*, has_vision_context: bool = False) -> str:
+    conversation = load_settings().get("conversation", {})
+    if conversation.get("narration_enabled", False):
+        reminder = (
+            'Remember: the timestamped history lines are context, not part of your response. '
+            'Do not prefix your response with timestamps, your name, or "(to ...)".'
+        )
+        if conversation.get("spatial_grounding_enabled", True) and has_vision_context:
+            reminder += (
+                ' When visual context gives a character\'s current location, keep any narration spatially consistent with that '
+                'location. You may invent fitting actions, but do not relocate the character to a different part of the scene.'
+            )
+        return reminder
+    return (
+        'Remember: the timestamped history lines are context, not an output format. '
+        'Respond with dialogue only. Do not prefix your response with timestamps, your name, or "(to ...)".'
+    )
+
+
 def build_commentary_request(
     speaker_id: str,
     target_id: str,
@@ -152,10 +171,9 @@ def build_commentary_request(
         final_user_parts.append(dynamic_ctx)
     if memory_search_results:
         final_user_parts.append(memory_search_results)
-    final_user_parts.append(
-        'Remember: the timestamped history lines are context, not an output format. '
-        'Respond with dialogue only. Do not prefix your response with timestamps, your name, or "(to ...)".'
-    )
+    final_user_parts.append(_format_history_output_reminder(
+        has_vision_context=bool(dynamic_ctx and "**What you can see:**" in dynamic_ctx)
+    ))
     final_user_message = "\n\n".join(final_user_parts)
 
     # Assemble three-layer messages array
@@ -236,7 +254,7 @@ def build_follow_up_request(
         f"You asked {player_name} a question a moment ago and they have gone quiet.\n"
         f"Your last question was: \"{last_question_text.strip()}\"\n"
         f"Give one short in-character follow-up line to check whether {player_name} is still there.\n"
-        f"Do not add action tags. Do not start a longer conversation. Do not involve other NPCs."
+        f"Do not start a longer conversation. Do not involve other NPCs."
     )
 
     user_input = (
@@ -640,10 +658,9 @@ def build_attention_request(
     if dynamic_ctx:
         final_user_parts.append("---")
         final_user_parts.append(dynamic_ctx)
-    final_user_parts.append(
-        'Remember: the timestamped history lines are context, not an output format. '
-        'Respond with dialogue only. Do not prefix your response with timestamps, your name, or "(to ...)".'
-    )
+    final_user_parts.append(_format_history_output_reminder(
+        has_vision_context=bool(dynamic_ctx and "**What you can see:**" in dynamic_ctx)
+    ))
     final_user_message = "\n\n".join(final_user_parts)
 
     # Assemble three-layer messages array
@@ -1080,7 +1097,8 @@ def run_unsolicited_turn(
 
     final_text = full_text_holder.get("text", "")
     if final_text:
-        pending_history_entry["text"] = re.sub(r"\*([^*]+)\*", r"\1", final_text)
+        # Preserve narration/emphasis markup in canonical history.
+        pending_history_entry["text"] = final_text
         if not session.sentence_subtitles and playback_result["turn_result"].get("turn_id"):
             subtitle_text = re.sub(r"\*([^*]+)\*", r"\1", final_text)
             subtitle_text = remove_unpaired_double_quotes(subtitle_text)

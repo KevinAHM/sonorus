@@ -6,10 +6,21 @@ import os
 import re
 import sys
 import time
+import importlib
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.settings import load_settings
+
+
+PROVIDER_MODULES = {
+    "whisper": "services.whisper_stt",
+    "parakeet": "services.parakeet_stt",
+    "canary": "services.canary_stt",
+    "moonshine": "services.moonshine_stt",
+    "deepgram": "services.deepgram_stt",
+    "universal": "services.universal_stt",
+}
 
 
 # ============================================================================
@@ -125,18 +136,11 @@ def get_provider():
 
     if provider_name == 'none':
         return None
-    elif provider_name == 'whisper':
-        from . import whisper_stt as provider_module
-    elif provider_name == 'parakeet':
-        from . import parakeet_stt as provider_module
-    elif provider_name == 'canary':
-        from . import canary_stt as provider_module
-    elif provider_name == 'moonshine':
-        from . import moonshine_stt as provider_module
-    else:
-        from . import deepgram_stt as provider_module
-
-    return provider_module
+    module_name = PROVIDER_MODULES.get(provider_name)
+    if module_name is None:
+        print(f"[STT] Unknown provider: {provider_name}")
+        return None
+    return importlib.import_module(module_name)
 
 
 def transcribe(audio_data: bytes, sample_rate: int = 16000) -> dict:
@@ -151,13 +155,19 @@ def transcribe(audio_data: bytes, sample_rate: int = 16000) -> dict:
         {
             "success": bool,
             "text": str,           # Transcribed text
-            "confidence": float,   # 0.0-1.0 if available
+            "confidence": float | None,  # 0.0-1.0 when the provider supplies it
             "error": str or None
         }
     """
     provider = get_provider()
     if provider is None:
-        return {"success": False, "text": "", "confidence": 0.0, "error": "STT provider is disabled"}
+        provider_name = get_provider_name()
+        error = (
+            "STT provider is disabled"
+            if provider_name == "none"
+            else f"Unknown STT provider: {provider_name}"
+        )
+        return {"success": False, "text": "", "confidence": None, "error": error}
 
     t0 = time.perf_counter()
     result = provider.transcribe(audio_data, sample_rate)
@@ -172,7 +182,9 @@ def transcribe(audio_data: bytes, sample_rate: int = 16000) -> dict:
 
     provider_name = get_provider_name()
     if result["success"]:
-        print(f"[STT/{provider_name}] Transcribed: \"{result['text']}\" (conf: {result['confidence']:.2f}) [{elapsed_ms:.0f}ms]")
+        confidence = result.get("confidence")
+        confidence_text = f"{confidence:.2f}" if isinstance(confidence, (int, float)) else "unavailable"
+        print(f"[STT/{provider_name}] Transcribed: \"{result['text']}\" (conf: {confidence_text}) [{elapsed_ms:.0f}ms]")
     else:
         print(f"[STT/{provider_name}] Failed ({result.get('error', 'unknown')}) [{elapsed_ms:.0f}ms]")
 
@@ -190,6 +202,8 @@ def is_available() -> bool:
     if provider == 'none':
         return False
 
+    if provider not in PROVIDER_MODULES:
+        return False
     if provider == 'deepgram':
         return bool(stt_settings.get('deepgram', {}).get('api_key'))
     elif provider == 'whisper':
@@ -206,6 +220,9 @@ def is_available() -> bool:
     elif provider == 'moonshine':
         # Local model - always available (downloads on first use)
         return True
+    elif provider == 'universal':
+        provider_module = importlib.import_module(PROVIDER_MODULES[provider])
+        return bool(provider_module.is_available())
 
     return False
 

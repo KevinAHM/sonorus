@@ -36,6 +36,7 @@ _SQLITE_DBS = [
     "commitments.db",
     "owl_post.db",
     "memory_queue.db",
+    "player_profile.db",
 ]
 _SQLITE_SIBLINGS = ["-wal", "-shm"]
 
@@ -82,12 +83,13 @@ def normalize_player_name(raw_name):
 class _RegisteredModule:
     """Tracks a DB module's close/reinit callbacks."""
 
-    __slots__ = ("name", "close_fn", "reinit_fn")
+    __slots__ = ("name", "close_fn", "reinit_fn", "post_switch_fn")
 
-    def __init__(self, name, close_fn, reinit_fn):
+    def __init__(self, name, close_fn, reinit_fn, post_switch_fn=None):
         self.name = name
         self.close_fn = close_fn
         self.reinit_fn = reinit_fn
+        self.post_switch_fn = post_switch_fn
 
     def __repr__(self):
         return f"_RegisteredModule({self.name!r})"
@@ -126,6 +128,7 @@ class PlayerContext:
         self._lock = threading.Lock()
         self._modules: list[_RegisteredModule] = []
         self._current_player_name: str | None = None
+        self._current_player_display_name: str | None = None
         self._player_data_dir: str | None = None
         self._ready = False
 
@@ -143,6 +146,11 @@ class PlayerContext:
         return self._current_player_name
 
     @property
+    def current_player_display_name(self):
+        """The raw/display player name from the latest successful handshake."""
+        return self._current_player_display_name or self._current_player_name
+
+    @property
     def player_data_dir(self):
         """Absolute path to the current player's data directory, or None."""
         return self._player_data_dir
@@ -153,15 +161,24 @@ class PlayerContext:
 
     # ── Registration ────────────────────────────────────────────────────
 
-    def register(self, name, close_fn, reinit_fn):
-        """Register a DB module's close/reinit callbacks.
+    def register(self, name, close_fn, reinit_fn, post_switch_fn=None):
+        """Register a DB module's lifecycle callbacks.
 
         Args:
             name: Human-readable module name (for logging).
             close_fn: Callable with no args — close all DB connections.
             reinit_fn: Callable(new_data_dir) — reopen with new paths.
+            post_switch_fn: Optional callable(raw_name, normalized_name, data_dir).
         """
-        self._modules.append(_RegisteredModule(name, close_fn, reinit_fn))
+        with self._lock:
+            for mod in self._modules:
+                if mod.name == name:
+                    log.warning("Module %s already registered; replacing", name)
+                    mod.close_fn = close_fn
+                    mod.reinit_fn = reinit_fn
+                    mod.post_switch_fn = post_switch_fn
+                    return
+            self._modules.append(_RegisteredModule(name, close_fn, reinit_fn, post_switch_fn))
         log.info("Registered module: %s", name)
 
     def set_worker_lifecycle(self, stop_fn, start_fn):
@@ -210,12 +227,14 @@ class PlayerContext:
 
         # Same-player handshake → no-op
         if normalized == self._current_player_name:
+            self._current_player_display_name = str(raw_player_name).strip() if raw_player_name is not None else normalized
             log.debug("Same player '%s' — no-op", normalized)
             return normalized
 
         with self._lock:
             # Double-check under lock (another thread may have switched)
             if normalized == self._current_player_name:
+                self._current_player_display_name = str(raw_player_name).strip() if raw_player_name is not None else normalized
                 log.debug("Same player '%s' (after lock) — no-op", normalized)
                 return normalized
 
@@ -262,7 +281,21 @@ class PlayerContext:
                 except Exception:
                     log.exception("Error reinitializing module %s", mod.name)
 
-            # 8. Restart background workers
+            # 8. Finalize player context before hooks or workers read it
+            self._ready = True
+            self._current_player_name = normalized
+            self._current_player_display_name = str(raw_player_name).strip() if raw_player_name is not None else normalized
+
+            # 9. Run post-switch hooks
+            for mod in self._modules:
+                if not mod.post_switch_fn:
+                    continue
+                try:
+                    mod.post_switch_fn(raw_player_name, normalized, new_data_dir)
+                except Exception:
+                    log.exception("Error running post-switch hook for %s", mod.name)
+
+            # 10. Restart background workers
             if self._start_workers_fn:
                 log.info("Starting background workers...")
                 try:
@@ -270,9 +303,6 @@ class PlayerContext:
                 except Exception:
                     log.exception("Error starting workers")
 
-            # 9. Finalize
-            self._ready = True
-            self._current_player_name = normalized
             log.info("Player switch complete: %s (dir: %s)",
                      normalized, new_data_dir)
             return normalized
@@ -358,9 +388,9 @@ def get_context():
     return PlayerContext()
 
 
-def register(name, close_fn, reinit_fn):
+def register(name, close_fn, reinit_fn, post_switch_fn=None):
     """Register a DB module with the PlayerContext."""
-    PlayerContext().register(name, close_fn, reinit_fn)
+    PlayerContext().register(name, close_fn, reinit_fn, post_switch_fn)
 
 
 def is_ready():
@@ -376,3 +406,13 @@ def switch(raw_player_name):
 def get_player_data_dir():
     """Return the current player's data directory, or None."""
     return PlayerContext().player_data_dir
+
+
+def get_current_player_name():
+    """Return the normalized current player name, or None."""
+    return PlayerContext().current_player_name
+
+
+def get_current_player_display_name():
+    """Return the display current player name, or None."""
+    return PlayerContext().current_player_display_name

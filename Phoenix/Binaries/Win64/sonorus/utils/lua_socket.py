@@ -10,11 +10,19 @@ import socket as sock_lib
 import struct
 import threading
 
+from constants import VOICE_NAME_ALIASES
+
 from . import mods
+from . import presence as presence_tracker_module
+from . import presence_validation
+from . import schedule_cache
 from .dialogue_db import (
     _format_game_date,
     _format_game_time,
+    _game_datetime_to_minutes,
     _minutes_to_game_datetime,
+    _parse_game_date,
+    _parse_game_time,
     get_latest_recorded_game_time_candidates as get_latest_dialogue_game_time_candidates,
     get_latest_recorded_game_minutes as get_latest_dialogue_game_minutes,
 )
@@ -24,10 +32,18 @@ from .owl_post_db import (
     get_latest_recorded_game_time_candidates as get_latest_owl_post_game_time_candidates,
     get_latest_recorded_game_minutes as get_latest_owl_post_game_minutes,
 )
-from .text_utils import is_significant_npc
+from .text_utils import INSIGNIFICANT_PREFIXES, get_significant_npc_names, is_significant_npc
 
 
 TIME_SYNC_WARNING_THRESHOLD_MINUTES = 60
+
+# Presence-ledger rollout gates. Keep these aligned with
+# _G.PresenceLedgerPhaseFlags in logic.lua.
+LEDGER_SCHEDULE_DUMP_ENABLED = False
+LEDGER_PRESENCE_WATCHER_ENABLED = False
+
+_SONORUS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DEFAULT_PORT_FILE = os.path.join(_SONORUS_DIR, "lua_socket.port")
 
 
 def _format_game_minutes_for_log(total_minutes: int) -> str:
@@ -36,6 +52,28 @@ def _format_game_minutes_for_log(total_minutes: int) -> str:
         return "unknown"
     date_tuple, time_tuple = _minutes_to_game_datetime(total_minutes)
     return f"{_format_game_date(*date_tuple)} {_format_game_time(*time_tuple)} ({total_minutes}m)"
+
+
+def _get_strict_current_game_minutes(game_context: dict) -> int:
+    """Return current game minutes only when both date and time are known."""
+    time_str = game_context.get('timeFormatted', '') or game_context.get('time', '')
+    time_tuple = _parse_game_time(time_str)
+    if time_tuple is None:
+        return 0
+
+    year = game_context.get('year')
+    month = game_context.get('month')
+    day = game_context.get('day')
+    if year is not None and month is not None and day is not None:
+        date_tuple = (int(year), int(month), int(day))
+    else:
+        date_str = game_context.get('dateFormatted') or game_context.get('gameDate')
+        date_tuple = _parse_game_date(date_str) if date_str else None
+
+    if date_tuple is None:
+        return 0
+
+    return _game_datetime_to_minutes(date_tuple, time_tuple)
 
 
 def _format_dialogue_candidate_for_log(candidate: dict) -> str:
@@ -71,11 +109,18 @@ def _format_owl_candidate_for_log(candidate: dict) -> str:
 class LuaSocketServer:
     """TCP server for bidirectional Lua communication."""
 
-    def __init__(self, port=8173):
+    def __init__(self, port=0, port_file=None):
+        if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
+            raise ValueError(f"Invalid Lua socket port: {port!r}")
+        self.requested_port = port
         self.port = port
+        self.port_file = os.fspath(port_file or _DEFAULT_PORT_FILE)
         self.server = None
         self.client = None
         self.lock = threading.Lock()
+        self._lifecycle_lock = threading.Lock()
+        self._port_file_lock = threading.Lock()
+        self._server_thread = None
         self.running = False
         self._connection_id = 0  # Incremented on each new client connection
         # Playback state tracking (for interjection loop)
@@ -124,6 +169,8 @@ class LuaSocketServer:
         self._interrupt_callback = None  # Will be set by server.py (stop_conversation)
         self._game_event_callback = None  # Will be set by server.py (event commentary)
         self._pending_time_sync_check = False
+        self._last_player_context_mismatch = None
+        self._ambient_blocklist_current_minutes = None
 
     def set_input_capture(self, input_capture_module):
         """Set the input_capture module for force_close handling."""
@@ -141,53 +188,142 @@ class LuaSocketServer:
         """Set the callback for lightweight gameplay events."""
         self._game_event_callback = callback
 
+    def _remove_port_file(self, required=False):
+        """Remove discovery artifacts, retrying brief Windows sharing races."""
+        last_error = None
+        with self._port_file_lock:
+            for path in (self.port_file, self.port_file + ".tmp"):
+                for attempt in range(5):
+                    try:
+                        os.remove(path)
+                        last_error = None
+                        break
+                    except FileNotFoundError:
+                        last_error = None
+                        break
+                    except OSError as exc:
+                        last_error = exc
+                        if attempt < 4:
+                            time.sleep(0.02)
+                if last_error is not None:
+                    message = f"Could not remove Lua socket discovery file {path}: {last_error}"
+                    if required:
+                        raise RuntimeError(message) from last_error
+                    print(f"[Socket] Warning: {message}")
+
+    def _publish_port_file(self, required=False):
+        """Atomically publish the bound port and server-start metadata."""
+        last_error = None
+        with self._port_file_lock:
+            if not self.running or not self.port:
+                return False
+
+            payload = json.dumps({
+                "port": self.port,
+                "pid": os.getpid(),
+                "started_at": int(time.time()),
+            })
+            temp_path = self.port_file + ".tmp"
+            for attempt in range(5):
+                try:
+                    with open(temp_path, "w", encoding="utf-8") as port_file:
+                        port_file.write(payload)
+                        port_file.write("\n")
+                    os.replace(temp_path, self.port_file)
+                    return True
+                except OSError as exc:
+                    last_error = exc
+                    if attempt < 4:
+                        time.sleep(0.02)
+
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+        message = f"Could not publish Lua socket port {self.port}: {last_error}"
+        if required:
+            raise RuntimeError(message) from last_error
+        print(f"[Socket] Warning: {message}")
+        return False
+
     def start(self):
         """Start socket server in background thread."""
-        if self.running:
-            return
-        self.running = True
-        thread = threading.Thread(target=self._server_loop, daemon=True)
-        thread.start()
-        print(f"[Socket] Server starting on port {self.port}")
+        with self._lifecycle_lock:
+            if self.running:
+                return
+
+            self._remove_port_file(required=True)
+            server = sock_lib.socket(sock_lib.AF_INET, sock_lib.SOCK_STREAM)
+            try:
+                # SO_LINGER with timeout 0 prevents a dead process from delaying cleanup.
+                server.setsockopt(sock_lib.SOL_SOCKET, sock_lib.SO_LINGER, struct.pack('ii', 1, 0))
+                server.bind(("127.0.0.1", self.requested_port))
+                server.listen(1)
+                server.settimeout(1.0)
+                self.server = server
+                self.port = server.getsockname()[1]
+                self.running = True
+                self._publish_port_file(required=True)
+            except Exception:
+                self.running = False
+                self.server = None
+                try:
+                    server.close()
+                except OSError:
+                    pass
+                finally:
+                    self._remove_port_file()
+                raise
+
+            self._server_thread = threading.Thread(target=self._server_loop, daemon=True)
+            self._server_thread.start()
+            print(f"[Socket] Server started on port {self.port}")
 
     def _server_loop(self):
         """Accept connections (runs in background thread)."""
-        self.server = sock_lib.socket(sock_lib.AF_INET, sock_lib.SOCK_STREAM)
-        self.server.setsockopt(sock_lib.SOL_SOCKET, sock_lib.SO_REUSEADDR, 1)
-        # SO_LINGER with timeout 0 allows immediate port rebind after crash/restart
-        self.server.setsockopt(sock_lib.SOL_SOCKET, sock_lib.SO_LINGER, struct.pack('ii', 1, 0))
-        self.server.bind(("127.0.0.1", self.port))
-        self.server.listen(1)
-        self.server.settimeout(1.0)  # Check running flag every second
-
-        while self.running:
-            try:
-                client, addr = self.server.accept()
-                with self.lock:
-                    if self.client:
-                        self.client.close()
-                    self.client = client
-                    self.client.settimeout(0.1)  # Non-blocking receives
-                    self._connection_id += 1  # Track new connection for state sync
-                print(f"[Socket] Lua connected from {addr}")
-                # Start receive thread for this client
-                recv_thread = threading.Thread(target=self._receive_loop, daemon=True)
-                recv_thread.start()
-                # Send initial settings and data
-                self.send_tracking_settings()
-                # send_significant_npcs and resync_active_commitments deferred
-                # until player_handshake (they require per-player DBs)
-                # Wire up VR tracker to push offsets to Lua
+        try:
+            while self.running:
                 try:
-                    from vr import set_vr_lua_socket
-                    set_vr_lua_socket(self)
-                except Exception:
-                    pass
-            except sock_lib.timeout:
-                continue
-            except Exception as e:
-                if self.running:
-                    print(f"[Socket] Accept error: {e}")
+                    client, addr = self.server.accept()
+                    try:
+                        client.settimeout(0.1)  # Non-blocking receives
+                    except Exception:
+                        try:
+                            client.close()
+                        except OSError:
+                            pass
+                        raise
+                    with self.lock:
+                        if self.client:
+                            try:
+                                self.client.close()
+                            except OSError:
+                                pass
+                        self.client = client
+                        self._connection_id += 1  # Track new connection for state sync
+                    print(f"[Socket] Lua connected from {addr}")
+                    # Start receive thread for this client
+                    recv_thread = threading.Thread(target=self._receive_loop, daemon=True)
+                    recv_thread.start()
+                    # Send initial settings and data
+                    self.send_tracking_settings()
+                    # send_significant_npcs and resync_active_commitments deferred
+                    # until player_handshake (they require per-player DBs)
+                    # Wire up VR tracker to push offsets to Lua
+                    try:
+                        from vr import set_vr_lua_socket
+                        set_vr_lua_socket(self)
+                    except Exception:
+                        pass
+                except sock_lib.timeout:
+                    continue
+                except Exception as e:
+                    if self.running:
+                        print(f"[Socket] Accept error: {e}")
+        finally:
+            self.running = False
+            self._remove_port_file()
 
     def send(self, data: dict):
         """Send JSON message to Lua (thread-safe)."""
@@ -200,6 +336,10 @@ class LuaSocketServer:
                 return True
             except Exception as e:
                 print(f"[Socket] Send failed: {e}")
+                try:
+                    self.client.close()
+                except OSError:
+                    pass
                 self.client = None
                 return False
 
@@ -247,7 +387,7 @@ class LuaSocketServer:
                 "mod_enabled": server.get('enabled', True),
                 "track_ambient": history.get('track_ambient', True),
                 "track_cutscene": history.get('track_cutscene', True),
-                "auto_mute_ambient": conversation.get('auto_mute_ambient', True),
+                "auto_mute_ambient": conversation.get('auto_mute_ambient', False),
                 "dev_mode": is_dev_mode(),
                 # Game language for localization file loading
                 "language": setup.get('language', 'EN_US'),
@@ -290,11 +430,15 @@ class LuaSocketServer:
         Also sends the ambient dialogue blocklist.
         """
         try:
-            from .text_utils import get_significant_npc_names, INSIGNIFICANT_PREFIXES
             voice_names, display_names = get_significant_npc_names()
+            scheduler_voice_names = [
+                name for name in voice_names if name not in VOICE_NAME_ALIASES
+            ]
             self.send({
                 "type": "sync_significant_npcs",
                 "voice_names": voice_names,
+                "scheduler_voice_names": scheduler_voice_names,
+                "voice_aliases": dict(VOICE_NAME_ALIASES),
                 "display_names": display_names,
                 "insignificant_prefixes": list(INSIGNIFICANT_PREFIXES),
             })
@@ -321,15 +465,19 @@ class LuaSocketServer:
         "jemimacollins"
     }
 
-    def _build_ambient_blocklist(self) -> dict:
+    def _build_ambient_blocklist(self, current_game_minutes: int) -> dict:
         """Build per-NPC blocklist of heard ambient dialogue text hashes.
 
         Returns: { "GarrethWeasley": [hash1, hash2, ...], ... }
         Only includes significant NPCs with at least one ambient line.
         Skips portrait/ghost NPCs listed in _AMBIENT_MUTE_EXEMPT.
+        Skips lines heard later than the currently loaded save's game date/time.
         """
         from .dialogue_db import get_connection
         from .text_utils import get_significant_npc_names
+
+        if current_game_minutes <= 0:
+            return {}
 
         voice_names, _ = get_significant_npc_names()
         sig_set = {v.lower() for v in voice_names}
@@ -338,7 +486,7 @@ class LuaSocketServer:
         try:
             with get_connection() as conn:
                 rows = conn.execute(
-                    "SELECT voice_name, line_id FROM dialogue_entries "
+                    "SELECT voice_name, line_id, game_date, game_time FROM dialogue_entries "
                     "WHERE entry_type = 'chatter' AND text IS NOT NULL AND text != '' "
                     "AND is_player = 0 AND is_ai_response = 0 "
                     "AND line_id IS NOT NULL AND line_id != ''"
@@ -348,6 +496,13 @@ class LuaSocketServer:
                 if not vn or vn.lower() not in sig_set:
                     continue
                 if vn.lower() in self._AMBIENT_MUTE_EXEMPT:
+                    continue
+                game_date = _parse_game_date(row['game_date'] or "")
+                game_time = _parse_game_time(row['game_time'] or "")
+                if game_date is None or game_time is None:
+                    continue
+                heard_game_minutes = _game_datetime_to_minutes(game_date, game_time)
+                if heard_game_minutes > current_game_minutes:
                     continue
                 line_id = row['line_id']
                 # Extract numeric suffix: "GarrethWeasley_10946" -> 10946
@@ -365,13 +520,30 @@ class LuaSocketServer:
         # Convert sets to sorted lists for JSON
         return {vn: sorted(hashes) for vn, hashes in blocklist.items()}
 
+    def _maybe_resync_ambient_blocklist_for_time(self, game_context: dict):
+        """Refresh ambient mute data when loading or advancing to a new game minute."""
+        try:
+            from .settings import load_settings
+            settings = load_settings()
+            if not settings.get('conversation', {}).get('auto_mute_ambient', False):
+                return
+
+            current_game_minutes = _get_strict_current_game_minutes(game_context)
+            if current_game_minutes <= 0:
+                return
+            if current_game_minutes == self._ambient_blocklist_current_minutes:
+                return
+            self.send_ambient_blocklist()
+        except Exception as e:
+            print(f"[Socket] Error checking ambient blocklist game time: {e}")
+
     def send_ambient_blocklist(self):
         """Send ambient dialogue blocklist to Lua. Called on connect and after new lines.
         Sends empty blocklist if auto_mute_ambient is disabled."""
         try:
             from .settings import load_settings
             settings = load_settings()
-            enabled = settings.get('conversation', {}).get('auto_mute_ambient', True)
+            enabled = settings.get('conversation', {}).get('auto_mute_ambient', False)
 
             if not enabled:
                 # Disabled — send empty blocklist to clear any existing one on Lua side
@@ -380,16 +552,26 @@ class LuaSocketServer:
                 print("[Socket] Ambient blocklist disabled (auto_mute_ambient=false)")
                 return
 
-            blocklist = self._build_ambient_blocklist()
-            if not blocklist:
-                return
+            with self._context_lock:
+                game_context = self._game_context.copy()
+            current_game_minutes = _get_strict_current_game_minutes(game_context)
+            self._ambient_blocklist_current_minutes = current_game_minutes
+
+            if current_game_minutes <= 0:
+                blocklist = {}
+                print("[Socket] Ambient blocklist waiting for current game time; sending empty blocklist")
+            else:
+                blocklist = self._build_ambient_blocklist(current_game_minutes)
             self._ambient_blocklist_cache = blocklist
             total = sum(len(v) for v in blocklist.values())
             self.send({
                 "type": "ambient_blocklist",
                 "data": blocklist,
             })
-            print(f"[Socket] Sent ambient blocklist: {len(blocklist)} NPCs, {total} line IDs")
+            print(
+                f"[Socket] Sent ambient blocklist: {len(blocklist)} NPCs, {total} line IDs "
+                f"through {_format_game_minutes_for_log(current_game_minutes)}"
+            )
         except Exception as e:
             print(f"[Socket] Error sending ambient blocklist: {e}")
 
@@ -476,6 +658,36 @@ class LuaSocketServer:
             + "; ".join(mismatch_details)
         )
         print(f"[LuaSocket] Sent out-of-sync game time warning for {sources_text}")
+
+    def _maybe_warn_player_context_mismatch(self, game_context: dict):
+        """Warn once if Lua's live player name and Python's DB scope diverge."""
+        player_name = str(game_context.get("playerName") or "").strip()
+        if not player_name:
+            return
+        try:
+            from . import player_context
+            if not player_context.is_ready():
+                return
+            active_name = player_context.get_current_player_name()
+            live_name = player_context.normalize_player_name(player_name)
+            if not active_name or not live_name:
+                return
+            if active_name == live_name:
+                self._last_player_context_mismatch = None
+                return
+
+            mismatch_key = (active_name, live_name)
+            if mismatch_key == self._last_player_context_mismatch:
+                return
+            self._last_player_context_mismatch = mismatch_key
+            message = (
+                f"Player context mismatch: Python DB scope='{active_name}', "
+                f"Lua player='{player_name}' ({live_name})"
+            )
+            print(f"[LuaSocket] WARNING: {message}")
+            self.send_notification(f"Sonorus warning: {message}")
+        except Exception as e:
+            print(f"[LuaSocket] Error checking player context mismatch: {e}")
 
     def send_lipsync_start(self, speaker: str = None, start_time: float = None, turn_id: str = None, visemes: list = None, scale: float = None):
         """Signal audio playback starting."""
@@ -714,6 +926,11 @@ class LuaSocketServer:
                 self._pending_time_sync_check = True
                 self.send({"type": "player_ready"})
                 self._send_deferred_connect_data()
+                if self._input_capture:
+                    try:
+                        self._input_capture.restart_capture()
+                    except Exception as e:
+                        print(f"[LuaSocket] Input capture restart failed: {e}")
             else:
                 print("[LuaSocket] Empty player_handshake, ignoring")
                 self._pending_time_sync_check = False
@@ -729,6 +946,11 @@ class LuaSocketServer:
                 # Lua frequently sends partial context payloads (e.g. state-only or selective group refreshes).
                 # Merge into the cached snapshot rather than replacing it wholesale, or unrelated fields like
                 # companion state disappear and downstream gates make incorrect decisions.
+                if data.get("hasCompanion") is False:
+                    data["companionId"] = ""
+                    data["companionForcedWaiting"] = False
+                    data["companionIsSwimming"] = False
+                    data["companionIsOnBroom"] = False
                 merged = self._game_context.copy()
                 merged.update(data)
                 self._game_context = merged
@@ -744,6 +966,8 @@ class LuaSocketServer:
                 self._context_refresh_pending = False
                 self._context_refresh_event.set()
             self._maybe_warn_out_of_sync_game_time(merged_context or {})
+            self._maybe_warn_player_context_mismatch(merged_context or {})
+            self._maybe_resync_ambient_blocklist_for_time(merged_context or {})
             # Extract live mod data and pass to mods module
             mods_data = self._game_context.get("mods", {})
             if mods_data:
@@ -797,6 +1021,11 @@ class LuaSocketServer:
         elif msg_type == "shutdown":
             # Lua requested server shutdown
             print("[Socket] Shutdown requested from Lua")
+            if LEDGER_PRESENCE_WATCHER_ENABLED:
+                try:
+                    presence_tracker_module.get_tracker().shutdown()
+                except Exception as e:
+                    print(f"[LuaSocket] presence shutdown flush failed: {e}")
             # Cleanup audio if available
             try:
                 from audio import shutdown as audio_shutdown
@@ -988,6 +1217,32 @@ class LuaSocketServer:
             else:
                 print(f"[Socket] Commitment {action} FAILED: {npc_id} - {error}")
 
+        elif msg_type == "presence_validation_sample":
+            try:
+                self.send(presence_validation.handle_sample(msg))
+            except Exception as e:
+                print(f"[LuaSocket] presence validation failed: {e}")
+                self.send({
+                    "type": "presence_validation_result",
+                    "hint": "Presence validation failed; check server log",
+                })
+
+        elif msg_type == "schedule_dump":
+            if not LEDGER_SCHEDULE_DUMP_ENABLED:
+                return
+            try:
+                schedule_cache.ingest_chunk(msg)
+            except Exception as e:
+                print(f"[LuaSocket] schedule_dump ingest failed: {e}")
+
+        elif msg_type == "presence_update":
+            if not LEDGER_PRESENCE_WATCHER_ENABLED:
+                return
+            try:
+                presence_tracker_module.get_tracker().handle_update(msg)
+            except Exception as e:
+                print(f"[LuaSocket] presence_update failed: {e}")
+
         elif msg_type == "register_commitment_spot":
             display_name = msg.get("location", "")
             x = msg.get("x", 0)
@@ -1052,15 +1307,7 @@ class LuaSocketServer:
                 vn = entry.get("voiceName", "")
                 line_id = entry.get("lineID", "")
                 if vn and line_id and is_significant_npc(vn):
-                    cached = getattr(self, '_ambient_blocklist_cache', None)
-                    if cached is None or cached == {}:
-                        pass
-                    else:
-                        parts = line_id.rsplit('_', 1)
-                        if len(parts) == 2 and parts[1].isdigit():
-                            num = int(parts[1])
-                            if vn not in cached or num not in cached.get(vn, []):
-                                self.send_ambient_blocklist()
+                    self.send_ambient_blocklist()
         except Exception as e:
             print(f"[Socket] Error recording dialogue entry: {e}")
 
@@ -1397,9 +1644,23 @@ class LuaSocketServer:
 
     def stop(self):
         """Shutdown server."""
-        self.running = False
-        with self.lock:
-            if self.client:
-                self.client.close()
-        if self.server:
-            self.server.close()
+        with self._lifecycle_lock:
+            self.running = False
+            with self.lock:
+                if self.client:
+                    try:
+                        self.client.close()
+                    except OSError:
+                        pass
+                    self.client = None
+            if self.server:
+                try:
+                    self.server.close()
+                except OSError:
+                    pass
+                self.server = None
+            server_thread = self._server_thread
+            if server_thread is not None and threading.current_thread() is not server_thread:
+                server_thread.join(timeout=1.5)
+            self._server_thread = None
+            self._remove_port_file()

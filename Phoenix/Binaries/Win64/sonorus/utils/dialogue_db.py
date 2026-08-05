@@ -412,7 +412,7 @@ _init_lock = threading.Lock()
 _initialized = False
 
 # Current schema version - increment when making schema changes
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def _ensure_data_dir():
@@ -619,6 +619,17 @@ def _run_migrations(conn, from_version):
             conn.execute("CREATE INDEX IF NOT EXISTS idx_target_id ON dialogue_entries(target_id)")
             _backfill_target_ids(conn)
             current = 3
+
+        elif current == 3:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS conversation_topics (
+                    npc_id TEXT PRIMARY KEY COLLATE NOCASE,
+                    topic_query TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    source_entry_id INTEGER
+                )
+            """)
+            current = 4
 
         else:
             # Unknown version - can't migrate
@@ -1132,6 +1143,7 @@ def replace_all_entries(history):
     try:
         with get_connection() as conn:
             conn.execute("DELETE FROM dialogue_entries")
+            conn.execute("DELETE FROM conversation_topics")
             for entry in history:
                 if isinstance(entry, dict):
                     _insert_entry(conn, entry)
@@ -1147,6 +1159,7 @@ def clear_all_entries():
     try:
         with get_connection() as conn:
             conn.execute("DELETE FROM dialogue_entries")
+            conn.execute("DELETE FROM conversation_topics")
             conn.commit()
     except Exception as e:
         print(f"[DialogueDB] Error clearing entries: {e}")
@@ -1252,6 +1265,13 @@ def delete_entries_by_voice(voice_name):
     _ensure_initialized()
     try:
         with get_connection() as conn:
+            conn.execute(
+                """DELETE FROM conversation_topics
+                   WHERE npc_id = ? OR source_entry_id IN (
+                       SELECT id FROM dialogue_entries WHERE voice_name = ?
+                   )""",
+                (voice_name, voice_name),
+            )
             cursor = conn.execute(
                 "DELETE FROM dialogue_entries WHERE voice_name = ?",
                 (voice_name,)
@@ -1260,6 +1280,85 @@ def delete_entries_by_voice(voice_name):
             return cursor.rowcount
     except Exception as e:
         print(f"[DialogueDB] Error deleting entries by voice: {e}")
+        return 0
+
+
+def get_conversation_topic(npc_id):
+    """Return the latest durable conversation topic for one NPC."""
+    if not npc_id:
+        return None
+    _ensure_initialized()
+    try:
+        with get_connection() as conn:
+            row = conn.execute(
+                "SELECT topic_query FROM conversation_topics WHERE npc_id = ?",
+                (npc_id,),
+            ).fetchone()
+        if not row or str(row[0] or "").upper() == "NONE":
+            return None
+        return row[0]
+    except Exception as e:
+        print(f"[DialogueDB] Error loading conversation topic for {npc_id}: {e}")
+        return None
+
+
+def get_dialogue_db_path():
+    """Return the current player-scoped dialogue database path."""
+    return DB_PATH
+
+
+@contextmanager
+def _get_topic_write_connection(db_path=None):
+    if not db_path:
+        with get_connection() as conn:
+            yield conn
+        return
+
+    conn = sqlite3.connect(db_path, timeout=30.0)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        yield conn
+    finally:
+        try:
+            conn.rollback()
+        finally:
+            conn.close()
+
+
+def set_conversation_topics(npc_ids, topic_query, source_entry_id=None, updated_at=None,
+                            db_path=None):
+    """Upsert or clear the latest topic for a collection of NPC listeners."""
+    unique_ids = list(dict.fromkeys(str(npc_id).strip() for npc_id in npc_ids or [] if str(npc_id).strip()))
+    if not unique_ids:
+        return 0
+
+    if not db_path:
+        _ensure_initialized()
+    topic = str(topic_query or "").strip()
+    timestamp = int(updated_at or datetime.now().timestamp())
+    try:
+        with _get_topic_write_connection(db_path) as conn:
+            stored_topic = topic if topic and topic.upper() != "NONE" else "NONE"
+            for npc_id in unique_ids:
+                conn.execute(
+                    """
+                    INSERT INTO conversation_topics (
+                        npc_id, topic_query, updated_at, source_entry_id
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(npc_id) DO UPDATE SET
+                        topic_query = excluded.topic_query,
+                        updated_at = excluded.updated_at,
+                        source_entry_id = excluded.source_entry_id
+                    WHERE excluded.updated_at >= conversation_topics.updated_at
+                    """,
+                    (npc_id, stored_topic, timestamp, source_entry_id),
+                )
+            conn.commit()
+        return len(unique_ids)
+    except Exception as e:
+        print(f"[DialogueDB] Error saving conversation topic: {e}")
         return 0
 
 
@@ -1274,6 +1373,10 @@ def delete_entries_by_ids(entry_ids):
     try:
         with get_connection() as conn:
             placeholders = ','.join('?' * len(entry_ids))
+            conn.execute(
+                f"DELETE FROM conversation_topics WHERE source_entry_id IN ({placeholders})",
+                tuple(entry_ids),
+            )
             cursor = conn.execute(
                 f"DELETE FROM dialogue_entries WHERE id IN ({placeholders})",
                 tuple(entry_ids)  # Ensure it's a tuple for sqlite3

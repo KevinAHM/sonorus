@@ -18,6 +18,18 @@ from utils.localization import get_display_name
 memory_bp = Blueprint('memory', __name__)
 
 
+def _is_player_context_ready():
+    try:
+        from utils import player_context
+        return player_context.is_ready()
+    except Exception:
+        return False
+
+
+def _no_player_loaded_response():
+    return jsonify({"success": False, "error": "Player context not ready"}), 400
+
+
 # ============================================
 # Memory API Endpoints
 # ============================================
@@ -26,6 +38,9 @@ memory_bp = Blueprint('memory', __name__)
 def list_memory_backups():
     """List available memory snapshots."""
     try:
+        if not _is_player_context_ready():
+            return _no_player_loaded_response()
+
         from utils.memory import list_memory_backups as _list_memory_backups
 
         return jsonify({
@@ -41,6 +56,9 @@ def list_memory_backups():
 def restore_memory_backup():
     """Restore a selected memory snapshot."""
     try:
+        if not _is_player_context_ready():
+            return _no_player_loaded_response()
+
         from utils.memory import restore_memory_backup as _restore_memory_backup
 
         data = request.get_json(silent=True) or {}
@@ -61,6 +79,9 @@ def restore_memory_backup():
 def clear_all_memories():
     """Clear all NPC long-term memories and chapter data."""
     try:
+        if not _is_player_context_ready():
+            return _no_player_loaded_response()
+
         from utils.memory import create_memory_snapshot, get_memory_data_dir
         from utils.memory_queue import graceful_shutdown, reset_connection_state
 
@@ -118,6 +139,9 @@ def reset_memory_system():
     corrupted and normal clear/restore operations fail.
     """
     try:
+        if not _is_player_context_ready():
+            return _no_player_loaded_response()
+
         from utils.memory import get_memory_data_dir
         from utils.memory_queue import graceful_shutdown, reset_connection_state
 
@@ -205,6 +229,9 @@ def reset_memory_system():
 def migrate_memories():
     """Migrate existing dialogue history into long-term memory facts."""
     try:
+        if not _is_player_context_ready():
+            return _no_player_loaded_response()
+
         from utils.memory import migrate_all_npcs, is_memory_available
         from utils.dialogue import load_dialogue_history
 
@@ -250,6 +277,9 @@ def migrate_memories():
 def migrate_npc_memories(npc_id):
     """Migrate dialogue history for a specific NPC."""
     try:
+        if not _is_player_context_ready():
+            return _no_player_loaded_response()
+
         from utils.memory import (
             get_npc_long_term_memory_status,
             is_memory_available,
@@ -311,6 +341,10 @@ def migrate_memories_stream():
     """
     def generate():
         try:
+            if not _is_player_context_ready():
+                yield f"data: {json.dumps({'type': 'error', 'message': 'Player context not ready'})}\n\n"
+                return
+
             from utils.memory import (
                 migrate_npc_history,
                 is_memory_available,
@@ -391,6 +425,10 @@ def migrate_npc_stream(npc_id):
     """Stream migration progress for a single NPC via Server-Sent Events."""
     def generate():
         try:
+            if not _is_player_context_ready():
+                yield f"data: {json.dumps({'type': 'error', 'message': 'Player context not ready'})}\n\n"
+                return
+
             from utils.memory import (
                 get_npc_long_term_memory_status,
                 is_memory_available,
@@ -688,15 +726,16 @@ def delete_graph_edge(npc_id):
         source = data.get('source') or ''
         target = data.get('target') or ''
         fact = data.get('fact')
+        memory_id = data.get('memory_id') or ''
 
-        if not fact:
-            return jsonify({"success": False, "error": "Missing fact text"}), 400
+        if not fact and not memory_id:
+            return jsonify({"success": False, "error": "Missing fact text or memory_id"}), 400
 
         memory_mgr = MemoryManager()
         if not memory_mgr.init_graphiti():
             return jsonify({"success": False, "error": "Memory system not connected"}), 503
 
-        result = memory_mgr.delete_edge(npc_id, source, target, fact)
+        result = memory_mgr.delete_edge(npc_id, source, target, fact, memory_id=memory_id)
 
         if result.get("success"):
             print(f"[Memory] Deleted edge {source} -> {target} for {npc_id}")
@@ -706,6 +745,41 @@ def delete_graph_edge(npc_id):
 
     except Exception as e:
         print(f"[Memory] Error deleting edge for {npc_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@memory_bp.route('/api/memories/graph/<npc_id>/fact/<memory_id>', methods=['PATCH'])
+def update_memory_fact(npc_id, memory_id):
+    """Edit a specific fact and refresh its search vectors."""
+    try:
+        from utils.memory import MemoryManager
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "error": "Missing request body"}), 400
+
+        fact = (data.get('fact') or '').strip()
+        category = (data.get('category') or '').strip().lower() or None
+
+        if not fact:
+            return jsonify({"success": False, "error": "Missing fact text"}), 400
+
+        memory_mgr = MemoryManager()
+        if not memory_mgr.init_graphiti():
+            return jsonify({"success": False, "error": "Memory system not connected"}), 503
+
+        result = memory_mgr.update_fact(npc_id, memory_id, fact, category=category)
+
+        if result.get("success"):
+            print(f"[Memory] Updated fact {memory_id} for {npc_id}")
+            return jsonify(result)
+        else:
+            return jsonify(result), 400
+
+    except Exception as e:
+        print(f"[Memory] Error updating fact {memory_id} for {npc_id}: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
@@ -746,10 +820,115 @@ def search_npc_memory(npc_id):
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@memory_bp.route('/api/memories/vector-migration-status', methods=['GET'])
+def get_vector_migration_status():
+    """Return memory vector compatibility status for the active embedding model."""
+    try:
+        if not _is_player_context_ready():
+            return _no_player_loaded_response()
+
+        from utils.memory import MemoryManager, is_memory_available
+
+        if not is_memory_available():
+            return jsonify({"success": False, "error": "Memory system not available"}), 400
+
+        result = MemoryManager().get_vector_migration_status()
+        status_code = 200 if result.get("success") else 400
+        return jsonify(result), status_code
+    except Exception as e:
+        print(f"[Memory] Error getting vector migration status: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@memory_bp.route('/api/memories/vector-migrate/stream', methods=['GET'])
+def migrate_memory_vectors_stream():
+    """Stream progress while rebuilding memory vectors for the active embedding model."""
+    def generate():
+        try:
+            if not _is_player_context_ready():
+                yield f"data: {json.dumps({'type': 'error', 'message': 'Player context not ready'})}\n\n"
+                return
+
+            from utils.memory import MemoryManager, is_memory_available
+
+            if not is_memory_available():
+                yield f"data: {json.dumps({'type': 'error', 'message': 'Memory system not available'})}\n\n"
+                return
+
+            manager = MemoryManager()
+            status = manager.get_vector_migration_status()
+            if not status.get("success"):
+                yield f"data: {json.dumps({'type': 'error', 'message': status.get('error', 'Unable to inspect vectors')})}\n\n"
+                return
+
+            total = status.get("mismatched_count", 0)
+            current_model = status.get("current_model") or ""
+            yield f"data: {json.dumps({'type': 'start', 'total': total, 'current_model': current_model})}\n\n"
+
+            if total <= 0:
+                yield f"data: {json.dumps({'type': 'complete', 'total': 0, 'rebuilt': 0, 'remaining': 0, 'errors': []})}\n\n"
+                return
+
+            progress_queue = queue.Queue()
+
+            def progress_callback(current, total_count, message):
+                progress_queue.put({
+                    "current": current,
+                    "total": total_count,
+                    "message": message,
+                })
+
+            result_holder = [None]
+
+            def run_migration():
+                result_holder[0] = manager.migrate_vectors(progress_callback=progress_callback)
+                progress_queue.put(None)
+
+            thread = threading.Thread(target=run_migration)
+            thread.start()
+
+            while True:
+                try:
+                    progress = progress_queue.get(timeout=0.5)
+                    if progress is None:
+                        break
+                    yield f"data: {json.dumps({'type': 'progress', **progress})}\n\n"
+                except queue.Empty:
+                    yield f": keepalive\n\n"
+
+            thread.join()
+            result = result_holder[0] or {}
+            if result.get("success"):
+                yield f"data: {json.dumps({'type': 'complete', **result})}\n\n"
+            else:
+                message = result.get("error") or "Vector rebuild failed"
+                errors = result.get("errors") or []
+                if errors and not result.get("error"):
+                    message = errors[0].get("error") or message
+                yield f"data: {json.dumps({'type': 'error', 'message': message, **result})}\n\n"
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return Response(
+        generate(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no'
+        }
+    )
+
+
 @memory_bp.route('/api/memories/migration-status', methods=['GET'])
 def get_migration_status():
     """Get migration status for all NPCs with dialogue history."""
     try:
+        if not _is_player_context_ready():
+            return _no_player_loaded_response()
+
         from utils.memory import (
             count_chapter_candidate_entries_by_npc,
             filter_memory_enabled_npc_ids,

@@ -9,10 +9,31 @@ import copy
 import shutil
 from datetime import date, datetime
 
-# Gemini chat default - move to Gemini 3.5 Flash after June 1, 2027
+# Gemini model defaults follow Google's expected preview deprecation dates.
 GEMINI_3_5_SWITCH_DATE = date(2027, 6, 1)
 GEMINI_CHAT_DEFAULT = 'gemini-3.5-flash' if date.today() >= GEMINI_3_5_SWITCH_DATE else 'gemini-3-flash-preview'
 GEMINI_CHAT_DEFAULT_OR = 'google/gemini-3.5-flash' if date.today() >= GEMINI_3_5_SWITCH_DATE else 'google/gemini-3-flash-preview'
+
+GEMINI_3_1_FLASH_LITE_SWITCH_DATE = date(2027, 5, 7)
+if date.today() >= GEMINI_3_1_FLASH_LITE_SWITCH_DATE:
+    GEMINI_FLASH_LITE_DEFAULT = 'gemini-3.5-flash-lite'
+    GEMINI_FLASH_LITE_DEFAULT_OR = 'google/gemini-3.5-flash-lite'
+else:
+    GEMINI_FLASH_LITE_DEFAULT = 'gemini-3.1-flash-lite'
+    GEMINI_FLASH_LITE_DEFAULT_OR = 'google/gemini-3.1-flash-lite'
+
+# Fact extraction and deduplication adopt Gemini 3.1 Flash Lite immediately,
+# then follow its already-scheduled May 2027 replacement.
+GRAPHITI_FACT_EXTRACTION_DEFAULT = (
+    'gemini-3.5-flash-lite'
+    if date.today() >= GEMINI_3_1_FLASH_LITE_SWITCH_DATE
+    else 'gemini-3.1-flash-lite'
+)
+GRAPHITI_FACT_EXTRACTION_DEFAULT_OR = f'google/{GRAPHITI_FACT_EXTRACTION_DEFAULT}'
+GRAPHITI_FACT_DEDUPLICATION_DEFAULT = GRAPHITI_FACT_EXTRACTION_DEFAULT
+GRAPHITI_FACT_DEDUPLICATION_DEFAULT_OR = GRAPHITI_FACT_EXTRACTION_DEFAULT_OR
+COMMITMENT_VALIDATOR_DEFAULT = GEMINI_FLASH_LITE_DEFAULT
+COMMITMENT_VALIDATOR_DEFAULT_OR = GEMINI_FLASH_LITE_DEFAULT_OR
 
 # ============================================
 # Per-Model Reasoning Settings
@@ -40,7 +61,7 @@ REASONING_CONTEXT_SETTINGS = {
     'prose': ('memory', 'prose_model_reasoning'),
     'graphiti': ('memory', 'graphiti_model_reasoning'),
     'graphiti_small': ('memory', 'graphiti_small_model_reasoning'),
-    'cognis_memory': ('memory', 'graphiti_small_model_reasoning'),
+    'cognis_memory': ('memory', 'graphiti_model_reasoning'),  # Legacy extraction context
     'reranker': ('memory', 'reranker_model_reasoning'),
 
     # Memory models - additional contexts that use the same models
@@ -63,6 +84,45 @@ REASONING_CONTEXT_SETTINGS = {
     'owl_board_reply': ('owl_post', 'board_model_reasoning'),  # Same as board_generate
 }
 
+# Maps LLM call context to OpenRouter provider routing settings.
+# Provider lists are arrays of OpenRouter provider names, stored next to each model setting.
+OPENROUTER_PROVIDER_CONTEXT_SETTINGS = {
+    # Conversation models
+    'chat': ('conversation', 'chat_model_providers'),
+    'target_selection': ('conversation', 'target_selection_model_providers'),
+    'interjection': ('conversation', 'interjection_model_providers'),
+    'commentary_selection': ('conversation', 'commentary_model_providers'),
+    'input_correction': ('conversation', 'input_correction_model_providers'),
+
+    # Memory models
+    'chapter': ('memory', 'chapter_model_providers'),
+    'prose': ('memory', 'prose_model_providers'),
+    'graphiti': ('memory', 'graphiti_model_providers'),
+    'graphiti_small': ('memory', 'graphiti_small_model_providers'),
+    'cognis_memory': ('memory', 'graphiti_model_providers'),  # Legacy extraction context
+    'reranker': ('memory', 'reranker_model_providers'),
+    'chapter_detection': ('memory', 'chapter_model_providers'),
+    'migration_chapter': ('memory', 'chapter_model_providers'),
+    'bio_generation': ('memory', 'prose_model_providers'),
+    'bio_update': ('memory', 'prose_model_providers'),
+    'episode_generation': ('memory', 'prose_model_providers'),
+    'memory_prose': ('memory', 'prose_model_providers'),
+    'search_intent': ('memory', 'reranker_model_providers'),
+
+    # Agents
+    'vision': ('agents', 'vision.llm.providers'),
+
+    # Owl Post
+    'owl_mail_classifier': ('owl_post', 'orchestrator_model_providers'),
+    'owl_mail_generate': ('owl_post', 'mail_model_providers'),
+    'owl_mail_summarize': ('owl_post', 'summarize_model_providers'),
+    'owl_board_generate': ('owl_post', 'board_model_providers'),
+    'owl_board_reply': ('owl_post', 'board_model_providers'),
+
+    # Commitments
+    'location_resolver': ('commitment', 'location_resolver_model_providers'),
+}
+
 # Directory constants
 SONORUS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(SONORUS_DIR, "data")
@@ -82,6 +142,7 @@ _dev_mode_cache = None
 # Model preset cache (loaded from JSON, used for provider-aware upgrade fixes)
 _MODEL_PRESETS = None
 _MODEL_FIELDS = None
+_MODEL_PROVIDER_ROUTES = None
 
 # Track which provider preset fixes have been logged (to avoid spam on repeated load_settings calls)
 _logged_preset_fixes = set()
@@ -94,6 +155,42 @@ DEPRECATED_MODEL_REPLACEMENTS = {
     "google/gemini-3-flash": "google/gemini-3-flash-preview",
 }
 DEPRECATED_MODEL_MIGRATION_KEY = "deprecated_models_to_current_gemini_defaults_v3"
+GRAPHITI_FACT_EXTRACTION_MIGRATION_KEY = "graphiti_fact_extraction_to_gemini_3_1_flash_lite_v1"
+GRAPHITI_FACT_DEDUPLICATION_MIGRATION_KEY = "graphiti_fact_deduplication_to_gemini_3_1_flash_lite_v1"
+COMMITMENT_VALIDATOR_MODEL_MIGRATION_KEY = "commitment_validator_to_gemini_3_1_flash_lite_v1"
+INWORLD_TTS_2_DEFAULT_MIGRATION_KEY = "inworld_tts_default_to_2_v1"
+LLAMACPP_SLOT_SAVE_PATH_REMOVAL_MIGRATION_KEY = "llamacpp_slot_save_path_removed_v1"
+OMNIVOICE_API_RETIREMENT_MIGRATION_KEY = "omnivoice_api_to_universal_v1"
+UNIVERSAL_MODEL_PROFILES_MIGRATION_KEY = "universal_model_profiles_v1"
+DATED_MODEL_MIGRATIONS = (
+    (
+        date(2026, 8, 3),
+        "gemini_2_5_flash_lite_deprecation_2026_08_03_v1",
+        {
+            "gemini-2.5-flash-lite": "gemini-3.1-flash-lite",
+            "google/gemini-2.5-flash-lite": "google/gemini-3.1-flash-lite",
+            # Remove the legacy OpenRouter nitro route while migrating this model.
+            "google/gemini-2.5-flash-lite:nitro": "google/gemini-3.1-flash-lite",
+        },
+    ),
+    (
+        date(2027, 5, 7),
+        "gemini_3_1_flash_lite_deprecation_2027_05_07_v1",
+        {
+            "gemini-3.1-flash-lite": "gemini-3.5-flash-lite",
+            "google/gemini-3.1-flash-lite": "google/gemini-3.5-flash-lite",
+        },
+    ),
+    (
+        date(2027, 6, 1),
+        "gemini_3_flash_preview_deprecation_2027_06_01_v1",
+        {
+            "gemini-3-flash-preview": "gemini-3.5-flash",
+            "google/gemini-3-flash-preview": "google/gemini-3.5-flash",
+        },
+    ),
+)
+OPENAI_RESPONSES_DEFAULT_MIGRATION_KEY = "openai_responses_api_default_enabled_v1"
 
 # ============================================
 # VR Preset Overrides
@@ -126,7 +223,7 @@ def register_vr_callback(callback):
 
 def _load_model_presets():
     """Load model presets from JSON file (cached)."""
-    global _MODEL_PRESETS, _MODEL_FIELDS
+    global _MODEL_PRESETS, _MODEL_FIELDS, _MODEL_PROVIDER_ROUTES
     if _MODEL_PRESETS is None:
         preset_file = os.path.join(DATA_DIR, "model_presets.json")
         try:
@@ -135,11 +232,13 @@ def _load_model_presets():
                 # Extract presets (skip underscore-prefixed keys)
                 _MODEL_PRESETS = {k: v for k, v in data.items() if not k.startswith('_')}
                 _MODEL_FIELDS = data.get('_model_fields', {})
+                _MODEL_PROVIDER_ROUTES = data.get('_provider_routes', {})
         except Exception as e:
             print(f"[Settings] Warning: Could not load model presets: {e}")
             _MODEL_PRESETS = {}
             _MODEL_FIELDS = {}
-    return _MODEL_PRESETS, _MODEL_FIELDS
+            _MODEL_PROVIDER_ROUTES = {}
+    return _MODEL_PRESETS, _MODEL_FIELDS, _MODEL_PROVIDER_ROUTES
 
 
 def _get_nested_value(obj, path):
@@ -165,6 +264,52 @@ def _set_nested_value(obj, path, value):
     target[parts[-1]] = value
 
 
+def _provider_route_path_for_model_path(path):
+    """Return the provider-list setting path paired with a model setting path."""
+    if path.endswith('.model'):
+        return path.rsplit('.', 1)[0] + '.providers'
+    if path.endswith('_model'):
+        return path + '_providers'
+    return None
+
+
+def _strip_model_modifier(model_name):
+    return model_name.split(':', 1)[0] if isinstance(model_name, str) and ':' in model_name else model_name
+
+
+def _models_match_for_provider_route(current_model, preset_model):
+    """Return True when a saved model is the preset model that owns a provider route."""
+    if not isinstance(current_model, str) or not isinstance(preset_model, str):
+        return False
+    current_model = current_model.strip()
+    preset_model = preset_model.strip()
+    return current_model == preset_model or _strip_model_modifier(current_model) == _strip_model_modifier(preset_model)
+
+
+def _backfill_missing_provider_route_presets(settings):
+    """Backfill provider routes only for saved models that match shipped presets."""
+    provider = settings.get('llm', {}).get('provider', 'gemini')
+    presets, fields, provider_routes = _load_model_presets()
+    routes = provider_routes.get(provider, {})
+    provider_presets = presets.get(provider, {})
+    if not routes or not provider_presets:
+        return settings
+
+    for key, providers in routes.items():
+        model_path = fields.get(key)
+        provider_path = _provider_route_path_for_model_path(model_path or '')
+        if not model_path or not provider_path:
+            continue
+        if _get_nested_value(settings, provider_path) is not None:
+            continue
+        current_model = _get_nested_value(settings, model_path)
+        preset_model = provider_presets.get(key)
+        if _models_match_for_provider_route(current_model, preset_model):
+            _set_nested_value(settings, provider_path, list(providers))
+
+    return settings
+
+
 def _has_provider_prefix(model_name):
     """Check if model name has provider prefix (e.g., 'google/gemini')."""
     if not model_name or not isinstance(model_name, str):
@@ -183,7 +328,7 @@ def _apply_provider_presets(settings, provider):
 
     This catches upgrade mismatches where new fields got Gemini defaults on non-Gemini providers.
     """
-    presets, fields = _load_model_presets()
+    presets, fields, provider_routes = _load_model_presets()
 
     # Skip if no presets or provider not found
     if not presets or provider not in presets:
@@ -197,6 +342,14 @@ def _apply_provider_presets(settings, provider):
         provider_presets['chat'] = GEMINI_CHAT_DEFAULT
     elif provider == 'openrouter':
         provider_presets['chat'] = GEMINI_CHAT_DEFAULT_OR
+
+    # Keep provider presets current after each dated model deprecation.
+    for switch_date, _migration_key, replacements in DATED_MODEL_MIGRATIONS:
+        if date.today() < switch_date:
+            continue
+        for key, model in provider_presets.items():
+            if isinstance(model, str):
+                provider_presets[key], _changed = _replace_model_id(model, replacements)
 
     # Check each model field
     for key, path in fields.items():
@@ -230,6 +383,10 @@ def _apply_provider_presets(settings, provider):
         if needs_correction and key in provider_presets:
             new_value = provider_presets[key]
             _set_nested_value(settings, path, new_value)
+            provider_route = provider_routes.get(provider, {}).get(key)
+            provider_path = _provider_route_path_for_model_path(path)
+            if provider_route and provider_path and _get_nested_value(settings, provider_path) in (None, []):
+                _set_nested_value(settings, provider_path, list(provider_route))
             # Only log each fix once per session to avoid spam
             fix_key = f"{provider}:{path}"
             if fix_key not in _logged_preset_fixes:
@@ -251,6 +408,10 @@ DEFAULT_SETTINGS = {
         "enabled": True,  # Master toggle - when off, disables all mod functions except communication
         "auto_open_config": True
     },
+    "speech_server": {
+        "api_url": "http://127.0.0.1:8100",
+        "api_key": "",
+    },
     "tts": {
         "provider": "inworld",
         "speed": 1.0,
@@ -258,11 +419,28 @@ DEFAULT_SETTINGS = {
         "auto_clone": True,
         "npc_temp_modifiers": {"Sirona": 0.2, "ClementineWillardsey": 0.2, "SebastianSallow": 0.2},
         "npc_model_overrides": {"MirabelGarlick": "inworld-tts-1.5-max"},
-        "inworld": {"api_url": "https://api.inworld.ai", "api_key": "", "model": "inworld-tts-1.5-max", "temperature": 1.1},
+        "inworld": {"api_url": "https://api.inworld.ai", "api_key": "", "model": "inworld-tts-2", "temperature": 1.1, "speaking_rate": 1.0, "emote_passthrough": True, "dynamic_delivery": True},
         "elevenlabs": {"api_url": "https://api.elevenlabs.io", "api_key": "", "plan": "creator", "model": "eleven_v3", "stability": 0.5, "similarity_boost": 0.75, "sample_rate": 24000},
         "openai": {"api_key": "", "model": "tts-1", "voice": "alloy", "speed": 1.0},
         "pocket": {"device": "cpu", "temperature": 0.7, "lsd_steps": 1, "eos_threshold": -4.0, "cache_size": 50},
-        "omnivoice": {"device": "auto", "num_steps": 32, "first_sentence_steps": 24, "guidance_scale": 2.0, "apply_smoothing_eq": True},
+        "omnivoice": {"device": "auto", "num_steps": 32, "first_sentence_steps": 16, "guidance_scale": 2.0, "prefix_kv_cache_enabled": True, "prefix_kv_cache_first_sentence_only": False, "apply_smoothing_eq": True},
+        "universal": {
+            "model": "omnivoice",
+            "model_settings": {
+                "omnivoice": {
+                    "options": {
+                        "numSteps": 32,
+                        "firstSegmentSteps": 24,
+                        "guidanceScale": 2.0,
+                    },
+                    "upscale": True,
+                    "adaptive_batching": True,
+                }
+            },
+            "silence_min_ms": 250,
+            "silence_max_ms": 1000,
+        },
+        "omnivoice_cpp": {"device": "auto", "num_steps": 32, "first_sentence_steps": 24, "guidance_scale": 2.0, "apply_smoothing_eq": True, "seed": 42},
         "voxcpm": {"target_rtfx": 0.9, "inference_timesteps": 7, "gpu_yield_interval": 2, "cfg_value": 2.0, "min_yield_ms": 1.0, "max_yield_ms": 50.0}
     },
     "llm": {
@@ -273,40 +451,45 @@ DEFAULT_SETTINGS = {
             "reasoning_enabled": True,  # Master switch for per-model reasoning toggles
             "disable_input_correction": False,
             "disable_vision": False,
-            "disable_owl_post": False
+            "disable_owl_post": False,
+            "disable_memory": True
         },
         "openrouter": {
             "api_key": "",
             "reasoning_enabled": True,  # Master switch for per-model reasoning toggles
+            "allow_provider_fallbacks": True,
             "disable_input_correction": False,
             "disable_vision": False,
-            "disable_owl_post": False
+            "disable_owl_post": False,
+            "disable_memory": False
         },
         "openai": {
             "api_key": "",
             "api_url": "",
-            "responses_api": False,  # Use Responses API (vs Chat Completions).
+            "responses_api": True,  # Use Responses API (vs Chat Completions).
             "reasoning_enabled": True,  # Master switch for per-model reasoning toggles
             "disable_input_correction": False,
             "disable_vision": False,
-            "disable_owl_post": False
+            "disable_owl_post": False,
+            "disable_memory": False
         },
         "ollama": {
             "api_key": "",
             "api_url": "https://ollama.com/api/chat",
             "disable_input_correction": True,
             "disable_vision": True,
-            "disable_owl_post": True
+            "disable_owl_post": True,
+            "disable_memory": True
         },
         "llamacpp": {
             "api_key": "",
             "api_url": "http://127.0.0.1:8080/v1",
             "kv_cache_enabled": True,
             "kv_cache_max_entries": 10,
-            "kv_cache_slot_save_path": "",
             "disable_input_correction": True,
             "disable_vision": True,
-            "disable_owl_post": True
+            "disable_owl_post": True,
+            "disable_memory": True
         }
     },
     "audio": {
@@ -357,17 +540,25 @@ DEFAULT_SETTINGS = {
     "commitments": {
         "enabled": True,  # NPC meeting commitments (schedule overrides)
     },
+    "commitment": {
+        "location_resolver_model": COMMITMENT_VALIDATOR_DEFAULT,
+        "location_resolver_model_providers": [],
+    },
     "owl_post": {
         "enabled": True,
         "boards_enabled": True,  # Notice board system (NPC threads & replies)
         "orchestrator_model": "",  # Classifier/decisions (empty = use interjection_model)
         "orchestrator_model_reasoning": False,
+        "orchestrator_model_providers": [],
         "mail_model": "",          # Letter generation (empty = use chat_model)
         "mail_model_reasoning": False,
+        "mail_model_providers": [],
         "board_model": "",         # Board thread/reply generation (empty = use chat_model)
         "board_model_reasoning": False,
+        "board_model_providers": [],
         "summarize_model": "",     # Letter summarizer (empty = use orchestrator_model)
         "summarize_model_reasoning": False,
+        "summarize_model_providers": [],
         "mail_interval": 180,      # seconds between mail orchestrator checks
         "board_interval": 300,     # seconds between board orchestrator checks
         "conversation_cooldown": 300,  # seconds after conversation before NPC can write
@@ -379,10 +570,15 @@ DEFAULT_SETTINGS = {
         "enabled": False,  # Disabled by default until enabled in settings
         "embedding_model": "text-embedding-3-small",  # Vector embedding model for memory search (OpenAI/OpenRouter only)
         "chapter_model": "gpt-4.1-nano",  # Model for chapter detection
-        "graphiti_model": "gpt-4.1-nano",  # Main model for memory fact extraction
-        "graphiti_small_model": "gpt-4.1-nano",  # Smaller model for lightweight memory tasks
+        "chapter_model_providers": [],
+        "graphiti_model": GRAPHITI_FACT_EXTRACTION_DEFAULT,  # Main model for memory fact extraction
+        "graphiti_model_providers": [],
+        "graphiti_small_model": GRAPHITI_FACT_DEDUPLICATION_DEFAULT,  # Model for fact merge/dedup decisions
+        "graphiti_small_model_providers": [],
         "reranker_model": "gpt-4.1-nano",  # Tiny model for reranking (boolean classifier)
+        "reranker_model_providers": [],
         "prose_model": "gpt-4.1-nano",  # Model for prose generation
+        "prose_model_providers": [],
         "max_concurrency": 2,  # Max parallel LLM calls during memory processing
         "chapter_entry_threshold": 30,  # Min dialogue entries before triggering chapter detection
         "include_cutscene": True,  # Include cutscene dialogue in chapter memories/indexing
@@ -531,11 +727,11 @@ Output ONLY the result, nothing else. NPC ID must match exactly from list.""",
         "owl_board_thread": "Write a board thread with:\n1. A topic post by one of the participants (pick whoever fits best)\n2. 2-4 replies from other participants\n\nEach post should be 1-3 sentences, casual and in-character. The topic should feel organic — gossip, questions, observations, complaints, jokes, study questions, etc.\n\nCharacters only know what they would realistically know. They do not use names or terms for places, people, or things they have no knowledge of. If a character would not know about something, they describe it indirectly.\n\nThe title is written by the posting character — it should read like something they actually wrote on the board, not a summary or label.",
         "owl_board_reply": "Write 2-3 replies from the available responders, reacting to the conversation so far (especially the most recent post). Each reply 1-3 sentences, casual and in-character.",
         "static_bios": {
-            "Player": "A new fifth-year student at Hogwarts who started late due to mysterious circumstances. Possesses a rare ability to see and wield ancient magic that most wizards cannot perceive. Currently learning to master this power while uncovering secrets about a goblin rebellion and dark wizards seeking the same ancient magic.",
             "VENDORQuillShop": "Ethel Wigley is the bird-like proprietor of Scrivenshaft's Quill Shop in Hogsmeade. She insists that only fallen feathers are used in the quills she sells. She is known to leave treats for the cats that linger around her shop. She may be related to Gertrude Wigley.",
             "AugustusHill": "Augustus Hill is the shopkeeper of Gladrags Wizardwear in Hogsmeade. He is unrelenting and always responds with positive feedback to any choice of attire. He is the father of Rosie Hill and father-in-law of Otto Dibble.",
             "LottieFeatherbottom": "Lottie Featherbottom is the postmaster at the Hogsmeade Post Office. She is generally welcoming to those who enter, but shows judgement towards messily dressed people, occasionally claiming that some hadn't even bothered to get dressed. She has a low tolerance for wanton use of magic inside the Post Office, threatening to hex perpetrators and warning that the owls, such as Bertram, might attack them if they continued.",
-            "ThaddeusTravers": "Thaddeus Travers is a member of the Sacred Twenty-Eight Travers family and the slightly inattentive proprietor of Dervish and Banges in Hogsmeade. He may be related to Ailsa Travers, Torquil Travers, and Sloan Travers."
+            "ThaddeusTravers": "Thaddeus Travers is a member of the Sacred Twenty-Eight Travers family and the slightly inattentive proprietor of Dervish and Banges in Hogsmeade. He may be related to Ailsa Travers, Torquil Travers, and Sloan Travers.",
+            "HerbertFleming": "Herbert Fleming is a 5th year Slytherin student of quiet but deliberate habits, the sort who seems forgettable until one realizes he has been paying attention to everything. Born into a respectable but declining wizarding family from the south coast of England, Herbert was raised with the uneasy knowledge that the Fleming name still opened doors, though fewer each year. At Hogwarts, he has learned to make up the difference with polish, patience, and a talent for being useful to the right people at the right time. He is particularly skilled with Charms and Arithmancy, not because he is naturally brilliant, but because he has the discipline to work a problem until it yields. Herbert dislikes spectacle and avoids duels when possible, preferring clever enchantments, well-timed remarks, and small social debts that can be collected later.\n\nIn the Slytherin common room, Herbert is most often seen half-listening from the edge of a conversation, neatly dressed, pale-haired, and wearing the faintly bored expression of someone trying not to appear too interested. He plays wizard’s chess not out of obsession, but because he enjoys games where temperament matters as much as strategy; unfortunately, his caution can make him predictable, a flaw Imelda Reyes was more than happy to point out after one especially public loss. Herbert bore the insult with stiff dignity, though anyone watching closely might have noticed the color rise in his ears. For all his careful manners, there is a stubborn streak beneath them: Herbert Fleming does not mind losing nearly as much as he minds being underestimated."
         },
         "editor_guidance": {
             "MirabelGarlick": ""
@@ -548,27 +744,33 @@ Output ONLY the result, nothing else. NPC ID must match exactly from list.""",
             "wait_for_capture": True,  # Wait for vision capture before AI responds
             "wait_timeout_seconds": 5,  # Max time to wait for a capture when wait_for_capture is enabled
             "llm": {
-                "model": "gemini-2.5-flash-lite",
+                "model": GEMINI_FLASH_LITE_DEFAULT,
                 "temperature": 0.7,
-                "max_tokens": 8192  # High default for reasoning token budgets
+                "max_tokens": 8192,  # High default for reasoning token budgets
+                "providers": []
             }
         }
     },
     "conversation": {
         "chat_model": GEMINI_CHAT_DEFAULT,
+        "chat_model_providers": [],
         "temperature": 1.0,
         "max_tokens": 8192,  # High default for reasoning token budgets
         "max_turns": 6,
         "player_voice_enabled": True,
         "player_voice_spatial": True,  # 3D spatial audio for player voice (disable for VR mods etc.)
         "player_voice_name": "",  # Override for player voice (leave empty to auto-detect from game)
-        "target_selection_model": "gemini-2.5-flash-lite",
+        "target_selection_model": GEMINI_FLASH_LITE_DEFAULT,
+        "target_selection_model_providers": [],
         "speaker_selection_max_tokens": 512,  # Dialogue line + target identification + reasoning
         "target_selection_use_crosshair": True,  # Bypass target LLM - use looked-at NPC directly (falls back to LLM if no NPC in crosshair)
-        "interjection_model": "gemini-2.5-flash-lite",
-        "commentary_model": "gemini-2.5-flash-lite",
+        "interjection_model": GEMINI_FLASH_LITE_DEFAULT,
+        "interjection_model_providers": [],
+        "commentary_model": GEMINI_FLASH_LITE_DEFAULT,
+        "commentary_model_providers": [],
         "commentary_max_tokens": 8192,  # High default for reasoning token budgets
         "commentary_model_reasoning": False,
+        "input_correction_model_providers": [],
         # input_correction_enabled: Provider-aware default (JS handles) - True for OpenRouter/OpenAI, False for Gemini
         # input_correction_model: Provider-aware default (JS + model_presets.json handles)
         "sentence_subtitles": True,  # True = update subtitle per-sentence as NPC speaks, False = show full text at once
@@ -576,15 +778,18 @@ Output ONLY the result, nothing else. NPC ID must match exactly from list.""",
         "followers_enabled": True,  # Allow NPCs to follow/stop following the player via actions (gated by actions_enabled)
         "gear_context": True,  # Include player gear/attire in NPC context
         "mission_context": True,  # Include current quest info for companion AI
-        "auto_mute_ambient": True,  # Auto-mute repeated ambient NPC callouts (blocklist system)
+        "auto_mute_ambient": False,  # Auto-mute repeated ambient NPC callouts (blocklist system)
         "companion_callout_block_minutes": 1440,  # Deprecated — kept for backwards compat
         "companion_move_enabled": True,  # Allow voice commands to move companion ("go over there", "get out of the way")
         "companion_follow_distance_m": 2.0,  # How close companion follows (meters). Default 2.0m = 200uu
         "emotes_enabled": True,  # Prompt LLM to emit [emotion] tags for facial animation (provider-agnostic)
+        "freeform_emote_tags": True,  # Allow improvised tags; aliases are baseline, memory embeddings are optional
         "attention_meter_enabled": True,  # NPCs notice when player stares at them up close and react
         "attention_cold_approach_enabled": True,  # NPCs react to player approaching without prior conversation (requires attention_meter_enabled)
         "gaze_enabled": True,  # NPCs turn head/eyes toward player during conversations and ambient encounters
         "narration_enabled": False,  # Allow inline *narration* with a separate narrator voice
+        "player_narration_enabled": True,  # Speak *narration* included in player messages
+        "spatial_grounding_enabled": False,  # Keep narrated locations consistent with visual context (requires narration_enabled)
         "narrator_voice": "",  # Voice name for narrator (empty = provider default: PocketONNX "GreyCat", Inworld "Graham")
         "conversation_fpv": True,  # Auto-enable first-person view during conversations
         "conversation_fpv_transition": "normal",  # Fade transition duration for first-person conversations: normal, fast, off
@@ -613,7 +818,7 @@ Output ONLY the result, nothing else. NPC ID must match exactly from list.""",
         "night_start_hour": 18  # Hour when night begins (0-23)
     },
     "stt": {
-        "provider": "none",  # "none" | "deepgram" | "whisper" | "parakeet" | "canary" | "moonshine"
+        "provider": "none",  # "none" | "deepgram" | "whisper" | "parakeet" | "canary" | "moonshine" | "universal"
         "hotkey": "middle_mouse",
         "voice_spells": True,  # Cast spells by saying their names
         "spell_detection_threshold": 0.8,  # Wakeword confidence threshold (0.0-1.0)
@@ -634,7 +839,10 @@ Output ONLY the result, nothing else. NPC ID must match exactly from list.""",
         },
         "parakeet": {},  # Local ONNX model, no configuration needed
         "canary": {},  # Local ONNX model, no configuration needed
-        "moonshine": {}  # Local ONNX model, no configuration needed
+        "moonshine": {},  # Local ONNX model, no configuration needed
+        "universal": {
+            "model": "parakeet-tdt-0.6b-v3"
+        }
     },
     "open_mic": {
         "enabled": False,  # Toggle open mic mode (continuous VAD-based listening)
@@ -661,12 +869,12 @@ Output ONLY the result, nothing else. NPC ID must match exactly from list.""",
 
 def deep_merge(base, override):
     """Deep merge override into base dict"""
-    result = base.copy()
+    result = copy.deepcopy(base)
     for key, value in override.items():
         if key in result and isinstance(result[key], dict) and isinstance(value, dict):
             result[key] = deep_merge(result[key], value)
         else:
-            result[key] = value
+            result[key] = copy.deepcopy(value)
     return result
 
 
@@ -674,6 +882,7 @@ LLM_PROVIDER_FEATURE_DISABLE_KEYS = {
     "input_correction": "disable_input_correction",
     "vision": "disable_vision",
     "owl_post": "disable_owl_post",
+    "memory": "disable_memory",
 }
 
 
@@ -814,6 +1023,47 @@ def _replace_deprecated_model_values(value):
     return value, False
 
 
+def _replace_model_id(model, replacements):
+    """Replace an exact model ID while preserving OpenRouter suffixes such as :nitro."""
+    stripped = model.strip()
+    replacement = replacements.get(stripped)
+    if replacement:
+        return replacement, model != replacement
+
+    for deprecated, current in replacements.items():
+        if stripped.startswith(f"{deprecated}:"):
+            replacement = f"{current}{stripped[len(deprecated):]}"
+            return replacement, model != replacement
+
+    return model, False
+
+
+def _replace_model_values(value, replacements):
+    """Recursively replace exact saved model IDs using a supplied mapping."""
+    if isinstance(value, dict):
+        changed = False
+        for key, child in list(value.items()):
+            new_child, child_changed = _replace_model_values(child, replacements)
+            if child_changed:
+                value[key] = new_child
+                changed = True
+        return value, changed
+
+    if isinstance(value, list):
+        changed = False
+        for index, child in enumerate(value):
+            new_child, child_changed = _replace_model_values(child, replacements)
+            if child_changed:
+                value[index] = new_child
+                changed = True
+        return value, changed
+
+    if isinstance(value, str):
+        return _replace_model_id(value, replacements)
+
+    return value, False
+
+
 def _migrate_deprecated_models(settings):
     """One-time migration for deprecated saved model IDs."""
     migrations = settings.setdefault('migrations', {})
@@ -823,6 +1073,226 @@ def _migrate_deprecated_models(settings):
     settings, changed = _replace_deprecated_model_values(settings)
     settings.setdefault('migrations', {})[DEPRECATED_MODEL_MIGRATION_KEY] = True
     return settings, changed or True
+
+
+def _migrate_dated_models(settings, current_date=None):
+    """Apply each due model deprecation once, allowing later manual overrides."""
+    current_date = current_date or date.today()
+    changed = False
+    applied = []
+
+    for switch_date, migration_key, replacements in DATED_MODEL_MIGRATIONS:
+        migrations = settings.get('migrations', {})
+        if current_date < switch_date or migrations.get(migration_key):
+            continue
+
+        settings, _models_changed = _replace_model_values(settings, replacements)
+        settings.setdefault('migrations', {})[migration_key] = True
+        changed = True
+        applied.append(migration_key)
+
+    return settings, changed, applied
+
+
+def _migrate_graphiti_fact_extraction_model(settings):
+    """Set the provider-appropriate fact extraction model exactly once."""
+    migrations = settings.get('migrations', {})
+    if migrations.get(GRAPHITI_FACT_EXTRACTION_MIGRATION_KEY):
+        return settings, False
+
+    provider = settings.get('llm', {}).get('provider', 'gemini')
+    if provider not in ('gemini', 'openrouter'):
+        return settings, False
+
+    memory = settings.setdefault('memory', {})
+    if provider == 'openrouter':
+        memory['graphiti_model'] = GRAPHITI_FACT_EXTRACTION_DEFAULT_OR
+        memory['graphiti_model_providers'] = ['google-ai-studio', 'google-vertex']
+    else:
+        memory['graphiti_model'] = GRAPHITI_FACT_EXTRACTION_DEFAULT
+        memory['graphiti_model_providers'] = []
+
+    settings.setdefault('migrations', {})[GRAPHITI_FACT_EXTRACTION_MIGRATION_KEY] = True
+    return settings, True
+
+
+def _migrate_graphiti_fact_deduplication_model(settings):
+    """Set the provider-appropriate fact deduplication model exactly once."""
+    migrations = settings.get('migrations', {})
+    if migrations.get(GRAPHITI_FACT_DEDUPLICATION_MIGRATION_KEY):
+        return settings, False
+
+    provider = settings.get('llm', {}).get('provider', 'gemini')
+    if provider not in ('gemini', 'openrouter'):
+        return settings, False
+
+    memory = settings.setdefault('memory', {})
+    if provider == 'openrouter':
+        memory['graphiti_small_model'] = GRAPHITI_FACT_DEDUPLICATION_DEFAULT_OR
+        memory['graphiti_small_model_providers'] = ['google-ai-studio', 'google-vertex']
+    else:
+        memory['graphiti_small_model'] = GRAPHITI_FACT_DEDUPLICATION_DEFAULT
+        memory['graphiti_small_model_providers'] = []
+
+    settings.setdefault('migrations', {})[GRAPHITI_FACT_DEDUPLICATION_MIGRATION_KEY] = True
+    return settings, True
+
+
+def _migrate_commitment_validator_model(settings):
+    """Set the provider-appropriate combined commitment validator/resolver model once."""
+    migrations = settings.get('migrations', {})
+    if migrations.get(COMMITMENT_VALIDATOR_MODEL_MIGRATION_KEY):
+        return settings, False
+
+    provider = settings.get('llm', {}).get('provider', 'gemini')
+    if provider not in ('gemini', 'openrouter'):
+        return settings, False
+
+    commitment = settings.setdefault('commitment', {})
+    if provider == 'openrouter':
+        commitment['location_resolver_model'] = COMMITMENT_VALIDATOR_DEFAULT_OR
+        commitment['location_resolver_model_providers'] = ['google-ai-studio', 'google-vertex']
+    else:
+        commitment['location_resolver_model'] = COMMITMENT_VALIDATOR_DEFAULT
+        commitment['location_resolver_model_providers'] = []
+
+    settings.setdefault('migrations', {})[COMMITMENT_VALIDATOR_MODEL_MIGRATION_KEY] = True
+    return settings, True
+
+
+def _migrate_openai_responses_default(settings):
+    """Enable Responses API by default for direct OpenAI while preserving custom endpoints."""
+    migrations = settings.setdefault('migrations', {})
+    if migrations.get(OPENAI_RESPONSES_DEFAULT_MIGRATION_KEY):
+        return settings, False
+
+    openai_settings = settings.setdefault('llm', {}).setdefault('openai', {})
+    api_url = (openai_settings.get('api_url') or '').strip().lower()
+    is_direct_openai = api_url == '' or 'openai.com' in api_url
+    changed = False
+
+    if is_direct_openai:
+        if openai_settings.get('responses_api') is not True:
+            openai_settings['responses_api'] = True
+            changed = True
+        migrations[OPENAI_RESPONSES_DEFAULT_MIGRATION_KEY] = True
+        return settings, changed or True
+
+    return settings, False
+
+
+def _migrate_inworld_tts_2_default(settings):
+    """Move the old Inworld default model to TTS 2 exactly once."""
+    migrations = settings.setdefault('migrations', {})
+    if migrations.get(INWORLD_TTS_2_DEFAULT_MIGRATION_KEY):
+        return settings, False
+
+    inworld_settings = settings.setdefault('tts', {}).setdefault('inworld', {})
+    if inworld_settings.get('model', 'inworld-tts-1.5-max') == 'inworld-tts-1.5-max':
+        inworld_settings['model'] = 'inworld-tts-2'
+        migrations[INWORLD_TTS_2_DEFAULT_MIGRATION_KEY] = True
+        return settings, True
+
+    migrations[INWORLD_TTS_2_DEFAULT_MIGRATION_KEY] = True
+    return settings, True
+
+
+def _migrate_llamacpp_slot_save_path(settings):
+    """Remove the obsolete Sonorus-local slot snapshot cleanup path once."""
+    migrations = settings.get('migrations', {})
+    if migrations.get(LLAMACPP_SLOT_SAVE_PATH_REMOVAL_MIGRATION_KEY):
+        return settings, False
+
+    llamacpp_settings = settings.get('llm', {}).get('llamacpp', {})
+    if 'kv_cache_slot_save_path' not in llamacpp_settings:
+        return settings, False
+
+    llamacpp_settings.pop('kv_cache_slot_save_path')
+    settings.setdefault('migrations', {})[LLAMACPP_SLOT_SAVE_PATH_REMOVAL_MIGRATION_KEY] = True
+    return settings, True
+
+
+def _migrate_omnivoice_api_to_universal(settings):
+    """Retire the protocol-v1 OmniVoice API provider in favor of Universal v2."""
+    migrations = settings.get('migrations', {})
+    if migrations.get(OMNIVOICE_API_RETIREMENT_MIGRATION_KEY):
+        return settings, False
+
+    tts_settings = settings.get('tts', {})
+    if not isinstance(tts_settings, dict):
+        return settings, False
+    legacy_is_active = tts_settings.get('provider') == 'omnivoice_api'
+    if not legacy_is_active and 'omnivoice_api' not in tts_settings:
+        return settings, False
+
+    legacy = tts_settings.get('omnivoice_api', {})
+    if legacy_is_active:
+        universal = tts_settings.setdefault('universal', {})
+        if not universal.get('model'):
+            universal['model'] = 'omnivoice'
+        if isinstance(legacy, dict):
+            for key in (
+                'num_steps',
+                'first_sentence_steps',
+                'guidance_scale',
+                'apply_smoothing_eq',
+            ):
+                if key in legacy:
+                    universal.setdefault(key, legacy[key])
+        tts_settings['provider'] = 'universal'
+
+    tts_settings.pop('omnivoice_api', None)
+    settings.setdefault('migrations', {})[OMNIVOICE_API_RETIREMENT_MIGRATION_KEY] = True
+    return settings, True
+
+
+def _migrate_universal_model_profiles(settings):
+    """Move legacy flat Universal tuning into the selected model profile once."""
+    migrations = settings.get('migrations', {})
+    if migrations.get(UNIVERSAL_MODEL_PROFILES_MIGRATION_KEY):
+        return settings, False
+
+    tts_settings = settings.get('tts', {})
+    universal = tts_settings.get('universal', {}) if isinstance(tts_settings, dict) else {}
+    if not isinstance(universal, dict):
+        return settings, False
+
+    model_id = str(universal.get('model') or 'omnivoice')
+    profiles = universal.setdefault('model_settings', {})
+    if not isinstance(profiles, dict):
+        profiles = {}
+        universal['model_settings'] = profiles
+    profile = profiles.setdefault(model_id, {})
+    if not isinstance(profile, dict):
+        profile = {}
+        profiles[model_id] = profile
+    options = profile.setdefault('options', {})
+    if not isinstance(options, dict):
+        options = {}
+        profile['options'] = options
+
+    option_mapping = {
+        'num_steps': 'numSteps',
+        'first_sentence_steps': 'firstSegmentSteps',
+        'guidance_scale': 'guidanceScale',
+    }
+    changed = False
+    for old_key, wire_id in option_mapping.items():
+        if old_key in universal:
+            options.setdefault(wire_id, universal.pop(old_key))
+            changed = True
+    if 'apply_smoothing_eq' in universal:
+        profile.setdefault('apply_smoothing_eq', universal.pop('apply_smoothing_eq'))
+        changed = True
+    if 'upscale' in universal:
+        profile.setdefault('upscale', universal.pop('upscale'))
+        changed = True
+    elif model_id == 'omnivoice':
+        profile.setdefault('upscale', True)
+        changed = True
+
+    settings.setdefault('migrations', {})[UNIVERSAL_MODEL_PROFILES_MIGRATION_KEY] = True
+    return settings, True
 
 
 def load_settings(raw=False):
@@ -859,6 +1329,71 @@ def load_settings(raw=False):
                         print("[Settings] Migrated deprecated model IDs to current Gemini defaults")
                     else:
                         print("[Settings] Warning: Failed to persist deprecated model migration")
+
+                settings, graphiti_model_migrated = _migrate_graphiti_fact_extraction_model(settings)
+                if graphiti_model_migrated:
+                    if save_settings(settings):
+                        print("[Settings] Updated long-term memory fact extraction model")
+                    else:
+                        print("[Settings] Warning: Failed to persist fact extraction model migration")
+
+                settings, graphiti_small_model_migrated = _migrate_graphiti_fact_deduplication_model(settings)
+                if graphiti_small_model_migrated:
+                    if save_settings(settings):
+                        print("[Settings] Updated long-term memory fact deduplication model")
+                    else:
+                        print("[Settings] Warning: Failed to persist fact deduplication model migration")
+
+                settings, commitment_validator_migrated = _migrate_commitment_validator_model(settings)
+                if commitment_validator_migrated:
+                    if save_settings(settings):
+                        print("[Settings] Updated commitment validator and location resolver model")
+                    else:
+                        print("[Settings] Warning: Failed to persist commitment validator model migration")
+
+                settings, dated_models_migrated, dated_migrations = _migrate_dated_models(settings)
+                if dated_models_migrated:
+                    if save_settings(settings):
+                        print(f"[Settings] Applied dated model migrations: {', '.join(dated_migrations)}")
+                    else:
+                        print("[Settings] Warning: Failed to persist dated model migrations")
+
+                settings, openai_responses_migrated = _migrate_openai_responses_default(settings)
+                if openai_responses_migrated:
+                    if save_settings(settings):
+                        print("[Settings] Applied OpenAI Responses API default for direct OpenAI endpoints")
+                    else:
+                        print("[Settings] Warning: Failed to persist OpenAI Responses API default migration")
+
+                settings, inworld_tts_migrated = _migrate_inworld_tts_2_default(settings)
+                if inworld_tts_migrated:
+                    if save_settings(settings):
+                        print("[Settings] Applied Inworld TTS 2 default migration")
+                    else:
+                        print("[Settings] Warning: Failed to persist Inworld TTS 2 default migration")
+
+                settings, llamacpp_path_migrated = _migrate_llamacpp_slot_save_path(settings)
+                if llamacpp_path_migrated:
+                    if save_settings(settings):
+                        print("[Settings] Removed obsolete llama.cpp slot save path setting")
+                    else:
+                        print("[Settings] Warning: Failed to persist llama.cpp slot save path migration")
+
+                settings, omnivoice_api_migrated = _migrate_omnivoice_api_to_universal(settings)
+                if omnivoice_api_migrated:
+                    if save_settings(settings):
+                        print("[Settings] Retired OmniVoice API settings in favor of Universal Speech Server")
+                    else:
+                        print("[Settings] Warning: Failed to persist OmniVoice API retirement migration")
+
+                settings, universal_profiles_migrated = _migrate_universal_model_profiles(settings)
+                if universal_profiles_migrated:
+                    if save_settings(settings):
+                        print("[Settings] Migrated Universal tuning to per-model profiles")
+                    else:
+                        print("[Settings] Warning: Failed to persist Universal model-profile migration")
+
+                settings = _backfill_missing_provider_route_presets(settings)
 
                 # Merge with defaults to ensure all keys exist
                 merged = deep_merge(DEFAULT_SETTINGS.copy(), settings)

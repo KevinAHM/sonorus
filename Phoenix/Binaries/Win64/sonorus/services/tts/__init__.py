@@ -5,6 +5,7 @@ Provides a unified interface for text-to-speech providers (Inworld, ElevenLabs).
 """
 import os
 import sys
+import importlib
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -43,6 +44,12 @@ def get_provider():
         elif provider_name == 'omnivoice':
             from .omnivoice import OmniVoiceProvider
             _providers[provider_name] = OmniVoiceProvider()
+        elif provider_name == 'universal':
+            from .universal import UniversalProvider
+            _providers[provider_name] = UniversalProvider()
+        elif provider_name == 'omnivoice_cpp':
+            provider_module = importlib.import_module('.omnivoice_cpp', __name__)
+            _providers[provider_name] = provider_module.OmniVoiceCppProvider()
         else:
             from .inworld import InworldProvider
             _providers[provider_name] = InworldProvider()
@@ -148,7 +155,7 @@ def _resolve_narrator_voice():
 
     # Provider-specific fallbacks
     provider_name = get_provider_name()
-    if provider_name in ('pocket', 'pocket_onnx'):
+    if provider_name in ('pocket', 'pocket_onnx', 'omnivoice', 'omnivoice_cpp', 'universal'):
         return 'GreyCat'
     elif provider_name == 'inworld':
         return 'Graham'
@@ -289,6 +296,12 @@ def clear_provider_cache(provider_name=None):
         elif provider_name == 'omnivoice':
             from .omnivoice import clear_voice_cache
             clear_voice_cache()
+        elif provider_name == 'universal':
+            from .universal import clear_voice_cache
+            clear_voice_cache()
+        elif provider_name == 'omnivoice_cpp':
+            provider_module = importlib.import_module('.omnivoice_cpp', __name__)
+            provider_module.clear_voice_cache()
     else:
         print("[TTS] Clearing all cached providers")
         _providers.clear()
@@ -313,6 +326,16 @@ def clear_provider_cache(provider_name=None):
             clear_voice_cache()
         except ImportError:
             pass
+        try:
+            from .universal import clear_voice_cache
+            clear_voice_cache()
+        except ImportError:
+            pass
+        try:
+            provider_module = importlib.import_module('.omnivoice_cpp', __name__)
+            provider_module.clear_voice_cache()
+        except ImportError:
+            pass
 
 
 def is_available() -> bool:
@@ -333,6 +356,15 @@ def is_available() -> bool:
         return bool(elevenlabs.get('api_key'))
     elif provider == 'omnivoice':
         return True  # Local GPU inference - always available
+    elif provider == 'universal':
+        connection = settings.get('speech_server', {})
+        return bool((connection.get('api_url') or '').strip())
+    elif provider == 'omnivoice_cpp':
+        try:
+            engine_module = importlib.import_module('services.omnivoice_cpp_engine')
+            return engine_module.is_available()
+        except Exception:
+            return False
 
     return False
 

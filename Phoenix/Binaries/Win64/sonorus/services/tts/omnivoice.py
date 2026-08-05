@@ -11,6 +11,8 @@ coordination) and calls synthesize_stream_sentences() for per-sentence streaming
 import os
 import sys
 import math
+import functools
+import threading
 from typing import Dict, Optional, Callable
 
 import numpy as np
@@ -33,6 +35,24 @@ OMNIVOICE_HIGH_SHELF_FREQ = 4_000.0
 OMNIVOICE_HIGH_SHELF_GAIN_DB = -2.0
 OMNIVOICE_LOW_PASS_FREQ = 14_000.0
 OMNIVOICE_LOW_PASS_Q = 1.0 / math.sqrt(2.0)  # 2-pole Butterworth, 12 dB/octave.
+_synthesis_sequence_lock = threading.Lock()
+
+
+def _use_prefix_kv_cache_for_sentence(config: Dict, sentence_number: int) -> bool:
+    """Return whether this sentence should use cached-prefix generation."""
+    if not config.get("prefix_kv_cache_enabled", True):
+        return False
+    if not config.get("prefix_kv_cache_first_sentence_only", False):
+        return True
+    return sentence_number == 1
+
+
+def _serialized_synthesis(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        with _synthesis_sequence_lock:
+            return func(*args, **kwargs)
+    return wrapper
 
 
 class _StreamingBiquad:
@@ -277,8 +297,10 @@ class OmniVoiceProvider(BaseTTSProvider):
 
         return {
             "num_steps": int(omni_settings.get('num_steps', 32)),
-            "first_sentence_steps": int(omni_settings.get('first_sentence_steps', 24)),
+            "first_sentence_steps": int(omni_settings.get('first_sentence_steps', 16)),
             "guidance_scale": float(omni_settings.get('guidance_scale', 2.0)),
+            "prefix_kv_cache_enabled": bool(omni_settings.get('prefix_kv_cache_enabled', True)),
+            "prefix_kv_cache_first_sentence_only": bool(omni_settings.get('prefix_kv_cache_first_sentence_only', False)),
             "apply_smoothing_eq": bool(omni_settings.get('apply_smoothing_eq', True)),
             "speed": float(tts_settings.get('speed', 1.0)),
         }
@@ -356,8 +378,10 @@ class OmniVoiceProvider(BaseTTSProvider):
         }
 
         ref_text = ensure_voice_reference_transcript(str(ref_path))
-        if ref_text:
-            print(f"[OmniVoice] Transcript ready for {ref_path.name} ({len(ref_text)} chars)")
+        if not ref_text:
+            print(f"[OmniVoice] Voice registration failed: {ref_path.name} has no transcript")
+            return None
+        print(f"[OmniVoice] Transcript ready for {ref_path.name} ({len(ref_text)} chars)")
 
         # If the worker is already running, pretokenize in the background
         if is_loaded():
@@ -402,6 +426,7 @@ class OmniVoiceProvider(BaseTTSProvider):
             print(f"[OmniVoice] Failed to clear prompt cache: {e}")
             return False
 
+    @_serialized_synthesis
     def synthesize_stream(self, text: str, voice_id: str,
                           on_chunk: Callable[[bytes, Optional[Dict]], None],
                           speaker_id: Optional[str] = None) -> bool:
@@ -437,9 +462,13 @@ class OmniVoiceProvider(BaseTTSProvider):
             text=text,
             voice_path=voice_path,
             on_chunk=eq_on_chunk,
+            num_steps=config.get("first_sentence_steps", 16),
+            guidance_scale=config.get("guidance_scale", 2.0),
+            prefix_kv_cache_enabled=_use_prefix_kv_cache_for_sentence(config, 1),
         )
         return success
 
+    @_serialized_synthesis
     def synthesize_stream_sentences(self, sentences, voice_id: str,
                                      on_chunk: Callable[[bytes, Optional[Dict]], None],
                                      speaker_id: Optional[str] = None,
@@ -477,7 +506,7 @@ class OmniVoiceProvider(BaseTTSProvider):
 
         config = self.get_config()
         num_steps = config.get("num_steps", 32)
-        first_sentence_steps = config.get("first_sentence_steps", 24)
+        first_sentence_steps = config.get("first_sentence_steps", 16)
         base_cfg = config.get("guidance_scale", 2.0)
         effective_sr = UPSCALE_SAMPLE_RATE
         eq_on_chunk = _wrap_omnivoice_eq(on_chunk) if config.get("apply_smoothing_eq", True) else on_chunk
@@ -596,6 +625,10 @@ class OmniVoiceProvider(BaseTTSProvider):
                     on_chunk=eq_on_chunk,
                     num_steps=steps,
                     guidance_scale=npc_cfg,
+                    prefix_kv_cache_enabled=_use_prefix_kv_cache_for_sentence(
+                        config,
+                        sentence_count,
+                    ),
                 )
                 total_bytes += bytes_produced
                 print(f"[OmniVoiceTiming] sentence_done idx={sentence_count - 1} "

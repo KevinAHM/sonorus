@@ -1,0 +1,157 @@
+/* ============================================
+   OpenRouter Provider Routing Drawer
+   ============================================ */
+
+.provider-routing-panel {
+    width: 100%;
+    margin-top: var(--space-xs);
+}
+
+.provider-routing-panel.open {
+    position: relative;
+    z-index: 1200;
+}
+
+.chapter.provider-routing-overflow-open,
+.sub-panel.provider-routing-overflow-open {
+    overflow: visible;
+}
+
+.provider-routing-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-xs);
+    padding: 2px 0;
+    border: none;
+    background: transparent;
+    color: var(--leather-border);
+    font-family: var(--font-display);
+    font-size: 0.72rem;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    cursor: pointer;
+    opacity: 0.78;
+}
+
+.provider-routing-toggle:hover {
+    opacity: 1;
+    color: var(--gold-dark);
+}
+
+.provider-routing-caret {
+    display: inline-block;
+    font-size: 0.7rem;
+    transition: transform 0.18s ease;
+}
+
+.provider-routing-panel.open .provider-routing-caret {
+    transform: rotate(180deg);
+}
+
+.provider-routing-drawer {
+    margin-top: var(--space-xs);
+}
+
+.provider-routing-input {
+    width: 100%;
+    font-size: 0.9rem;
+}
+
+.provider-routing-drawer .awesomplete {
+    display: block;
+    width: 100%;
+}
+
+.provider-routing-drawer .awesomplete > ul {
+    top: calc(100% + 6px);
+    left: 0;
+    right: 0;
+    min-width: 100%;
+    max-height: 16rem;
+    overflow-y: auto;
+    border: 1px solid var(--gold-dark);
+    border-radius: 4px;
+    background:
+        linear-gradient(180deg, rgba(244, 228, 193, 0.98) 0%, rgba(232, 212, 168, 0.98) 100%);
+    box-shadow:
+        0 10px 24px rgba(0, 0, 0, 0.35),
+        inset 0 1px 0 rgba(255, 255, 255, 0.45);
+    z-index: 1200;
+}
+
+.provider-routing-drawer .awesomplete > ul > li {
+    padding: 0.5rem 0.7rem;
+    border-bottom: 1px solid rgba(74, 53, 40, 0.12);
+    color: var(--ink-brown);
+    font-family: var(--font-display);
+    font-size: 0.9rem;
+    line-height: 1.25;
+    cursor: pointer;
+}
+
+.provider-routing-drawer .awesomplete > ul > li:last-child {
+    border-bottom: 0;
+}
+
+.provider-routing-drawer .awesomplete > ul > li:hover,
+.provider-routing-drawer .awesomplete > ul > li[aria-selected="true"] {
+    background:
+        linear-gradient(90deg, rgba(212, 168, 75, 0.2) 0%, rgba(212, 168, 75, 0.08) 100%);
+    color: var(--ink-black);
+}
+
+.provider-routing-drawer .awesomplete mark {
+    background: transparent;
+    color: var(--ember-red);
+    font-weight: 700;
+}
+
+.provider-routing-option-label,
+.provider-routing-option-value {
+    display: block;
+}
+
+.provider-routing-option-name {
+    font-weight: 700;
+}
+
+.provider-routing-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.22rem;
+    margin-left: 0.35rem;
+    padding: 0.06rem 0.42rem 0.06rem 0.34rem;
+    border: 1px solid rgba(107, 79, 46, 0.34);
+    border-radius: 999px;
+    background: rgba(212, 168, 75, 0.18);
+    color: var(--ink-brown);
+    font-family: var(--font-body);
+    font-size: 0.72rem;
+    font-weight: 600;
+    line-height: 1.35;
+    vertical-align: 0.08em;
+}
+
+.provider-routing-badge-icon {
+    display: inline-flex;
+    width: 0.95em;
+    justify-content: center;
+    line-height: 1;
+}
+
+.provider-routing-metric-value {
+    font-weight: 800;
+    color: var(--ink-black);
+}
+
+.provider-routing-option-value {
+    margin-top: 2px;
+    font-size: 0.75rem;
+    opacity: 0.72;
+    font-family: ui-monospace, Consolas, monospace;
+}
+
+.provider-routing-hint {
+    margin-top: var(--space-xs);
+    margin-bottom: 0;
+}

@@ -171,7 +171,7 @@ def _get_summarize_model() -> str:
         return owl_model
     # Fall back to orchestrator model, then interjection model
     orch = settings.get("owl_post", {}).get("orchestrator_model", "")
-    return orch or settings.get("conversation", {}).get("interjection_model", "gemini-2.5-flash-lite")
+    return orch or settings.get("conversation", {}).get("interjection_model", "gemini-3.1-flash-lite")
 
 
 def summarize_letter(mail_id: int, sender: str, subject: str, body: str):
@@ -550,7 +550,7 @@ class OwlMailOrchestrator:
         """Get model for classifier/decision calls (defaults to interjection model)."""
         settings = load_settings()
         owl_model = settings.get("owl_post", {}).get("orchestrator_model", "")
-        return owl_model or settings.get("conversation", {}).get("interjection_model", "gemini-2.5-flash-lite")
+        return owl_model or settings.get("conversation", {}).get("interjection_model", "gemini-3.1-flash-lite")
 
     def _get_mail_model(self):
         """Get model for letter generation (defaults to chat model)."""

@@ -9,6 +9,7 @@ local TimeDilation = require("Utils.TimeDilation")
 local Cache = require("Utils.Cache")
 local TickScheduler = require("Utils.TickScheduler")
 local BlueprintHelpers = require("Utils.BlueprintHelpers")
+local FileIO = require("Utils.FileIO")
 
 -- Local dev print helper (DevPrint in logic.lua not loaded yet)
 local function DevPrint(...)
@@ -24,7 +25,8 @@ end
 local SocketClient = {}
 local client = nil
 local buffer = ""
-local SERVER_PORT = 8173
+local SOCKET_PORT_FILE = "sonorus\\lua_socket.port"
+local SOCKET_PORT_MAX_AGE = 3
 
 -- Send queue to prevent interleaving (Lua callbacks can interleave)
 local sendQueue = {}
@@ -38,6 +40,7 @@ local connectionState = {
     fastRetryCount = 0,             -- Consecutive failures in fast mode
     consecutiveFailures = 0,        -- Total consecutive failures
     lastStatusLog = 0,              -- Throttle status logging
+    lastPortWarning = 0,             -- Throttle missing/stale discovery warnings
 }
 
 -- Config
@@ -87,6 +90,8 @@ _G.AutoMuteAmbientEnabled = (_G.AutoMuteAmbientEnabled == nil) and true or _G.Au
 -- Significant NPCs list (synced from Python on connect)
 -- voiceName -> true for quick lookup
 _G.SignificantNPCs = _G.SignificantNPCs or {}
+_G.SignificantNPCVoiceIds = _G.SignificantNPCVoiceIds or {}
+_G.SignificantNPCVoiceAliases = _G.SignificantNPCVoiceAliases or {}
 -- Prefixes that are always insignificant (synced from Python)
 _G.InsignificantPrefixes = _G.InsignificantPrefixes or {"t3", "midres"}
 
@@ -288,6 +293,29 @@ print("[SocketClient] Pause + cinematic monitor registered")
 -- NOTE: 30ms chat input poll loop REMOVED - consolidated into 100ms unified loop in logic.lua
 -- The 100ms interval is fast enough for responsive chat input while reducing CPU load
 
+local function ReadLiveServerPort()
+    -- Deliberately uncached: every connection attempt must observe the file
+    -- most recently published by the current Python server process.
+    local content = FileIO.ReadFile(SOCKET_PORT_FILE)
+    if content == "" then return nil end
+
+    local ok, discovery = pcall(json.decode, content)
+    if not ok or type(discovery) ~= "table" then return nil end
+
+    local port = tonumber(discovery.port)
+    local updatedAt = tonumber(discovery.updated_at)
+    if not port or port < 1 or port > 65535 or port ~= math.floor(port) then
+        return nil
+    end
+    if not updatedAt then return nil end
+
+    local age = os.time() - updatedAt
+    if age < -2 or age > SOCKET_PORT_MAX_AGE then
+        return nil
+    end
+    return port
+end
+
 function SocketClient.connect()
     if client and connectionState.connected then return true end
 
@@ -304,15 +332,24 @@ function SocketClient.connect()
         return false  -- Don't spam reconnect attempts
     end
     connectionState.reconnectTime = now
-    print("[SocketClient] Attempting connect to port " .. SERVER_PORT .. "...")
+
+    local serverPort = ReadLiveServerPort()
+    if not serverPort then
+        if now - connectionState.lastPortWarning > 5 then
+            connectionState.lastPortWarning = now
+            print("[SocketClient] Waiting for a fresh Lua socket port from Python...")
+        end
+        return false
+    end
+    print("[SocketClient] Attempting connect to port " .. serverPort .. "...")
 
     local ok, err = pcall(function()
         client = socket.tcp()
         client:settimeout(0.1)  -- Short timeout for connect
-        local result, cerr = client:connect("127.0.0.1", SERVER_PORT)
+        local result, cerr = client:connect("127.0.0.1", serverPort)
         if not result then
             print("[SocketClient] Connect failed: " .. tostring(cerr))
-            client:close()
+            pcall(function() client:close() end)
             client = nil
             return
         end
@@ -324,11 +361,12 @@ function SocketClient.connect()
         -- Clear stale VR offset from previous session (persists across hot reloads)
         _G.VROffset = nil
         _G.VRDebug = nil
-        print("[SocketClient] Connected to Python server on port " .. SERVER_PORT)
+        print("[SocketClient] Connected to Python server on port " .. serverPort)
     end)
 
     if not ok then
         print("[SocketClient] Connect error: " .. tostring(err))
+        pcall(function() if client then client:close() end end)
         client = nil
     end
 
@@ -363,12 +401,17 @@ function SocketClient.connect()
         -- Re-send player handshake on reconnect (for server restarts)
         -- so the server can initialize per-player DBs
         if _G.SonorusState and _G.SonorusState.playerLoaded and _G.SonorusState.playerName
-           and _G.SonorusState.playerName ~= "" then
+           and _G.SonorusState.playerName ~= ""
+           and _G.SonorusState.playerNameConfirmed == true
+           and _G.SonorusState.playerNameHandshakeGeneration == (_G.SonorusState.loadGeneration or 0) then
             SocketClient.send({
                 type = "player_handshake",
                 data = { playerName = _G.SonorusState.playerName }
             })
             print("[SocketClient] Sent player_handshake on reconnect: " .. _G.SonorusState.playerName)
+        elseif _G.SonorusState and _G.SonorusState.playerLoaded and _G.SonorusState.playerName
+           and _G.SonorusState.playerName ~= "" then
+            print("[SocketClient] Skipped reconnect player_handshake; player name not confirmed for current load")
         end
     else
         -- Failed - track retries
@@ -566,6 +609,7 @@ function SocketClient.handleMessage(data)
         start_guide_path = true,
         stop_guide_path = true,
         player_ready = true,
+        presence_validation_result = true,
     }
 
     -- Block active mod functionality when mod is disabled
@@ -592,6 +636,15 @@ function SocketClient.handleMessage(data)
         print("[SocketClient] Received player_ready\n")
         if OnPlayerReady then
             OnPlayerReady()
+        end
+        local ledgerFlags = _G.PresenceLedgerPhaseFlags or {}
+        if ledgerFlags.scheduleDump == true
+                and _G.ScheduleDump and _G.ScheduleDump.OnPlayerReady then
+            _G.ScheduleDump.OnPlayerReady()
+        end
+        if ledgerFlags.presenceWatcher == true
+                and _G.PresenceWatcher and _G.PresenceWatcher.OnPlayerReady then
+            _G.PresenceWatcher.OnPlayerReady()
         end
         return
     end
@@ -731,21 +784,43 @@ function SocketClient.handleMessage(data)
         -- Voice IDs: internal IDs from GetActorVoiceId like "sebastiansallow"
         -- Display names: localized names from GetActorDisplayName like "Sebastian Sallow"
         local newSet = {}
+        local newVoiceSet = {}
+        local newAliasSet = {}
         local voiceNames = data.voice_names or {}
+        local schedulerVoiceNames = data.scheduler_voice_names or voiceNames
         local displayNames = data.display_names or {}
         for _, name in ipairs(voiceNames) do
-            newSet[name] = true
+            if type(name) == "string" and name ~= "" then
+                newSet[name] = true
+                newSet[name:lower()] = true
+            end
+        end
+        for _, name in ipairs(schedulerVoiceNames) do
+            if type(name) == "string" and name ~= "" then
+                newVoiceSet[name] = true
+            end
+        end
+        for alias, canonical in pairs(data.voice_aliases or {}) do
+            if type(alias) == "string" and alias ~= ""
+                    and type(canonical) == "string" and canonical ~= "" then
+                newAliasSet[alias:lower()] = canonical
+            end
         end
         for _, name in ipairs(displayNames) do
-            newSet[name] = true
+            if type(name) == "string" and name ~= "" then
+                newSet[name] = true
+                newSet[name:lower()] = true
+            end
         end
         _G.SignificantNPCs = newSet
+        _G.SignificantNPCVoiceIds = newVoiceSet
+        _G.SignificantNPCVoiceAliases = newAliasSet
         -- Update insignificant prefixes if provided
         if data.insignificant_prefixes then
             _G.InsignificantPrefixes = data.insignificant_prefixes
         end
-        print(string.format("[Socket] Synced %d significant NPC names (%d voice + %d display)",
-            #voiceNames + #displayNames, #voiceNames, #displayNames))
+        print(string.format("[Socket] Synced %d significant NPC names (%d filter voice, %d scheduler, %d display)",
+            #voiceNames + #displayNames, #voiceNames, #schedulerVoiceNames, #displayNames))
         return
     end
 
@@ -1199,21 +1274,28 @@ function SocketClient.handleMessage(data)
         -- Facial emote from server: play emotion blendshapes on current speaker
         -- name=nil means sentence has no emotion tag -> fade out current emote
         local emoteName = data.name
+        local emoteIntensity = tonumber(data.intensity) or 1.0
         local turnId = data.turn_id
-        local Emotes = dofile(_G.SonorusScriptsPath .. "Utils/Emotes.lua")
-        Emotes.init()
-        if emoteName then
-            local actor = _G.GetCurrentSpeakerActor and _G.GetCurrentSpeakerActor()
-            if actor then
-                Emotes.Play(actor, emoteName, 1.0, 0.3, 1.5)
+        local currentTurn = _G.SonorusState and _G.SonorusState.currentTurnId or nil
+        if turnId == currentTurn then
+            local Emotes = dofile(_G.SonorusScriptsPath .. "Utils/Emotes.lua")
+            Emotes.init()
+            if emoteName then
+                local actor = _G.GetCurrentSpeakerActor and _G.GetCurrentSpeakerActor()
+                if actor then
+                    Emotes.Play(actor, emoteName, emoteIntensity, 0.3, 1.5)
+                else
+                    DevPrint("[Socket] emote: no speaker actor for '" .. emoteName .. "'\n")
+                end
             else
-                DevPrint("[Socket] emote: no speaker actor for '" .. emoteName .. "'\n")
+                -- No emotion on this sentence: fade out any active emote
+                if _G.EmoteState and _G.EmoteState.active then
+                    Emotes.Stop()
+                end
             end
         else
-            -- No emotion on this sentence: fade out any active emote
-            if _G.EmoteState and _G.EmoteState.active then
-                Emotes.Stop()
-            end
+            print(string.format("[Socket] emote ignored: turn mismatch update=%s current=%s",
+                tostring(turnId), tostring(currentTurn)))
         end
 
     elseif msgType == "turn_actions" then
@@ -2331,6 +2413,13 @@ function SocketClient.handleMessage(data)
             end)
         else
             print("[Socket] stop_guide_path: PathNav not loaded")
+        end
+
+    elseif msgType == "presence_validation_result" then
+        local hint = data.hint or "Presence validation complete"
+        print("[PresenceValidation] " .. hint:gsub("\n", " | "))
+        if ShowHint then
+            ShowHint(hint, 8)
         end
 
     elseif msgType == "notification" then

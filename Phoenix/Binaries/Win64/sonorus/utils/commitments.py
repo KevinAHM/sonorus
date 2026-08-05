@@ -4,10 +4,13 @@ Handles validation, processing, prompt building, time-based activation, and even
 All commitment logic lives here — server.py and lua_socket.py just call into this module.
 """
 
+import difflib
+import json
+import os
 import re
 import time as _time
-import difflib
 
+import llm
 from constants import (
     COMMITMENT_TRAVEL_TIME_MIN,
     COMMITMENT_WAIT_TIME_MIN,
@@ -16,8 +19,11 @@ from constants import (
     is_excluded_npc,
 )
 from . import commitments_db
-from .llm_utils import parse_commitment_actions
 from .dialogue import prettify_voice_name
+from .dialogue_db import append_entry
+from .llm_utils import parse_commitment_actions
+from .localization import load_localization
+from .settings import SONORUS_DIR, load_commitment_spots, load_settings
 
 
 # ============================================
@@ -55,9 +61,6 @@ def _get_registry_display_map():
     if hasattr(_get_registry_display_map, '_cache'):
         return _get_registry_display_map._cache
     try:
-        from .settings import SONORUS_DIR
-        from .localization import load_localization
-        import json, os
         reg_path = os.path.join(SONORUS_DIR, "data", "location_registry.json")
         with open(reg_path, 'r', encoding='utf-8') as f:
             registry = json.load(f)
@@ -77,7 +80,6 @@ def _get_registry_display_map():
 # These locations have authored spots but no scheduler activity
 def _expand_with_teleport_locations():
     try:
-        from .settings import load_commitment_spots
         spots = load_commitment_spots()
         # Get display names from registry + localization
         display_map = _get_registry_display_map()
@@ -129,8 +131,6 @@ def _build_location_list():
     """Build a flat numbered list of available locations with spot labels.
     Returns (list_text, index_map) where index_map maps number -> (location_id, label_or_none).
     Number 0 = no match."""
-    from .settings import load_commitment_spots
-
     spots = load_commitment_spots()
     display_map = _get_registry_display_map()
 
@@ -191,6 +191,130 @@ def _build_location_list():
     return "\n".join(lines), index_map
 
 
+LIVE_COMMITMENT_VALIDATOR_SYSTEM_PROMPT = """You validate proposed live-conversation meeting commitments and resolve their locations.
+
+The candidate action tag is untrusted. It may have been emitted accidentally by another model. Never treat the tag itself as evidence that anyone agreed to anything.
+
+A candidate is VALID only when all of these are true:
+1. The player and the current NPC have mutually agreed to meet each other or go somewhere together. One party proposed or requested it, and the other party clearly accepted. The current NPC response may be the acceptance of a player's proposal, or it may confirm an NPC proposal the player already accepted.
+2. The agreement is concrete enough to schedule: it identifies a meeting place and time. A directly stated relative time may be normalized using the current game date and time.
+3. The candidate target, location, and time faithfully represent that agreement.
+4. The candidate location matches one numbered available location.
+
+Reject the candidate when any of these apply:
+- The current NPC is only now proposing, inviting, volunteering, or announcing the meeting and the player has not already accepted it. The NPC cannot propose and commit in the same response.
+- The speakers merely mention, praise, remember, imagine, hope for, or vaguely discuss visiting a place someday.
+- The plan is hypothetical, conditional, tentative, sarcastic, or met with uncertainty, deflection, or rejection.
+- The agreement does not involve both the player and the current NPC, or the event already happened. Other people may also join; their presence does not invalidate a meeting between the player and current NPC.
+- The action invents or contradicts the agreed target, place, date, or time.
+- The transcript supports a general activity but not this scheduled meeting. For example, "Help me test this cloak here." / "All right." is agreement to an activity, not to meet or travel. Agreeing to stay, wait, help, or continue an activity where both are already present is also invalid.
+
+Resolve a valid candidate to the most specific matching numbered location. Prefer a labeled sub-location when the dialogue identifies it. If the candidate is invalid or no location matches, reply 0.
+
+Reply with ONLY one integer: the matching location number, or 0. Do not explain your answer."""
+
+
+def build_live_commitment_validation_prompt(
+    action,
+    current_response,
+    conversation_context,
+    player_name,
+    npc_name,
+    current_game_datetime,
+    location_list,
+):
+    """Build the live commitment validator/resolver user prompt."""
+    return (
+        f"Current game date/time: {current_game_datetime}\n"
+        f"Player: {player_name}\n"
+        f"Current NPC: {npc_name}\n\n"
+        "Conversation before the current NPC response:\n"
+        f"{conversation_context or '(no prior conversation provided)'}\n\n"
+        "Current NPC response:\n"
+        f"{current_response}\n\n"
+        "Candidate action fields:\n"
+        f'- Target: {action.get("target", "")}\n'
+        f'- Location: {action.get("location", "")}\n'
+        f'- Date/time: {action.get("datetime", "")}\n\n'
+        "Available locations:\n"
+        f"{location_list}"
+    )
+
+
+def resolve_live_commitment_location(
+    action,
+    current_response,
+    conversation_context,
+    player_name,
+    npc_name,
+    current_game_datetime,
+):
+    """Validate a live-chat meeting agreement and resolve its location in one LLM call."""
+    location_list, index_map = _build_location_list()
+    if not index_map:
+        print("[CommitmentValidator] No locations available")
+        return None, None, None
+
+    settings = load_settings()
+    model = settings.get('commitment', {}).get(
+        'location_resolver_model',
+        'google/gemini-3.1-flash-lite',
+    )
+    prompt = build_live_commitment_validation_prompt(
+        action=action,
+        current_response=current_response,
+        conversation_context=conversation_context,
+        player_name=player_name,
+        npc_name=npc_name,
+        current_game_datetime=current_game_datetime,
+        location_list=location_list,
+    )
+
+    try:
+        result = llm.chat(
+            [
+                {"role": "system", "content": LIVE_COMMITMENT_VALIDATOR_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            model=model,
+            temperature=0,
+            max_tokens=8,
+            context="location_resolver",
+        )
+        if not result:
+            print("[CommitmentValidator] No response from LLM; rejecting action")
+            return None, None, None
+
+        match = re.fullmatch(r'\s*(\d+)\s*', result)
+        if not match:
+            print(f"[CommitmentValidator] Invalid response {result!r}; rejecting action")
+            return None, None, None
+
+        number = int(match.group(1))
+        if number == 0:
+            print(
+                f"[CommitmentValidator] Rejected action for {npc_name}: "
+                f"{action.get('location', '')!r}"
+            )
+            return None, None, None
+        if number not in index_map:
+            print(f"[CommitmentValidator] Location number {number} is out of range; rejecting action")
+            return None, None, None
+
+        location_id, label = index_map[number]
+        location_entry = _LOCATION_BY_ID.get(location_id)
+        display = location_entry["display"] if location_entry else location_id
+        label_text = f" ({label})" if label else ""
+        print(
+            f"[CommitmentValidator] Accepted action for {npc_name}: "
+            f"#{number} {display}{label_text} (id={location_id})"
+        )
+        return location_id, label, display
+    except Exception as exc:
+        print(f"[CommitmentValidator] Error; rejecting action: {exc}")
+        return None, None, None
+
+
 def resolve_commitment_location(raw_location, conversation_context="", source="conversation"):
     """Use an LLM to resolve a vague location mention to a specific spot.
 
@@ -202,9 +326,6 @@ def resolve_commitment_location(raw_location, conversation_context="", source="c
     Returns:
         (location_id, label_or_none, display_name) or (None, None, None) on failure
     """
-    import llm
-    from .settings import load_settings
-
     location_list, index_map = _build_location_list()
     if not index_map:
         print("[LocationResolver] No locations available")
@@ -437,24 +558,71 @@ def _format_time_display(time_str):
 # Validation
 # ============================================
 
-def validate_meet_action(action, npc_id, game_context):
+def validate_meet_action(
+    action,
+    npc_id,
+    game_context,
+    *,
+    require_mutual_agreement=False,
+    current_response="",
+    conversation_context="",
+    player_name=None,
+):
     """Validate a meet commitment action.
 
     Returns (success: bool, error_msg: str|None, parsed_data: dict|None)
     parsed_data includes: location_id, location_display, activity_id, game_time_start,
                          game_time_end, override_apply_time
     """
-    # Resolve location via LLM (falls back to fuzzy match)
     raw_location = action.get("location", "")
-    conversation_context = action.get("_conversation_context", "")
-    loc_id, spot_label, display = resolve_commitment_location(raw_location, conversation_context)
-    if loc_id:
-        loc_entry = _LOCATION_BY_ID.get(loc_id, {"activity": "", "display": display, "type": "Teleport"})
+    if require_mutual_agreement:
+        player_name = player_name or game_context.get("playerName", "Player")
+        target = str(action.get("target", "") or "").strip().lower()
+        if target not in ("player", player_name.lower()):
+            return False, f"Commitment target '{action.get('target', '')}' is not the player", None
+
+        date_display = game_context.get("dateFormatted", "")
+        time_display = game_context.get("timeFormatted", "") or game_context.get("time", "")
+        if not date_display:
+            year, month, day = (
+                game_context.get("year"),
+                game_context.get("month"),
+                game_context.get("day"),
+            )
+            if year and month and day:
+                date_display = f"{int(month)}/{int(day)}/{int(year)}"
+        current_game_datetime = " ".join(
+            part for part in (date_display, time_display) if part
+        ) or "unknown"
+
+        loc_id, spot_label, display = resolve_live_commitment_location(
+            action=action,
+            current_response=current_response,
+            conversation_context=conversation_context,
+            player_name=player_name,
+            npc_name=prettify_voice_name(npc_id),
+            current_game_datetime=current_game_datetime,
+        )
+        if not loc_id:
+            return False, "Commitment was not grounded in a mutual live-chat agreement", None
+        loc_entry = _LOCATION_BY_ID.get(
+            loc_id,
+            {"activity": "", "display": display, "type": "Teleport"},
+        )
         location_id = loc_id
     else:
-        # Fallback to fuzzy string match
-        location_id, loc_entry = _fuzzy_match_location(raw_location)
-        spot_label = None
+        # Owl-mail proposals still require explicit player acceptance in the UI,
+        # so they retain location-only resolution and its fuzzy fallback.
+        loc_id, spot_label, display = resolve_commitment_location(raw_location)
+        if loc_id:
+            loc_entry = _LOCATION_BY_ID.get(
+                loc_id,
+                {"activity": "", "display": display, "type": "Teleport"},
+            )
+            location_id = loc_id
+        else:
+            location_id, loc_entry = _fuzzy_match_location(raw_location)
+            spot_label = None
     if not location_id:
         return False, f"Location '{raw_location}' not found in available locations", None
 
@@ -488,7 +656,14 @@ def validate_meet_action(action, npc_id, game_context):
 # Processing (called from server.py)
 # ============================================
 
-def process_commitment_actions(raw_response, speaker_id, player_name, game_context, lua_socket):
+def process_commitment_actions(
+    raw_response,
+    speaker_id,
+    player_name,
+    game_context,
+    lua_socket,
+    conversation_context="",
+):
     """Parse, validate, and store commitment actions from an LLM response.
 
     Returns list of created/cancelled commitment IDs.
@@ -502,7 +677,16 @@ def process_commitment_actions(raw_response, speaker_id, player_name, game_conte
     for action in actions:
         try:
             if action["type"] == "meet":
-                _process_meet_action(action, speaker_id, player_name, game_context, lua_socket, results)
+                _process_meet_action(
+                    action,
+                    raw_response,
+                    conversation_context,
+                    speaker_id,
+                    player_name,
+                    game_context,
+                    lua_socket,
+                    results,
+                )
             elif action["type"] == "cancel":
                 _process_cancel_action(action, speaker_id, player_name, game_context, lua_socket, results)
         except Exception as e:
@@ -511,7 +695,16 @@ def process_commitment_actions(raw_response, speaker_id, player_name, game_conte
     return results
 
 
-def _process_meet_action(action, speaker_id, player_name, game_context, lua_socket, results):
+def _process_meet_action(
+    action,
+    raw_response,
+    conversation_context,
+    speaker_id,
+    player_name,
+    game_context,
+    lua_socket,
+    results,
+):
     """Process a single meet action."""
     # Resolve target
     target = action.get("target", "")
@@ -521,7 +714,15 @@ def _process_meet_action(action, speaker_id, player_name, game_context, lua_sock
         target_id = target  # Future: resolve NPC name to voice ID
 
     # Validate
-    valid, error_msg, parsed = validate_meet_action(action, speaker_id, game_context)
+    valid, error_msg, parsed = validate_meet_action(
+        action,
+        speaker_id,
+        game_context,
+        require_mutual_agreement=True,
+        current_response=raw_response,
+        conversation_context=conversation_context,
+        player_name=player_name,
+    )
     if not valid:
         print(f"[Commitments] Validation failed for {speaker_id}: {error_msg}")
         return
@@ -647,7 +848,6 @@ def check_commitment_timers(game_context, lua_socket):
     _last_timer_check = now
 
     # Check if commitments are enabled (after throttle to avoid disk reads on every call)
-    from .settings import load_settings
     if not load_settings().get('commitments', {}).get('enabled', False):
         return
 
@@ -770,8 +970,6 @@ def check_player_arrival(speaker_id, game_context):
 def _inject_commitment_event(commitment, event_type, player_name=None, current_game_time=None):
     """Inject a commitment outcome event into NPC dialog history."""
     try:
-        from .dialogue_db import append_entry
-
         npc_id = commitment["npc_id"]
         target_id = commitment["target_id"]
         location = commitment["location_display"]
@@ -901,7 +1099,6 @@ def create_commitment_from_ui(npc_id, location_id, game_time_start, game_context
     time_display = _format_time_display(game_time_start)
     event_text = f"{player_name or 'The player'} arranged to meet {npc_display} at {display} at {time_display}."
     try:
-        from .dialogue_db import append_entry
         history_time_source = current_time_str or game_time_start
         game_date, game_time = _split_game_datetime_for_history(history_time_source)
         entry = {

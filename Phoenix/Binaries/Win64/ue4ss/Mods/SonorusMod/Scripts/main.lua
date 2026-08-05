@@ -56,6 +56,11 @@ _G.SonorusState = {
     currentTurnId = nil,       -- Which turn is active (used by GetCurrentSpeakerActor)
     -- Active fields
     playerName = "",           -- Player's character name (for dialogue history)
+    playerNameConfirmed = false, -- True only after Python ACKs this load's player handshake
+    playerNameHandshakeGeneration = -1,
+    pendingHandshakePlayerName = nil,
+    pendingHandshakeGeneration = -1,
+    loadGeneration = 0,
     playerHouse = "",          -- Player's house (Gryffindor, Slytherin, etc.)
     playerLoaded = false,      -- True after player is in game (ClientRestart fired)
     sonorusModActor = nil,     -- Cached Blueprint ModActor reference
@@ -166,6 +171,8 @@ local function DoPlayerHandshake()
     end
 
     _handshakePending = true
+    _G.SonorusState.pendingHandshakePlayerName = fullName
+    _G.SonorusState.pendingHandshakeGeneration = _G.SonorusState.loadGeneration or 0
     print("[Sonorus] Sending player_handshake: " .. fullName .. "\n")
     SocketClient.send({
         type = "player_handshake",
@@ -175,7 +182,24 @@ local function DoPlayerHandshake()
 end
 
 function OnPlayerReady()
+    local pendingGeneration = _G.SonorusState.pendingHandshakeGeneration
+    local loadGeneration = _G.SonorusState.loadGeneration or 0
     _handshakePending = false
+
+    if pendingGeneration and pendingGeneration >= 0 and pendingGeneration ~= loadGeneration then
+        print(string.format("[Sonorus] Ignoring stale player_ready for load generation %s (current %s)\n",
+            tostring(pendingGeneration), tostring(loadGeneration)))
+        return
+    end
+
+    if _G.SonorusState.pendingHandshakePlayerName and _G.SonorusState.pendingHandshakePlayerName ~= "" then
+        _G.SonorusState.playerName = _G.SonorusState.pendingHandshakePlayerName
+        _G.SonorusState.playerNameConfirmed = true
+        _G.SonorusState.playerNameHandshakeGeneration = loadGeneration
+    end
+    _G.SonorusState.pendingHandshakePlayerName = nil
+    _G.SonorusState.pendingHandshakeGeneration = -1
+
     _G.SonorusState.playerLoaded = true
     _G.SonorusState.playerLoadedAt = os.clock()
     print("[Sonorus] Player ready — playerLoaded = true\n")
@@ -222,6 +246,9 @@ function OnLoadingScreenFinished()
                 if _handshakePending then
                     print("[Sonorus] Handshake retry timeout — proceeding without handshake\n")
                     _handshakePending = false
+                    _G.SonorusState.playerNameConfirmed = false
+                    _G.SonorusState.pendingHandshakePlayerName = nil
+                    _G.SonorusState.pendingHandshakeGeneration = -1
                     _G.SonorusState.playerLoaded = true
                     _G.SonorusState.playerLoadedAt = os.clock()
                     RefreshWorld("handshake timeout fallback")
@@ -242,6 +269,10 @@ _G._LoadingScreenPollHandle = nil  -- track active poll so we don't stack them
 NotifyOnNewObject("/Script/Phoenix.Loadingcreen", function(Context)
     print("[Sonorus] Loading screen started")
     _G.SonorusState.playerLoaded = false
+    _G.SonorusState.playerNameConfirmed = false
+    _G.SonorusState.pendingHandshakePlayerName = nil
+    _G.SonorusState.pendingHandshakeGeneration = -1
+    _G.SonorusState.loadGeneration = (_G.SonorusState.loadGeneration or 0) + 1
     _G.SonorusState.hasLoadedOnce = true
     InvalidateWorld("loading screen started")
 

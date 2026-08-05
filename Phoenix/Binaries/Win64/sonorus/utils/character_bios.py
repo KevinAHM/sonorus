@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from . import player_context, player_profile_db
 from .settings import load_settings
 
 
@@ -43,8 +44,14 @@ def _lookup_character_text(mapping, npc_id=None, display_name=None) -> str:
     return ""
 
 
+def _is_player_identifier(value) -> bool:
+    return str(value or '').strip().lower() in ('player', 'playermale', 'playerfemale')
+
+
 def get_static_bio(npc_id=None, display_name=None, settings=None) -> str:
     """Get static bio text for a character by id or display name."""
+    if _is_player_identifier(npc_id) or _is_player_identifier(display_name):
+        return get_player_static_bio(player_name=display_name or npc_id)
     settings = settings or load_settings()
     mapping = settings.get('prompts', {}).get('static_bios', {})
     return _lookup_character_text(mapping, npc_id=npc_id, display_name=display_name)
@@ -52,26 +59,25 @@ def get_static_bio(npc_id=None, display_name=None, settings=None) -> str:
 
 def get_editor_guidance(npc_id=None, display_name=None, settings=None) -> str:
     """Get editor guidance text for a character by id or display name."""
+    if _is_player_identifier(npc_id) or _is_player_identifier(display_name):
+        return ""
     settings = settings or load_settings()
     mapping = settings.get('prompts', {}).get('editor_guidance', {})
     return _lookup_character_text(mapping, npc_id=npc_id, display_name=display_name)
 
 
 def get_player_static_bio(player_name: Optional[str] = None, settings=None) -> str:
-    """Get the static player bio, with legacy editor-guidance fallback for compatibility."""
-    settings = settings or load_settings()
-    prompts = settings.get('prompts', {})
-    static_bios = prompts.get('static_bios', {})
-    editor_guidance = prompts.get('editor_guidance', {})
-
-    if static_bios.get('Player'):
-        return static_bios.get('Player', '')
-    if player_name and static_bios.get(player_name):
-        return static_bios.get(player_name, '')
-    if editor_guidance.get('Player'):
-        return editor_guidance.get('Player', '')
-    if player_name and editor_guidance.get(player_name):
-        return editor_guidance.get(player_name, '')
+    """Get the static player bio from the active player's profile DB."""
+    if not player_context.is_ready():
+        return ''
+    if player_name:
+        current_player = player_context.get_current_player_name()
+        if current_player and player_context.normalize_player_name(player_name) != current_player:
+            return ''
+    try:
+        return player_profile_db.get_player_static_bio()
+    except Exception as exc:
+        print(f"[CharacterBios] Error reading player profile bio: {exc}")
     return ''
 
 

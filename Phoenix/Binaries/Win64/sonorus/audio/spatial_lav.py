@@ -134,11 +134,14 @@ class TTSStream:
         self.stream_complete = False
         self.playback_started = False
         self._total_fed = 0
+        self._total_pulled = 0
+        self._metrics_lock = threading.Lock()
 
     def feed(self, pcm_bytes):
         """Feed PCM data chunk."""
         if pcm_bytes:
-            self._total_fed += len(pcm_bytes)
+            with self._metrics_lock:
+                self._total_fed += len(pcm_bytes)
             # Split large chunks
             if len(pcm_bytes) > self.CHUNK_SIZE:
                 for i in range(0, len(pcm_bytes), self.CHUNK_SIZE):
@@ -161,6 +164,16 @@ class TTSStream:
 
     def clean_up(self):
         self.stream_complete = True
+
+    def mark_consumed(self, byte_count):
+        with self._metrics_lock:
+            self._total_pulled += max(0, int(byte_count))
+
+    def buffered_audio_seconds(self):
+        bytes_per_second = self.sample_rate * self.channels * (self.bits // 8)
+        with self._metrics_lock:
+            buffered = max(0, self._total_fed - self._total_pulled)
+        return buffered / bytes_per_second if bytes_per_second > 0 else 0.0
 
 
 def create_tts_stream(sample_rate=44100, channels=1):
@@ -680,6 +693,7 @@ class Audio3DPlayer:
                     chunk = tts_stream.buffer_queue.get(timeout=0.1)
                     if chunk is None:
                         break
+                    tts_stream.mark_consumed(len(chunk))
 
                     # Convert int16 PCM to float32 [-1, 1]
                     samples = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0

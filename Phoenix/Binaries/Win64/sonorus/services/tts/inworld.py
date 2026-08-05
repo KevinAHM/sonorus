@@ -20,8 +20,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from .base import BaseTTSProvider, VoiceCache
 from .voice_utils import parse_hashed_voice_name
 from .elevenlabs import update_voice_usage, get_lru_voice, remove_voice_usage
+from constants import EMOTE_TAG_ALIASES, EMOTE_TAGS
 from utils.text_utils import localize_audio_tags
-from .inworld_ws import InworldWebSocket, WS_AVAILABLE, WS_ENDPOINT
+from .inworld_ws import apply_generation_controls, InworldWebSocket, WS_AVAILABLE, WS_ENDPOINT
 
 # Canonical tags that Inworld TTS supports (audio tags produce audible sounds).
 INWORLD_AUDIO_TAGS = {'laugh', 'sigh', 'breathe', 'cough', 'clear_throat', 'yawn'}
@@ -37,14 +38,344 @@ _TAG_NORMALIZE = {
     'afraid': 'fearful',
 }
 
+# Natural-language TTS 2 steering instructions for every facial emote tag.
+# Facial animation may resolve aliases to a canonical preset, but Inworld keeps
+# each alias's more specific emotional direction.
+INWORLD_EMOTE_TAG_INSTRUCTIONS = {
+    # Positive and warm expressions
+    'happy': 'say happily',
+    'joy': 'say joyfully',
+    'happiness': 'say with happiness',
+    'delight': 'say with delight',
+    'joyful': 'say joyfully',
+    'joyous': 'say joyously',
+    'cheerful': 'say cheerfully',
+    'glad': 'say gladly',
+    'pleased': 'say with pleasure',
+    'delighted': 'say with delight',
+    'elated': 'say with elation',
+    'jubilant': 'say jubilantly',
+    'thrilled': 'say as if thrilled',
+    'ecstatic': 'say ecstatically',
+    'blissful': 'say blissfully',
+    'content': 'say contentedly',
+    'calm': 'say calmly',
+    'peaceful': 'say peacefully',
+    'serene': 'say serenely',
+    'satisfied': 'say with satisfaction',
+    'relaxed': 'say in a relaxed manner',
+    'tranquil': 'say with tranquility',
+    'comfortable': 'say comfortably',
+    'at-ease': 'say at ease',
+    'at ease': 'say at ease',
+    'contentment': 'say with contentment',
+    'tired': 'say wearily',
+    'exhausted': 'say as if exhausted',
+    'weary': 'say wearily',
+    'sleepy': 'say sleepily',
+    'drowsy': 'say drowsily',
+    'drained': 'say as if drained',
+    'fatigued': 'say as if fatigued',
+    'worn-out': 'say as if worn out',
+    'worn out': 'say as if worn out',
+    'exhaustion': 'say with exhaustion',
+    'fatigue': 'say with fatigue',
+    'fond': 'say warmly',
+    'affectionate': 'say affectionately',
+    'loving': 'say lovingly',
+    'tender': 'say tenderly',
+    'adoring': 'say adoringly',
+    'warm': 'say warmly',
+    'caring': 'say with care',
+    'romantic': 'say romantically',
+    'affection': 'say with affection',
+    'love': 'say with love',
+    'shy': 'say shyly',
+    'bashful': 'say bashfully',
+    'timid': 'say timidly',
+    'coy': 'say coyly',
+    'sheepish': 'say sheepishly',
+    'reserved': 'say in a reserved manner',
+    'shyness': 'say with shyness',
+    'beam': 'say brightly',
+    'radiant': 'say radiantly',
+    'beaming': 'say while beaming',
+    'glowing': 'say glowingly',
+    'grinning': 'say with a grin',
+    'excited': 'say excitedly',
+    'enthusiastic': 'say enthusiastically',
+    'exuberant': 'say exuberantly',
+    'excitement': 'say with excitement',
+    'proud': 'say proudly',
+    'triumphant': 'say triumphantly',
+    'accomplished': 'say with a sense of accomplishment',
+    'approving': 'say approvingly',
+    'impressed': 'say as if impressed',
+    'dignified': 'say with dignity',
+    'honored': 'say with honor',
+    'honoured': 'say with honour',
+    'pride': 'say with pride',
+
+    # Sadness, anger, and irritation
+    'sad': 'say sadly',
+    'unhappy': 'say unhappily',
+    'sorrowful': 'say sorrowfully',
+    'heartbroken': 'say as if heartbroken',
+    'dejected': 'say dejectedly',
+    'melancholy': 'say with melancholy',
+    'mournful': 'say mournfully',
+    'disappointed': 'say with disappointment',
+    'despondent': 'say despondently',
+    'gloomy': 'say gloomily',
+    'crestfallen': 'say as if crestfallen',
+    'hurt': 'say with hurt',
+    'sadness': 'say with sadness',
+    'sorrow': 'say with sorrow',
+    'grief': 'say with grief',
+    'angry': 'say angrily',
+    'furious': 'say furiously',
+    'enraged': 'say as if enraged',
+    'livid': 'say with livid anger',
+    'irate': 'say irately',
+    'incensed': 'say as if incensed',
+    'outraged': 'say with outrage',
+    'hostile': 'say with hostility',
+    'wrathful': 'say wrathfully',
+    'anger': 'say with anger',
+    'rage': 'say with rage',
+    'fury': 'say with fury',
+    'annoyed': 'say irritably',
+    'irritated': 'say with irritation',
+    'frustrated': 'say with frustration',
+    'exasperated': 'say with exasperation',
+    'impatient': 'say impatiently',
+    'bothered': 'say as if bothered',
+    'peeved': 'say as if peeved',
+    'grumpy': 'say grumpily',
+    'resentful': 'say resentfully',
+    'jealous': 'say jealously',
+    'jealousy': 'say with jealousy',
+    'envious': 'say enviously',
+    'envy': 'say with envy',
+    'annoyance': 'say with annoyance',
+    'irritation': 'say with irritation',
+    'frustration': 'say with frustration',
+
+    # Surprise, uncertainty, and aversion
+    'surprised': 'say with surprise',
+    'astonished': 'say with astonishment',
+    'amazed': 'say with amazement',
+    'startled': 'say as if startled',
+    'shocked': 'say with shock',
+    'stunned': 'say as if stunned',
+    'awestruck': 'say with awe',
+    'speechless': 'say as if speechless',
+    'surprise': 'say with surprise',
+    'shock': 'say with shock',
+    'astonishment': 'say with astonishment',
+    'confused': 'say with confusion',
+    'puzzled': 'say as if puzzled',
+    'bewildered': 'say with bewilderment',
+    'baffled': 'say as if baffled',
+    'uncertain': 'say with uncertainty',
+    'perplexed': 'say as if perplexed',
+    'disoriented': 'say with disorientation',
+    'lost': 'say as if lost',
+    'confusion': 'say with confusion',
+    'bewilderment': 'say with bewilderment',
+    'bemused': 'say with bemusement',
+    'cringe': 'say awkwardly',
+    'awkward': 'say awkwardly',
+    'uncomfortable': 'say with discomfort',
+    'wincing': 'say with a wince',
+    'secondhand-embarrassment': 'say with secondhand embarrassment',
+    'secondhand embarrassment': 'say with secondhand embarrassment',
+    'disgusted': 'say with disgust',
+    'repulsed': 'say with repulsion',
+    'revolted': 'say as if revolted',
+    'appalled': 'say as if appalled',
+    'nauseated': 'say as if nauseated',
+    'sickened': 'say as if sickened',
+    'disgust': 'say with disgust',
+    'revulsion': 'say with revulsion',
+    'skeptical': 'say skeptically',
+    'doubtful': 'say doubtfully',
+    'suspicious': 'say suspiciously',
+    'dubious': 'say dubiously',
+    'unconvinced': 'say as if unconvinced',
+    'incredulous': 'say incredulously',
+    'distrustful': 'say distrustfully',
+    'wary': 'say warily',
+    'skepticism': 'say with skepticism',
+    'scepticism': 'say with scepticism',
+    'suspicion': 'say with suspicion',
+    'doubt': 'say with doubt',
+
+    # Concern, compassion, and fear
+    'concerned': 'say with concern',
+    'worried': 'say worriedly',
+    'anxious': 'say anxiously',
+    'uneasy': 'say uneasily',
+    'troubled': 'say as if troubled',
+    'apprehensive': 'say apprehensively',
+    'cautious': 'say cautiously',
+    'solicitous': 'say solicitously',
+    'concern': 'say with concern',
+    'worry': 'say with worry',
+    'anxiety': 'say with anxiety',
+    'sympathy': 'say sympathetically',
+    'sympathetic': 'say sympathetically',
+    'compassionate': 'say compassionately',
+    'empathetic': 'say empathetically',
+    'pitying': 'say pityingly',
+    'consoling': 'say consolingly',
+    'comforting': 'say comfortingly',
+    'understanding': 'say with understanding',
+    'compassion': 'say with compassion',
+    'empathy': 'say with empathy',
+    'pity': 'say with pity',
+    'afraid': 'say fearfully',
+    'fearful': 'say fearfully',
+    'scared': 'say as if scared',
+    'frightened': 'say as if frightened',
+    'terrified': 'say as if terrified',
+    'horrified': 'say as if horrified',
+    'panicked': 'say in a panicked manner',
+    'alarmed': 'say with alarm',
+    'petrified': 'say as if petrified',
+    'nervous': 'say nervously',
+    'nervousness': 'say with nervousness',
+    'fear': 'say with fear',
+    'terror': 'say with terror',
+    'panic': 'say with panic',
+
+    # Social reactions and composure
+    'amused': 'say with amusement',
+    'entertained': 'say as if entertained',
+    'tickled': 'say as if tickled',
+    'laughing': 'say while laughing',
+    'chuckling': 'say while chuckling',
+    'humored': 'say as if humored',
+    'humoured': 'say as if humoured',
+    'amusement': 'say with amusement',
+    'embarrassed': 'say with embarrassment',
+    'abashed': 'say as if abashed',
+    'ashamed': 'say with shame',
+    'humiliated': 'say as if humiliated',
+    'mortified': 'say as if mortified',
+    'flustered': 'say in a flustered manner',
+    'guilty': 'say guiltily',
+    'self-conscious': 'say self-consciously',
+    'self conscious': 'say self-consciously',
+    'embarrassment': 'say with embarrassment',
+    'shame': 'say with shame',
+    'guilt': 'say with guilt',
+    'relieved': 'say with relief',
+    'reassured': 'say with reassurance',
+    'comforted': 'say as if comforted',
+    'unburdened': 'say as if unburdened',
+    'thankful': 'say thankfully',
+    'relief': 'say with relief',
+
+    # Attention, resolve, and playful superiority
+    'curious': 'say curiously',
+    'interested': 'say with interest',
+    'intrigued': 'say with intrigue',
+    'inquisitive': 'say inquisitively',
+    'attentive': 'say attentively',
+    'questioning': 'say questioningly',
+    'fascinated': 'say with fascination',
+    'curiosity': 'say with curiosity',
+    'interest': 'say with interest',
+    'intrigue': 'say with intrigue',
+    'determined': 'say with determination',
+    'resolute': 'say resolutely',
+    'focused': 'say with focus',
+    'serious': 'say seriously',
+    'defiant': 'say defiantly',
+    'steadfast': 'say steadfastly',
+    'intent': 'say with intent',
+    'committed': 'say with commitment',
+    'determination': 'say with determination',
+    'resolve': 'say with resolve',
+    'defiance': 'say with defiance',
+    'mischievous': 'say mischievously',
+    'playful': 'say playfully',
+    'cheeky': 'say cheekily',
+    'sly': 'say slyly',
+    'impish': 'say impishly',
+    'devious': 'say deviously',
+    'teasing': 'say teasingly',
+    'conspiratorial': 'say conspiratorially',
+    'flirtatious': 'say flirtatiously',
+    'mischief': 'say with mischief',
+    'playfulness': 'say with playfulness',
+    'smug': 'say smugly',
+    'contemptuous': 'say contemptuously',
+    'scornful': 'say scornfully',
+    'arrogant': 'say arrogantly',
+    'haughty': 'say haughtily',
+    'cocky': 'say cockily',
+    'self-satisfied': 'say with self-satisfaction',
+    'superior': 'say with superiority',
+    'condescending': 'say condescendingly',
+    'sardonic': 'say sardonically',
+    'self satisfied': 'say with self-satisfaction',
+    'arrogance': 'say with arrogance',
+    'superiority': 'say with superiority',
+}
+
 _BRACKET_TAG_RE = re.compile(r'\[([^\]]+)\]')
+HIGH_ENERGY_EMOTE_TAGS = frozenset({
+    'angry', 'beam', 'surprised', 'disgusted', 'afraid',
+    'fearful', 'horrified', 'panicked',
+})
 
 
-def _filter_inworld_tags(text: str) -> str:
-    """Strip unsupported bracket tags, normalize variants to base form.
+def _has_high_energy_emote(text: str) -> bool:
+    """Return whether text contains an emote that benefits from extra variation."""
+    return any(
+        match.group(1).lower().strip() in HIGH_ENERGY_EMOTE_TAGS
+        for match in _BRACKET_TAG_RE.finditer(text or '')
+    )
+
+
+def _apply_dynamic_delivery(params: dict, text: str) -> dict:
+    """Boost expressive tagged input without mutating the caller's parameters."""
+    if not params.get('dynamic_delivery') or not _has_high_energy_emote(text):
+        return params
+
+    params = params.copy()
+    if params['model_id'].startswith('inworld-tts-2'):
+        params['temperature'] = max(params['temperature'], 1.5)
+    else:
+        params['temperature'] = min(params['temperature'] + 0.3, 2.0)
+    print(f"[Inworld] Dynamic delivery boost for high-energy emote: {params['temperature']:.2f}")
+    return params
+
+
+def _clamp_speaking_rate(value: float) -> float:
+    """Clamp speaking rate to the range accepted by the Inworld API."""
+    return max(0.5, min(float(value), 1.5))
+
+
+def _filter_inworld_tags(text: str, model_id: str, emote_passthrough: bool = True) -> str:
+    """Rewrite facial emotes for TTS 2 and filter unsupported tags on 1.5.
+
+    TTS 2 receives natural-language steering instructions for facial emotes,
+    while supported non-verbal tags such as [laugh] and [sigh] pass through
+    unchanged. The 1.5 series only receives supported audio tags.
 
     [laughs] -> [laugh], [sighing] -> [sigh], [whisper] -> stripped, etc.
     """
+    if model_id.startswith('inworld-tts-2') and emote_passthrough:
+        def _rewrite_emote(m):
+            tag = m.group(1).lower().strip()
+            instruction = INWORLD_EMOTE_TAG_INSTRUCTIONS.get(tag)
+            return f'[{instruction}]' if instruction else m.group(0)
+
+        return _BRACKET_TAG_RE.sub(_rewrite_emote, text)
+
     allowed = INWORLD_AUDIO_TAGS
 
     def _replace(m):
@@ -116,9 +447,11 @@ def _get_inworld_config():
         "api_key": inworld_settings.get('api_key', ""),
         "language": language,
         "sample_rate": int(inworld_settings.get('sample_rate', 48000)),
-        "model": inworld_settings.get('model', 'inworld-tts-1.5-max'),
+        "model": inworld_settings.get('model', 'inworld-tts-2'),
         "temperature": float(inworld_settings.get('temperature', 1.1)),
-        "speed": float(tts_settings.get('speed', 1.0)),
+        "speaking_rate": _clamp_speaking_rate(
+            inworld_settings.get('speaking_rate', tts_settings.get('speed', 1.0))
+        ),
     }
 
 
@@ -799,10 +1132,10 @@ class InworldProvider(BaseTTSProvider):
         """Resolve common TTS parameters (model, temperature, speed, language)."""
         config = self.get_config()
         settings = load_settings()
-        default_model = config.get('model', 'inworld-tts-1.5-max')
+        default_model = config.get('model', 'inworld-tts-2')
         model_id = self.resolve_model_override(default_model, speaker_id)
         base_temperature = config.get('temperature', 1.1)
-        speaking_rate = config.get('speed', 1.0)
+        speaking_rate = _clamp_speaking_rate(config.get('speaking_rate', 1.0))
         language = config.get('language', 'EN_US')
 
         # Per-NPC temperature modifier
@@ -815,6 +1148,8 @@ class InworldProvider(BaseTTSProvider):
         # Audio tag localization
         inworld_settings = settings.get('tts', {}).get('inworld', {})
         localize_tags = inworld_settings.get('localize_audio_tags', True)
+        emote_passthrough = inworld_settings.get('emote_passthrough', True)
+        dynamic_delivery = inworld_settings.get('dynamic_delivery', True)
 
         temp_info = f"{temperature:.2f}" + (f" (base {base_temperature:.1f} + mod {temp_modifier:+.2f})" if temp_modifier != 0 else "")
         print(f"[Inworld] Model: {model_id}, Temp: {temp_info}, Speed: {speaking_rate}")
@@ -826,14 +1161,18 @@ class InworldProvider(BaseTTSProvider):
             'sample_rate': config.get('sample_rate', 48000),
             'language': language,
             'localize_tags': localize_tags,
+            'emote_passthrough': emote_passthrough,
+            'dynamic_delivery': dynamic_delivery,
             'api_url': config.get('api_url', 'https://api.inworld.ai').rstrip('/'),
         }
 
-    def _localize_text(self, text: str, language: str, localize_tags: bool) -> str:
+    def _localize_text(self, text: str, model_id: str, language: str,
+                       localize_tags: bool, emote_passthrough: bool = True) -> str:
         """Filter unsupported tags, then localize audio tags for non-English."""
-        # Strip any bracket tags Inworld doesn't support
-        text = _filter_inworld_tags(text)
-        if localize_tags and not language.startswith('EN'):
+        text = _filter_inworld_tags(text, model_id, emote_passthrough)
+        # TTS 2 steering instructions must remain in English regardless of the
+        # spoken language. Legacy models retain their optional tag localization.
+        if not model_id.startswith('inworld-tts-2') and localize_tags and not language.startswith('EN'):
             original = text
             text = localize_audio_tags(text, language)
             if text != original:
@@ -858,7 +1197,11 @@ class InworldProvider(BaseTTSProvider):
         """
         self._record_synthesis_error("")
         params = self._resolve_tts_params(speaker_id)
-        text = self._localize_text(text, params['language'], params['localize_tags'])
+        params = _apply_dynamic_delivery(params, text)
+        text = self._localize_text(
+            text, params['model_id'], params['language'],
+            params['localize_tags'], params['emote_passthrough'],
+        )
 
         # Route through WebSocket if connected (reconnect if disconnected)
         if not self.ws_connected:
@@ -910,6 +1253,8 @@ class InworldProvider(BaseTTSProvider):
         if first_item is None:
             return False
         has_multi_voice = isinstance(first_item, tuple)
+        first_text = first_item[0] if has_multi_voice else first_item
+        params = _apply_dynamic_delivery(params, first_text)
 
         import itertools
         # Reconstruct full iterator with the peeked item put back
@@ -921,11 +1266,17 @@ class InworldProvider(BaseTTSProvider):
                 if isinstance(item, tuple):
                     text, per_vid = item
                     if text and text.strip():
-                        loc = self._localize_text(text.strip(), params['language'], params['localize_tags'])
+                        loc = self._localize_text(
+                            text.strip(), params['model_id'], params['language'],
+                            params['localize_tags'], params['emote_passthrough'],
+                        )
                         yield (loc, per_vid)
                 else:
                     if item and item.strip():
-                        yield self._localize_text(item.strip(), params['language'], params['localize_tags'])
+                        yield self._localize_text(
+                            item.strip(), params['model_id'], params['language'],
+                            params['localize_tags'], params['emote_passthrough'],
+                        )
 
         # Try to reconnect WebSocket if disconnected
         if not self.ws_connected:
@@ -1064,9 +1415,9 @@ class InworldProvider(BaseTTSProvider):
                 "sampleRateHertz": params['sample_rate'],
                 "speakingRate": params['speaking_rate'],
             },
-            "temperature": params['temperature'],
             "timestampType": "WORD",
         }
+        apply_generation_controls(payload, params['model_id'], params['temperature'])
 
         headers = {
             "Authorization": _get_auth_header(),

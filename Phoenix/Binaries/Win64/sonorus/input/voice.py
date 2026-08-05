@@ -19,10 +19,15 @@ import time
 import ctypes
 import os
 import queue
+from collections import deque
 from typing import Optional, Literal, Callable
 from pynput import keyboard, mouse
 import sounddevice as sd
 import numpy as np
+
+
+_AUDIO_QUEUE_MAX_CHUNKS = 64
+_AUDIO_STATUS_LOG_INTERVAL = 1.0
 
 # Lua socket instance (set by server.py)
 _lua_socket = None
@@ -342,9 +347,14 @@ class STTCapture:
         self._turn_check_pending = False  # True when silence detected, reset on speech or turn complete
         self._last_turn_check_time = 0  # Timestamp of last turn detection check
         self._pre_speech_samples = 16000  # 1 second at 16kHz
-        # Audio queue for VAD processing (separate from real-time callback)
-        self._audio_queue: Optional[list] = None
-        self._audio_queue_lock = threading.Lock()
+        # Bounded audio queue for VAD processing (separate from real-time callback)
+        self._audio_queue: Optional[deque] = None
+        self._audio_status = None
+        self._audio_status_count = 0
+        self._audio_status_reported = 0
+        self._audio_queue_drop_count = 0
+        self._audio_queue_drops_reported = 0
+        self._audio_status_last_log = 0.0
 
         # Listeners
         self.keyboard_listener = None
@@ -496,7 +506,8 @@ class STTCapture:
             # Don't call warm_up() here: it blocks and we may be inside self._lock.
             return
 
-        self._spell_queue = queue.Queue()
+        # Prevent inference slowdowns from growing this queue without bound.
+        self._spell_queue = queue.Queue(maxsize=_AUDIO_QUEUE_MAX_CHUNKS)
         self._spell_stop = threading.Event()
         self._spell_detected = False
         self._spell_detect_time = 0.0
@@ -611,6 +622,39 @@ class STTCapture:
 
     # ==================== PTT Mode Methods ====================
 
+    def _reset_audio_diagnostics(self):
+        """Reset counters written by the real-time audio callback."""
+        self._audio_status = None
+        self._audio_status_count = 0
+        self._audio_status_reported = 0
+        self._audio_queue_drop_count = 0
+        self._audio_queue_drops_reported = 0
+        self._audio_status_last_log = 0.0
+
+    def _report_audio_diagnostics(self, force: bool = False):
+        """Report callback problems from a normal worker thread."""
+        status_count = self._audio_status_count
+        queue_drop_count = self._audio_queue_drop_count
+        pending_statuses = status_count - self._audio_status_reported
+        pending_drops = queue_drop_count - self._audio_queue_drops_reported
+        if pending_statuses <= 0 and pending_drops <= 0:
+            return
+
+        now = time.monotonic()
+        if not force and now - self._audio_status_last_log < _AUDIO_STATUS_LOG_INTERVAL:
+            return
+
+        details = []
+        if pending_statuses > 0:
+            details.append(f"{self._audio_status} ({pending_statuses} callbacks)")
+        if pending_drops > 0:
+            details.append(f"dropped {pending_drops} stale VAD chunks")
+        print(f"[STT] Audio input warning: {'; '.join(details)}")
+
+        self._audio_status_reported = status_count
+        self._audio_queue_drops_reported = queue_drop_count
+        self._audio_status_last_log = now
+
     def _start_recording(self):
         """Begin audio capture (PTT mode)."""
         t0 = time.time()
@@ -620,6 +664,7 @@ class STTCapture:
 
             self.recording = True
             self.audio_buffer = []
+            self._reset_audio_diagnostics()
 
             from utils.settings import load_settings
             settings = load_settings()
@@ -633,13 +678,15 @@ class STTCapture:
 
             def audio_callback(indata, frames, time_info, status):
                 if status:
-                    print(f"[STT] Audio status: {status}")
+                    self._audio_status = status
+                    self._audio_status_count += 1
                 if self.recording:
-                    self.audio_buffer.append(indata.copy())
+                    audio_copy = indata.copy()
+                    self.audio_buffer.append(audio_copy)
                     # Feed spell detection queue (non-blocking)
                     if spell_q is not None:
                         try:
-                            spell_q.put_nowait(indata.flatten().copy())
+                            spell_q.put_nowait(audio_copy.reshape(-1))
                         except queue.Full:
                             pass
 
@@ -650,7 +697,7 @@ class STTCapture:
                     dtype='int16',
                     callback=audio_callback,
                     blocksize=512,
-                    latency='low'
+                    latency='high'
                 )
                 self._stream.start()
 
@@ -716,6 +763,8 @@ class STTCapture:
                     pass
                 self._stream = None
 
+            self._report_audio_diagnostics(force=True)
+
             self.audio_buffer = []
 
             # Notify Lua to release preview lock
@@ -744,6 +793,8 @@ class STTCapture:
                 except:
                     pass
                 self._stream = None
+
+            self._report_audio_diagnostics(force=True)
 
             _play_sound(_SOUND_OFF)
 
@@ -1000,20 +1051,26 @@ class STTCapture:
         sample_rate = self._current_sample_rate
         chunk_size = self._vad_processor.chunk_size
 
-        # Initialize audio queue
-        self._audio_queue = []
+        # Keep at most two seconds of 32ms chunks. deque(maxlen=...) drops the
+        # oldest audio without blocking the real-time callback if VAD falls behind.
+        self._audio_queue = deque(maxlen=_AUDIO_QUEUE_MAX_CHUNKS)
+        self._reset_audio_diagnostics()
+        audio_queue = self._audio_queue
 
         # Capture spell queue reference for closure
         spell_q = self._spell_queue
 
         def audio_callback(indata, frames, time_info, status):
             if status:
-                print(f"[STT] Audio status: {status}")
+                self._audio_status = status
+                self._audio_status_count += 1
 
-            # Fast path: just copy audio to queue, process VAD in main loop
-            audio_copy = indata.flatten().copy()
-            with self._audio_queue_lock:
-                self._audio_queue.append(audio_copy)
+            # Fast path: one copy and a non-blocking bounded append. VAD and all
+            # diagnostics run in the worker loop, never on PortAudio's callback.
+            audio_copy = indata[:, 0].copy()
+            if len(audio_queue) == audio_queue.maxlen:
+                self._audio_queue_drop_count += 1
+            audio_queue.append(audio_copy)
 
             # Feed spell detection queue (non-blocking)
             if spell_q is not None:
@@ -1039,7 +1096,7 @@ class STTCapture:
                     dtype='int16',
                     callback=audio_callback,
                     blocksize=chunk_size,
-                    latency='low'
+                    latency='high'
                 )
                 self._stream.start()
             except Exception as e:
@@ -1058,18 +1115,20 @@ class STTCapture:
             try:
                 # Main loop: process audio queue and run VAD
                 while self._open_mic_active and not self._open_mic_stop_event.is_set():
-                    # Get pending audio chunks
-                    with self._audio_queue_lock:
-                        chunks_to_process = self._audio_queue
-                        self._audio_queue = []
-
-                    # Process each chunk through ring buffer and VAD
-                    for chunk in chunks_to_process:
+                    # Atomic deque operations let the callback append while this
+                    # worker drains without making the real-time thread wait.
+                    while audio_queue:
+                        try:
+                            chunk = audio_queue.popleft()
+                        except IndexError:
+                            break
                         # Write to ring buffer
                         self._ring_buffer.write(chunk)
                         # Process VAD
                         if self._open_mic_active:
                             self._process_vad_chunk(chunk)
+
+                    self._report_audio_diagnostics()
 
                     # Check guards periodically
                     with self._open_mic_lock:
@@ -1145,6 +1204,7 @@ class STTCapture:
                 print(f"[STT] Reconnecting stream in {retry_delay}s... ({max_retries} retries left)")
                 self._open_mic_stop_event.wait(retry_delay)
             finally:
+                self._report_audio_diagnostics(force=True)
                 if self._stream:
                     try:
                         self._stream.stop()

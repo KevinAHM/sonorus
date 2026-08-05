@@ -36,6 +36,11 @@ from .text_utils import (
     extract_director_prefix,
 )
 
+from .narration import (
+    normalize_narration_response,
+    strip_narration_segments,
+)
+
 from .localization import (
     get_localization_path,
     get_subtitles_path,

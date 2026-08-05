@@ -8,6 +8,7 @@ import re
 
 from .settings import GEMINI_CHAT_DEFAULT_OR, load_settings
 from .llm_logging import log_llm, LOGS_DIR
+from .text_utils import ellipsis_starts_new_sentence
 
 # Import llm module from parent directory
 import llm
@@ -410,6 +411,16 @@ def _try_split_sentence(buffer):
             continue
 
         # For '.', check if it's an abbreviation
+        if punct_pos >= 2 and buffer[punct_pos - 2:punct_pos + 1] == '...':
+            ellipsis_boundary = ellipsis_starts_new_sentence(buffer, punct_pos + 1)
+            if ellipsis_boundary is None:
+                # Streaming may have ended this chunk at the ellipsis. Wait for
+                # enough lookahead to distinguish a boundary from a pause.
+                return None, None
+            if not ellipsis_boundary:
+                pos = match.end()
+                continue
+
         # Extract the word before the period
         before = buffer[:punct_pos]
         word_match = re.search(r'(\w+)$', before)

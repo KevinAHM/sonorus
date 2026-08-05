@@ -171,6 +171,12 @@ The user message contains the screenshot image and per-capture context: location
 
 **Location accuracy:** Use the location name provided in the context EXACTLY. Do not add "classroom", "corridor", or other qualifiers unless you can clearly see that specific room type. "Defence Against the Dark Arts Tower" is the tower area, not necessarily the classroom. Describe what you SEE, not what you assume the space is.
 
+**CRITICAL - Floo Flame Identification:**
+- In Hogwarts Legacy, a woman's stone bust, head, or face mounted on or above a small stone arch, alcove, shrine, or wall fixture, together with a bright green hovering light, orb, flame, fire symbol, or "F"-shaped symbol, IS a Floo Flame fast-travel location.
+- The green marker may look like a glowing orb or generic interaction light rather than literal fire, and the stone fixture may resemble an arched doorway. Use the combined visual pattern to identify it as a Floo Flame instead of hedging.
+- Name it explicitly as a Floo Flame and identify the woman's likeness as Ignatia Wildsmith when visible. Never describe this combination only as an entrance, archway, generic magical orb, or interactive element. Example: "A Floo Flame fast-travel point glows green beneath Ignatia Wildsmith's stone bust."
+- The Floo marker may be used for identification despite the general instruction to omit UI. Do not mention unrelated interface elements or input prompts.
+
 **Environment & Objects** (ESSENTIAL - be specific and descriptive):
 - **Magical elements FIRST** (this is a magical world - these are the most eye-catching): floating/enchanted objects, self-playing instruments, moving portraits, ghosts, magical creatures, spell effects, enchanted ceiling/sky, Floo Flames, flying books, animated suits of armor, glowing runes, candles floating without holders, stairs that move. If something supernatural is happening (e.g. violins playing themselves mid-air), it MUST be described prominently.
 - Spatial scale and overall layout
@@ -849,7 +855,7 @@ class VisionAgent:
 
     def _call_vision_llm(self, image_b64, user_context, llm_settings, perspective):
         """Call vision LLM with streaming, updating _partial_description as chunks arrive."""
-        model = llm_settings.get('model', 'google/gemini-2.5-flash-lite:nitro')
+        model = llm_settings.get('model', 'google/gemini-3.1-flash-lite')
         temperature = llm_settings.get('temperature', 0.7)
         max_tokens = llm_settings.get('max_tokens', 500)
 

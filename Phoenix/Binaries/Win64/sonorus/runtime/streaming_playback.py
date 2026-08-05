@@ -8,6 +8,12 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, Iterator, Optional
 
+from utils.narration import (
+    StreamingNarrationParser,
+    normalize_narration_response,
+    parse_segments,
+)
+
 
 def iter_completed_response_sentences(
     response_text: str,
@@ -21,9 +27,8 @@ def iter_completed_response_sentences(
     stream_start = time.time()
 
     if narration_enabled:
-        from utils.narration import parse_segments
-
-        for seg in parse_segments(response_text or ""):
+        normalized = normalize_narration_response(response_text or "")
+        for seg in parse_segments(normalized):
             seg_text = (seg.text or "").strip()
             if not seg_text:
                 continue
@@ -73,7 +78,37 @@ def build_live_sentence_stream(
     from utils.llm_utils import strip_response_metadata
 
     sent_count = 0
+    accepted_parts = []
     stream_start = time.time()
+    narration_parser = (
+        StreamingNarrationParser()
+        if narration_enabled
+        else None
+    )
+
+    def emit_narration_segments(segments):
+        nonlocal sent_count
+        for seg in segments:
+            seg_text = (seg.text or "").strip()
+            if not seg_text:
+                continue
+            sub_chunks = _split_sentences_safe(seg_text) or [seg_text]
+            for text in sub_chunks:
+                text = (text or "").strip()
+                if not text:
+                    continue
+                sent_count += 1
+                tag = " [narration]" if seg.is_narration else ""
+                elapsed = (time.time() - stream_start) * 1000
+                print(
+                    f'{log_prefix} Sentence #{sent_count} at '
+                    f'{elapsed:.0f}ms{tag}: "{text}"'
+                )
+                accepted_parts.append(
+                    f"*{text}*" if seg.is_narration else f'"{text}"'
+                )
+                full_text_holder["text"] = " ".join(accepted_parts)
+                yield (text, seg.is_narration)
 
     # Choose sentence source based on arguments
     if messages is not None:
@@ -96,30 +131,17 @@ def build_live_sentence_stream(
     try:
         for sentence, accumulated, _is_final in sentence_source:
             full_text_holder["raw"] = accumulated
-            full_text_holder["text"] = strip_response_metadata(strip_action_tag_func(accumulated))
+            if not narration_enabled:
+                full_text_holder["text"] = strip_response_metadata(
+                    strip_action_tag_func(accumulated)
+                )
 
             clean = strip_response_metadata(strip_action_tag_func(sentence))
             if not clean:
                 continue
 
             if narration_enabled:
-                from utils.narration import parse_segments
-
-                segments = parse_segments(clean)
-                for seg in segments:
-                    seg_text = seg.text.strip()
-                    if not seg_text:
-                        continue
-                    sub_chunks = _split_sentences_safe(seg_text) or [seg_text]
-                    for text in sub_chunks:
-                        text = text.strip()
-                        if not text:
-                            continue
-                        sent_count += 1
-                        tag = " [narration]" if seg.is_narration else ""
-                        elapsed = (time.time() - stream_start) * 1000
-                        print(f'{log_prefix} Sentence #{sent_count} at {elapsed:.0f}ms{tag}: "{text}"')
-                        yield (text, seg.is_narration)
+                yield from emit_narration_segments(narration_parser.parse(clean))
             else:
                 sub_chunks = _split_sentences_safe(clean) or [clean]
                 for chunk in sub_chunks:
@@ -130,6 +152,9 @@ def build_live_sentence_stream(
                     elapsed = (time.time() - stream_start) * 1000
                     print(f'{log_prefix} Sentence #{sent_count} at {elapsed:.0f}ms: "{chunk}"')
                     yield chunk
+
+        if narration_parser is not None:
+            yield from emit_narration_segments(narration_parser.finish())
     finally:
         elapsed = (time.time() - stream_start) * 1000
         print(f"{log_prefix} Generator exhausted ({sent_count} sentences) at {elapsed:.0f}ms")

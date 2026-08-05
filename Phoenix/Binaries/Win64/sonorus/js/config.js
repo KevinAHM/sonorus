@@ -30,14 +30,15 @@ const TTS_PROVIDERS = {
     },
     inworld: {
         label: "\ud83c\udfc6 Inworld AI (Recommended)",
-        description: `New to Inworld? <a href="https://inworld.ai/signup" target="_blank">Sign up</a> to get $2 free credit (~40 minutes of audio)! Then <a href="https://platform.inworld.ai" target="_blank">get your API key</a> from the Inworld Platform.<br>
+        description: `New to Inworld? <a href="https://inworld.ai/signup?ref=7HQNN63N" target="_blank">Sign up with our link</a> to get $2 free credit (~40 minutes of audio) and $10 credit if you subscribe to a plan! Then <a href="https://platform.inworld.ai" target="_blank">get your API key</a> from the Inworld Platform.<br>
                     <b>\u26a0\ufe0f You must select "Write" access when creating your key (not "Read")</b>.<br>
                     \ud83d\udca1 Pay-as-you-go (free) supports up to 100 total voice clones. When the limit is reached, the oldest unused clone is automatically deleted to make room.`,
         fields: [
             { id: "api_url", type: "text", label: "API URL", placeholder: "https://api.inworld.ai", default: "https://api.inworld.ai", hint: "Base URL for the Inworld API (leave default unless using a proxy)", simple_hide: true },
             { id: "api_key", type: "password", label: "API Key", placeholder: "Base64 encoded key", hint: "Use Basic (Base64) key, not JWT — <strong>\u26a0\ufe0f select \"Write\" access when creating (not \"Read\")</strong>", validate: validateInworldApiKey },
-            { id: "model", type: "text", label: "TTS Model", placeholder: "inworld-tts-1.5-max", default: "inworld-tts-1.5-max", hint: "<strong>inworld-tts-1.5-max</strong> (highest quality, recommended), <strong>inworld-tts-1.5-mini</strong> (cheaper and slightly faster)", onChange: "onInworldModelChange" },
-            { id: "temperature", type: "range", label: "TTS Temperature", hint: "Higher = more expressive but can cause instability/artifacts. Default is tuned for balance. For per-NPC adjustments, use <a href=\"#chapterCharacters\" onclick=\"scrollToSection('chapterCharacters')\">Characters</a>.", min: 0.1, max: 2.0, step: 0.1, default: 1.1, simple_hide: true },
+            { id: "model", type: "text", label: "TTS Model", placeholder: "inworld-tts-2", default: "inworld-tts-2", hint: "<strong>inworld-tts-2</strong>&nbsp; (most expressive, highest quality, recommended), <strong>inworld-tts-1.5-mini</strong>&nbsp; (cheaper)", onChange: "onInworldModelChange" },
+            { id: "temperature", type: "range", label: "TTS Expression", hint: "For Inworld TTS 2: 0.1–0.5 = Stable, 0.6–1.4 = Balanced, and 1.5–2.0 = Creative. Earlier models use this value as temperature. For per-NPC adjustments, use <a href=\"#chapterCharacters\" onclick=\"scrollToSection('chapterCharacters')\">Characters</a>.", min: 0.1, max: 2.0, step: 0.1, default: 1.1, simple_hide: true },
+            { id: "speaking_rate", type: "range", label: "Speaking Rate", hint: "Adjust Inworld speech speed. Use 1.05× to closely match the speaking rate of Inworld TTS 1.5 Max when using TTS 2.", min: 0.9, max: 1.1, step: 0.005, default: 1.0, display_suffix: "×", simple_hide: true },
             {
                 id: "sample_rate", type: "select", label: "Sample Rate", options: [
                     { value: 22050, label: "22050 Hz" },
@@ -46,7 +47,9 @@ const TTS_PROVIDERS = {
                     { value: 48000, label: "48000 Hz" }
                 ], default: 48000, simple_hide: true
             },
-            { id: "localize_audio_tags", type: "toggle", label: "Localize Audio Tags", hint: "Translate [sigh], [laugh] etc. to language-specific equivalents for non-English languages. Disable if tags aren't being spoken correctly.", default: true, simple_hide: true }
+            { id: "localize_audio_tags", type: "toggle", label: "Localize Audio Tags", hint: "Translate [sigh], [laugh] etc. to language-specific equivalents for non-English languages. Disable if tags aren't being spoken correctly.", default: true, simple_hide: true },
+            { id: "emote_passthrough", type: "toggle", label: "Emote Passthrough", hint: "Inworld TTS 2 only. Pass emotion tags such as [angry] and [amused] to TTS for expressive delivery. Turn off to use tags only for facial animation.", default: true, simple_hide: true },
+            { id: "dynamic_delivery", type: "toggle", label: "Dynamic Delivery", hint: "Automatically use Creative delivery for high-energy emotion tags. With Inworld 1.5 models, expressive lines receive a +0.3 temperature boost instead.", default: true, simple_hide: true }
         ]
     },
     elevenlabs: {
@@ -85,14 +88,34 @@ const TTS_PROVIDERS = {
             { id: "streaming", type: "toggle", label: "Streaming Mode", hint: "Disable if you experience audio hitching or game lag during speech", default: true }
         ]
     },
-    omnivoice: {
-        label: "\ud83d\udcaa OmniVoice (Free, Local)",
-        description: "\ud83d\udca1 If voice generation feels slow, try lowering your in-game graphics settings to free up GPU headroom for the TTS model.",
+    omnivoice_cpp: {
+        label: "\ud83d\udcaa OmniVoice (Free, Local, Vulkan)",
+        description: "Recommended. Compact Q8 build with faster startup and lower disk and memory usage. Runs through Vulkan on NVIDIA, AMD, and Intel GPUs.",
         fields: [
             { id: "first_sentence_steps", type: "range", label: "First Sentence Steps", hint: "Fewer steps on the first sentence for faster time-to-first-audio.", min: 8, max: 64, step: 4, default: 24 },
             { id: "num_steps", type: "range", label: "Default Steps", hint: "More steps = higher quality but slower. 32 is recommended.", min: 8, max: 64, step: 4, default: 32 },
             { id: "guidance_scale", type: "range", label: "Style Guidance (CFG)", hint: "Controls how closely the model follows its style conditioning. Higher = more expressive but less stable.", min: 0.0, max: 10.0, step: 0.1, default: 2.0 },
             { id: "apply_smoothing_eq", type: "toggle", label: "Apply Smoothing EQ", default: true }
+        ]
+    },
+    omnivoice: {
+        label: "\ud83d\udd37 OmniVoice FP16 (Free, Local, NVIDIA / CUDA)",
+        description: "Full-precision PyTorch build for NVIDIA graphics cards only. Larger installation, higher resource usage, and slower generation.",
+        fields: [
+            { id: "first_sentence_steps", type: "range", label: "First Sentence Steps", hint: "Fewer steps on the first sentence for faster time-to-first-audio.", min: 8, max: 64, step: 4, default: 16 },
+            { id: "num_steps", type: "range", label: "Default Steps", hint: "More steps = higher quality but slower. 32 is recommended.", min: 8, max: 64, step: 4, default: 32 },
+            { id: "guidance_scale", type: "range", label: "Style Guidance (CFG)", hint: "Controls how closely the model follows its style conditioning. Higher = more expressive but less stable.", min: 0.0, max: 10.0, step: 0.1, default: 2.0 },
+            { id: "prefix_kv_cache_enabled", type: "toggle", label: "Prefix KV Cache Optimization", hint: "Recommended. Reuses the conditioning prefix across generation steps for much faster speech. Disable to recompute full bidirectional attention each step; this may improve quality but is significantly slower.", default: true },
+            { id: "prefix_kv_cache_first_sentence_only", type: "toggle", label: "First Sentence Only", hint: "Use the prefix KV cache for the first sentence, then use full bidirectional attention for later sentences.", default: false, parent: "prefix_kv_cache_enabled" },
+            { id: "apply_smoothing_eq", type: "toggle", label: "Apply Smoothing EQ", default: true }
+        ]
+    },
+    universal: {
+        label: "\ud83c\udf10 Universal Speech Server (Free, Local, CUDA / Vulkan)",
+        description: "Connect to a CrispASR-backed speech server. Model controls appear only after authenticated capability discovery.",
+        fields: [
+            { id: "silence_min_ms", type: "range", label: "Minimum Sentence Pause", hint: "Minimum server-inserted pause between sentences, in milliseconds.", min: 0, max: 2000, step: 50, default: 250, simple_hide: true },
+            { id: "silence_max_ms", type: "range", label: "Maximum Sentence Pause", hint: "Maximum server-inserted pause between sentences, in milliseconds.", min: 0, max: 3000, step: 50, default: 1000, simple_hide: true }
         ]
     }
 };
@@ -100,16 +123,20 @@ const TTS_PROVIDERS = {
 const LLM_PROVIDER_FEATURE_GATES = [
     { id: "disable_input_correction", feature: "input_correction", label: "Disable Input Correction", hint: "Blocks the input correction agent for this provider without changing the saved Input Correction setting." },
     { id: "disable_vision", feature: "vision", label: "Disable Vision", hint: "Blocks vision capture/scene description calls for this provider without changing the saved Vision Agent setting." },
-    { id: "disable_owl_post", feature: "owl_post", label: "Disable Owl Post", hint: "Blocks Owl Post generation for this provider without changing the saved Owl Post setting." }
+    { id: "disable_owl_post", feature: "owl_post", label: "Disable Owl Post", hint: "Blocks Owl Post generation for this provider without changing the saved Owl Post setting." },
+    { id: "disable_memory", feature: "memory", label: "Disable Long-Term Memory", hint: "Blocks long-term memory for this provider without changing the saved Long-Term Memory setting." }
 ];
 
-function llmFeatureGateGroup(defaultDisabled) {
+function llmFeatureGateGroup(defaultDisabled, defaultOverrides = {}, featureFilter = null) {
+    const gates = featureFilter
+        ? LLM_PROVIDER_FEATURE_GATES.filter(gate => featureFilter.includes(gate.feature))
+        : LLM_PROVIDER_FEATURE_GATES;
     return {
         id: "feature_gates",
         type: "toggle_group",
         label: "Provider Feature Disables",
         hint: "Use these when a provider should handle core chat, but not auxiliary LLM-heavy features. Saved feature settings stay unchanged.",
-        fields: LLM_PROVIDER_FEATURE_GATES.map(gate => ({ ...gate, default: defaultDisabled }))
+        fields: gates.map(gate => ({ ...gate, default: defaultOverrides[gate.id] ?? defaultDisabled }))
     };
 }
 
@@ -117,20 +144,23 @@ const LLM_PROVIDERS = {
     gemini: {
         label: "Google Gemini (Limited Free)",
         fields: [
-            { id: "reasoning_enabled", type: "toggle", label: "Enable Reasoning", hint: "Master switch for extended thinking. Enable per-model toggles below.", default: true }
+            { id: "reasoning_enabled", type: "toggle", label: "Enable Reasoning", hint: "Master switch for extended thinking. Enable per-model toggles below.", default: true },
+            llmFeatureGateGroup(false, { disable_memory: true }, ['memory'])
         ]
     },
     openrouter: {
         label: "OpenRouter",
         fields: [
-            { id: "reasoning_enabled", type: "toggle", label: "Enable Reasoning", hint: "Master switch for extended thinking. Enable per-model toggles below.", default: true }
+            { id: "reasoning_enabled", type: "toggle", label: "Enable Reasoning", hint: "Master switch for extended thinking. Enable per-model toggles below.", default: true },
+            { id: "allow_provider_fallbacks", type: "toggle", label: "Allow Provider Fallbacks", hint: "When model provider routing is configured, allow OpenRouter to use providers outside your list if none match. Disable for more deterministic routing and fewer pricing surprises, but calls may error when no listed provider is available.", default: true, simple_hide: true },
+            llmFeatureGateGroup(false, {}, ['memory'])
         ]
     },
     openai: {
         label: "OpenAI",
         fields: [
             { id: "api_url", type: "text", label: "API URL (Optional)", placeholder: "https://api.openai.com/v1", hint: "Leave empty to use default OpenAI endpoint", onChange: "onOpenAIUrlChange" },
-            { id: "responses_api", type: "toggle", label: "Use Responses API", hint: "Enable for endpoints that support the Responses API. Required for reasoning.", default: false },
+            { id: "responses_api", type: "toggle", label: "Use Responses API", hint: "Enable for endpoints that support the Responses API. Required for reasoning.", default: true },
             { id: "reasoning_enabled", type: "toggle", label: "Enable Reasoning", hint: "Master switch for extended thinking. Enable per-model toggles below.", default: true },
             llmFeatureGateGroup(false)
         ]
@@ -146,9 +176,8 @@ const LLM_PROVIDERS = {
         label: "llama.cpp",
         fields: [
             { id: "api_url", type: "text", label: "API URL", placeholder: "http://127.0.0.1:8080/v1", hint: "Local or remote llama.cpp OpenAI-compatible server URL. /v1 is added automatically if omitted." },
-            { id: "kv_cache_enabled", type: "toggle", label: "Enable Slot KV Cache", hint: "Save and restore llama.cpp slot 0 for cacheable prompts. Slot wiring is applied by the llama.cpp provider.", default: true },
-            { id: "kv_cache_max_entries", type: "range", label: "Max KV Cache Entries", hint: "Number of saved slot snapshots to retain once slot caching is wired.", min: 1, max: 25, step: 1, default: 10 },
-            { id: "kv_cache_slot_save_path", type: "text", label: "Slot Save Path (Optional)", placeholder: "C:\\llama-cache", hint: "For local cleanup only. Must match llama-server --slot-save-path if you want Sonorus to delete evicted .bin files." },
+            { id: "kv_cache_enabled", type: "toggle", label: "Enable Slot KV Cache", hint: "Save and restore llama.cpp slot 0 for cacheable prompts. Requires llama-server to be started with <strong>--slot-save-path</strong>. This is most useful when the server has less than 32 GB of RAM available for KV cache; with sufficient RAM, <strong>--cache-ram 16384</strong> or higher can be used instead.", default: true },
+            { id: "kv_cache_max_entries", type: "range", label: "Max KV Cache Entries", hint: "Number of reusable server-side slot snapshots to retain.", min: 1, max: 25, step: 1, default: 10 },
             llmFeatureGateGroup(true)
         ]
     }
@@ -404,6 +433,11 @@ const STT_PROVIDERS = {
         description: `A lighter-weight alternative to Parakeet. Local speech recognition using Moonshine Base. No API key needed &mdash; runs entirely on your machine. English only. Requires ~250 MB of available RAM. Model is downloaded on first use.`,
         fields: []
     },
+    universal: {
+        label: "Universal Speech Server (Free, Local, CUDA / Vulkan)",
+        description: "Use a speech-recognition model hosted by the shared Universal Speech Server.",
+        fields: []
+    },
     deepgram: {
         label: "Deepgram (Best)",
         description: `<a href="https://console.deepgram.com" target="_blank">Get your API key</a> from the Deepgram Console.<br>
@@ -443,7 +477,7 @@ const AGENT_CONFIGS = {
         ],
         llm: {
             fields: [
-                { id: "model", type: "text", label: "Vision Model", hint: "Use a fast model for quick scene descriptions.", placeholder: "gemini-2.5-flash-lite", default: "gemini-2.5-flash-lite" },
+                { id: "model", type: "text", label: "Vision Model", hint: "Use a fast model for quick scene descriptions.", placeholder: "gemini-3.1-flash-lite", default: "gemini-3.1-flash-lite" },
                 { id: "temperature", type: "range", label: "Temperature", min: 0, max: 2, step: 0.1, default: 0.7, simple_hide: true },
                 { id: "max_tokens", type: "range", label: "Max Tokens", hint: "High default accounts for reasoning budgets. Reduce if errors occur.", min: 128, max: 16384, step: 128, default: 8192, simple_hide: true }
             ]
@@ -460,7 +494,11 @@ function renderField(field, category, providerId) {
     const currentValue = config[category]?.[providerId]?.[field.id] ?? field.default ?? '';
 
     const simpleHideAttr = field.simple_hide ? ' data-simple-hide="true"' : '';
-    let html = `<div class="field-group" data-config-path="${settingPath}" data-field-id="${field.id}"${simpleHideAttr}>`;
+    const parentAttr = field.parent ? ` data-parent-field-id="${escapeHtml(field.parent)}"` : '';
+    const nestedStyleAttr = field.parent
+        ? ' style="border-left: 2px solid var(--gold-dark); margin-left: var(--space-sm); padding-left: var(--space-md);"'
+        : '';
+    let html = `<div class="field-group" data-config-path="${settingPath}" data-field-id="${field.id}"${simpleHideAttr}${parentAttr}${nestedStyleAttr}>`;
     if (field.type !== 'toggle_group') {
         html += `<label class="field-label">${escapeHtml(field.label)}</label>`;
 
@@ -512,11 +550,15 @@ function renderField(field, category, providerId) {
 
         case 'range':
             const rangeValue = currentValue !== '' ? currentValue : field.default;
+            const rangeDisplay = field.display_suffix ? `${rangeValue}${field.display_suffix}` : rangeValue;
+            const rangeDisplayExpr = field.display_suffix
+                ? `this.value + '${field.display_suffix}'`
+                : 'this.value';
             html += `<div class="range-wrapper">
                         <input type="range" id="${fieldId}"
                                min="${field.min}" max="${field.max}" step="${field.step}" value="${rangeValue}"
-                               oninput="updateRangeValue('${fieldId}', this.value); updateProviderSetting('${category}', '${providerId}', '${field.id}', parseFloat(this.value))">
-                        <span class="range-value" id="${fieldId}Value">${rangeValue}</span>
+                               oninput="updateRangeValue('${fieldId}', ${rangeDisplayExpr}); updateProviderSetting('${category}', '${providerId}', '${field.id}', parseFloat(this.value))">
+                        <span class="range-value" id="${fieldId}Value">${rangeDisplay}</span>
                     </div>`;
             break;
 
@@ -534,7 +576,7 @@ function renderField(field, category, providerId) {
             html += `<div class="toggle-wrapper" style="padding: 0;">
                         <label class="toggle">
                             <input type="checkbox" id="${fieldId}" ${checked ? 'checked' : ''}
-                                   onchange="updateProviderSetting('${category}', '${providerId}', '${field.id}', this.checked)${extraHandler}">
+                                   onchange="updateProviderSetting('${category}', '${providerId}', '${field.id}', this.checked)${extraHandler}; updateProviderFieldDependencies('${category}', '${providerId}')">
                             <span class="toggle-track">
                                 <span class="toggle-thumb"></span>
                             </span>
@@ -565,7 +607,7 @@ function renderField(field, category, providerId) {
                             <span class="toggle-label">${escapeHtml(child.label)}</span>
                             <label class="toggle">
                                 <input type="checkbox" id="${childId}" ${childValue ? 'checked' : ''}
-                                       onchange="updateProviderSetting('${category}', '${providerId}', '${child.id}', this.checked); updateLLMFeatureAvailability('${providerId}')">
+                                       onchange="updateProviderSetting('${category}', '${providerId}', '${child.id}', this.checked); updateLLMFeatureAvailability('${providerId}'); if ('${child.feature}' === 'memory') updateMemoryAvailability('${providerId}')">
                                 <span class="toggle-track">
                                     <span class="toggle-thumb"></span>
                                 </span>
@@ -591,6 +633,1822 @@ function renderField(field, category, providerId) {
     return html;
 }
 
+function updateProviderFieldDependencies(category, providerId) {
+    const container = document.getElementById(`${category}ProviderSettings`);
+    if (!container) return;
+
+    container.querySelectorAll('[data-parent-field-id]').forEach(wrapper => {
+        const parentFieldId = wrapper.dataset.parentFieldId;
+        const parentToggle = document.getElementById(`${category}_${providerId}_${parentFieldId}`);
+        const isDisabled = parentToggle?.checked !== true;
+
+        wrapper.querySelectorAll('input, select, textarea, button').forEach(control => {
+            control.disabled = isDisabled;
+        });
+        wrapper.style.opacity = isDisabled ? '0.5' : '1';
+        wrapper.style.pointerEvents = isDisabled ? 'none' : 'auto';
+    });
+}
+
+const UNIVERSAL_SPEECH_SERVER_RELEASES_URL = 'https://github.com/KevinAHM/universal-speech-server/releases';
+
+const universalSpeechState = {
+    status: 'idle',
+    capabilities: null,
+    resources: null,
+    lastChecked: null,
+    error: null,
+    selectionWarning: '',
+    asrSelectionWarning: '',
+    requestId: 0,
+    controller: null,
+    debounceTimer: null,
+    pollTimer: null,
+    retryTimer: null,
+    retryDelay: 3000,
+    draftApiUrl: null,
+    draftApiKey: null,
+    voiceSetup: null,
+    voiceSetupError: null,
+    voiceSetupProgress: null,
+    voiceSetupPollTimer: null,
+    voiceSetupPollInFlight: false,
+    voiceSetupRequestId: 0,
+    loadPlan: null,
+    loadPlanRequestId: 0,
+    installPlans: {},
+    installPlanErrors: {},
+    installPlanRequests: new Set(),
+    installGeneration: 0,
+    installScope: null,
+    installJob: null,
+    installStartPending: null,
+    installPollError: null,
+    installPollTimer: null,
+    installPollInFlight: false,
+    resourcePollRequestId: 0,
+    resourcePollInFlight: false,
+    warmupRequestId: 0
+};
+
+function universalIsSelected() {
+    return config.tts?.provider === 'universal';
+}
+
+function universalASRIsSelected() {
+    return config.stt?.provider === 'universal';
+}
+
+function speechServerIsSelected() {
+    return universalIsSelected() || universalASRIsSelected();
+}
+
+function universalStatusPresentation() {
+    const state = universalSpeechState;
+    if (state.status === 'connected') return ['Connected', 'The authenticated model registry is available.', 'success'];
+    if (state.status === 'connecting') return ['Connecting…', 'Discovering models and server capabilities.', 'pending'];
+    if (state.status === 'reconnecting') return ['Reconnecting…', 'Last-known settings remain visible but disabled.', 'pending'];
+    if (state.status === 'incompatible') return ['Connected, no compatible models', state.error || 'No voice-cloning model supports the current game language.', 'warning'];
+    if (state.status === 'stale') return ['Connection stale', state.error || 'The last-known model panel is disabled while Sonorus retries.', 'warning'];
+    if (state.status === 'error') return ['Not connected', state.error || 'Check the URL and API key.', 'error'];
+    return ['Not checked', 'Sonorus will connect automatically.', 'idle'];
+}
+
+function universalFriendlyConnectionDetail(detail) {
+    const message = String(detail || '').trim();
+    if (/networkerror when attempting to fetch resource|failed to fetch|load failed/i.test(message)) {
+        return 'Unable to complete the speech-server connection check.';
+    }
+    return message;
+}
+
+function speechServerDownloadCTA() {
+    return `<div class="universal-state-card universal-state-idle">
+        <div class="universal-state-copy">
+            <span class="universal-state-label">Get Universal Speech Server</span>
+            <div class="universal-state-detail">Download the latest server release to host Voice and Speech recognition locally or on another machine.</div>
+        </div>
+        <a class="btn btn-primary btn-sm" href="${UNIVERSAL_SPEECH_SERVER_RELEASES_URL}" target="_blank" rel="noopener">Download server</a>
+    </div>`;
+}
+
+function speechServerConnectionEditor() {
+    const settings = config.speech_server || {};
+    const apiUrl = settings.api_url || 'http://127.0.0.1:8100';
+    const apiKey = settings.api_key ? '********' : '';
+    const [title, rawDetail, tone] = universalStatusPresentation();
+    const detail = universalFriendlyConnectionDetail(rawDetail);
+    const stateMetadata = [];
+    if (universalSpeechState.lastChecked) {
+        stateMetadata.push(`Last checked ${new Date(universalSpeechState.lastChecked).toLocaleTimeString()}`);
+    }
+    if (['stale', 'reconnecting'].includes(universalSpeechState.status)) {
+        stateMetadata.push('Retrying automatically');
+    }
+    return `<div class="field-group">
+            <label class="field-label">API URL</label>
+            <p class="field-hint">HTTP(S) base URL for the Universal Speech Server.</p>
+            <input type="text" id="speech_server_api_url" value="${escapeHtml(apiUrl)}"
+                   placeholder="http://127.0.0.1:8100"
+                   oninput="onUniversalCredentialInput('api_url', this.value)">
+        </div>
+        <div class="field-group">
+            <label class="field-label">API Key</label>
+            <p class="field-hint">Optional Basic authentication key. Credentials are never returned by connection checks.</p>
+            <input type="password" id="speech_server_api_key" value="${escapeHtml(apiKey)}"
+                   placeholder="Optional Basic key" autocomplete="off" data-1p-ignore="true"
+                   onfocus="if (this.value === '********') this.select()"
+                   oninput="onUniversalCredentialInput('api_key', this.value)">
+        </div>
+        <div class="universal-state-card universal-state-${tone}" id="universalConnectionState" aria-live="polite">
+            <div class="universal-state-copy">
+                <span class="universal-state-label"><span class="universal-state-dot" aria-hidden="true"></span>${escapeHtml(title)}</span>
+                <div class="universal-state-detail">${escapeHtml(detail)}</div>
+                ${stateMetadata.length ? `<div class="universal-state-meta">${escapeHtml(stateMetadata.join(' · '))}</div>` : ''}
+            </div>
+            <button type="button" class="btn btn-sm" onclick="connectUniversalSpeechServer(true)">Refresh</button>
+        </div>`;
+}
+
+function updateUniversalStateCard(card, title, detail, tone, stateMetadata = []) {
+    if (!card) return;
+    card.className = `universal-state-card universal-state-${tone}`;
+    const label = card.querySelector('.universal-state-label');
+    if (label) {
+        const dot = label.querySelector('.universal-state-dot');
+        label.replaceChildren();
+        if (dot) label.appendChild(dot);
+        label.appendChild(document.createTextNode(title));
+    }
+    const detailTarget = card.querySelector('.universal-state-detail');
+    if (detailTarget) detailTarget.textContent = detail;
+
+    const copy = card.querySelector('.universal-state-copy');
+    let metadataTarget = card.querySelector('.universal-state-meta');
+    if (stateMetadata.length) {
+        if (!metadataTarget && copy) {
+            metadataTarget = document.createElement('div');
+            metadataTarget.className = 'universal-state-meta';
+            copy.appendChild(metadataTarget);
+        }
+        if (metadataTarget) metadataTarget.textContent = stateMetadata.join(' · ');
+    } else if (metadataTarget) {
+        metadataTarget.remove();
+    }
+}
+
+function updateUniversalConnectionState() {
+    const [title, rawDetail, tone] = universalStatusPresentation();
+    const stateMetadata = [];
+    if (universalSpeechState.lastChecked) {
+        stateMetadata.push(`Last checked ${new Date(universalSpeechState.lastChecked).toLocaleTimeString()}`);
+    }
+    if (['stale', 'reconnecting'].includes(universalSpeechState.status)) {
+        stateMetadata.push('Retrying automatically');
+    }
+    updateUniversalStateCard(
+        document.getElementById('universalConnectionState'),
+        title,
+        universalFriendlyConnectionDetail(rawDetail),
+        tone,
+        stateMetadata
+    );
+}
+
+function universalPanelIsBeingEdited(panelId) {
+    const panel = document.getElementById(panelId);
+    const active = document.activeElement;
+    return Boolean(
+        panel && active && active !== document.body && panel.contains(active)
+        && active.matches('input, textarea, select, [contenteditable="true"]')
+    );
+}
+
+function refreshUniversalModelPanelIfIdle() {
+    if (!universalPanelIsBeingEdited('universalModelPanel')) renderUniversalModelPanel();
+}
+
+function refreshUniversalASRModelPanelIfIdle() {
+    if (!universalPanelIsBeingEdited('universalASRModelPanel')) renderUniversalASRModelPanel();
+}
+
+function refreshUniversalConnectionUI() {
+    updateUniversalConnectionState();
+    refreshUniversalModelPanelIfIdle();
+    applySimpleMode();
+}
+
+function renderUniversalProviderSettings(container, providerConfig) {
+    if (!universalIsSelected()) return;
+    container.innerHTML = `
+        <p class="field-hint" style="margin-bottom: var(--space-md);">${providerConfig.description}</p>
+        ${speechServerDownloadCTA()}
+        ${speechServerConnectionEditor()}
+        <div id="universalModelPanel"></div>
+        <div id="universalProviderWideSettings">
+            ${providerConfig.fields.map(field => renderField(field, 'tts', 'universal')).join('')}
+        </div>`;
+    renderUniversalModelPanel();
+    applySimpleMode();
+}
+
+function onUniversalCredentialInput(field, value) {
+    if (field === 'api_url') universalSpeechState.draftApiUrl = value;
+    if (field === 'api_key') universalSpeechState.draftApiKey = value;
+    updateSetting(`speech_server.${field}`, value);
+    clearTimeout(universalSpeechState.debounceTimer);
+    universalSpeechState.debounceTimer = setTimeout(() => connectUniversalSpeechServer(false), 600);
+}
+
+function universalDraftPayload(extra = {}) {
+    const settings = config.speech_server || {};
+    return {
+        api_url: universalSpeechState.draftApiUrl ?? document.getElementById('speech_server_api_url')?.value ?? settings.api_url ?? '',
+        api_key: universalSpeechState.draftApiKey ?? document.getElementById('speech_server_api_key')?.value ?? (settings.api_key ? '********' : ''),
+        game_language: config.setup?.language || 'EN_US',
+        ...extra
+    };
+}
+
+function universalInstallTargetKey(target) {
+    return target ? `${target.component}:${target.model || ''}` : '';
+}
+
+function universalStackInstallTargets() {
+    if ((universalSpeechState.capabilities?.capabilitiesVersion || 1) < 7) return [];
+    const selection = universalStackSelection();
+    const caps = universalSpeechState.capabilities || {};
+    const targets = [];
+    if (selection.tts_model) {
+        const model = universalCompatibleModels().find(item => item.id === selection.tts_model);
+        if (model && !model.installed) {
+            targets.push({ component: 'model', model: model.id, label: `${model.name} TTS model`, installable: model.installable });
+        }
+    }
+    if (selection.asr_model) {
+        const model = universalCompatibleASRModels().find(item => item.id === selection.asr_model);
+        if (model && !model.installed) {
+            targets.push({ component: 'model', model: model.id, label: `${model.name} ASR model`, installable: model.installable });
+        }
+    }
+    if (selection.upscale && caps.upscaler && !caps.upscaler.installed) {
+        targets.push({ component: 'upscaler', model: null, label: 'VoxCPM2 AudioVAE', installable: caps.upscaler.installable });
+    }
+    if (selection.alignment && caps.alignment && !caps.alignment.installed) {
+        targets.push({ component: 'aligner', model: null, label: 'CTC aligner', installable: caps.alignment.installable });
+    }
+    return targets;
+}
+
+function universalCurrentInstallTarget() {
+    const job = universalSpeechState.installJob;
+    if (job && !['completed', 'failed', 'cancelled'].includes(job.state)) {
+        if (job.component.startsWith('model:')) {
+            const modelId = job.component.slice('model:'.length);
+            const tts = universalCompatibleModels().find(item => item.id === modelId);
+            const asr = universalCompatibleASRModels().find(item => item.id === modelId);
+            return {
+                component: 'model', model: modelId,
+                label: tts ? `${tts.name} TTS model` : asr ? `${asr.name} ASR model` : `${modelId} model`,
+                installable: true,
+            };
+        }
+        if (job.component === 'upscaler') {
+            return { component: 'upscaler', model: null, label: 'VoxCPM2 AudioVAE', installable: true };
+        }
+        if (job.component === 'aligner') {
+            return { component: 'aligner', model: null, label: 'CTC aligner', installable: true };
+        }
+    }
+    return universalStackInstallTargets()[0] || null;
+}
+
+function universalRenderInstallSurfaces() {
+    if (universalIsSelected()) refreshUniversalModelPanelIfIdle();
+    if (universalASRIsSelected()) refreshUniversalASRModelPanelIfIdle();
+}
+
+async function refreshUniversalInstallPlan(target = universalCurrentInstallTarget()) {
+    if (!target || universalSpeechState.status !== 'connected' || !target.installable) return;
+    const key = universalInstallTargetKey(target);
+    if (universalSpeechState.installPlans[key] || universalSpeechState.installPlanRequests.has(key)) return;
+    universalSpeechState.installPlanRequests.add(key);
+    const generation = universalSpeechState.installGeneration;
+    delete universalSpeechState.installPlanErrors[key];
+    universalRenderInstallSurfaces();
+    try {
+        const response = await fetch('/api/speech-server/install/plan', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(universalDraftPayload({
+                component: target.component,
+                ...(target.model ? { model: target.model } : {}),
+            })),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.plan) {
+            throw new Error(data.error?.message || `Install preview failed (HTTP ${response.status})`);
+        }
+        if (generation === universalSpeechState.installGeneration) {
+            universalSpeechState.installPlans[key] = data.plan;
+        }
+    } catch (error) {
+        if (generation === universalSpeechState.installGeneration) {
+            universalSpeechState.installPlanErrors[key] = error.message || 'Unable to preview this download.';
+        }
+    } finally {
+        if (generation === universalSpeechState.installGeneration) {
+            universalSpeechState.installPlanRequests.delete(key);
+            universalRenderInstallSurfaces();
+        }
+    }
+}
+
+function refreshUniversalStackInstallPlans() {
+    return Promise.all(
+        universalStackInstallTargets()
+            .filter(target => target.installable)
+            .map(target => refreshUniversalInstallPlan(target))
+    );
+}
+
+function renderUniversalInstall(target) {
+    if (!target) return '';
+    const key = universalInstallTargetKey(target);
+    const plan = universalSpeechState.installPlans[key];
+    const error = universalSpeechState.installPlanErrors[key];
+    const job = universalSpeechState.installJob?.component === (target.component === 'model'
+        ? `model:${target.model}` : target.component) ? universalSpeechState.installJob : null;
+    if (universalSpeechState.installStartPending === key) {
+        return `<div class="universal-state-card universal-state-pending" aria-live="polite" aria-busy="true">
+            <div class="universal-state-copy">
+                <span class="universal-state-label">Starting ${escapeHtml(target.label)}</span>
+                <div class="universal-state-detail">Creating the verified download job on the speech server&hellip;</div>
+                <progress style="width:100%"></progress>
+            </div>
+        </div>`;
+    }
+    if (!target.installable) {
+        return `<div class="universal-state-card universal-state-warning">
+            <div class="universal-state-copy"><span class="universal-state-label">${escapeHtml(target.label)} is not installed</span>
+            <div class="universal-state-detail">This server does not provide an automatic download for it.</div></div></div>`;
+    }
+    if (!plan && !error && !universalSpeechState.installPlanRequests.has(key)) {
+        queueMicrotask(() => refreshUniversalInstallPlan(target));
+    }
+    if (job && !['completed', 'failed', 'cancelled'].includes(job.state)) {
+        const downloaded = Number(job.downloadedBytes || 0);
+        const total = Number(job.totalBytes || 0);
+        const percent = total > 0 ? Math.min(100, downloaded / total * 100) : 0;
+        const detail = total > 0
+            ? `${formatUniversalBytes(downloaded)} of ${formatUniversalBytes(total)} (${percent.toFixed(0)}%)`
+            : job.state === 'resolving' ? 'Resolving immutable download metadata…' : 'Preparing download…';
+        const pollError = universalSpeechState.installPollError
+            ? `<div class="universal-state-meta universal-warning">${escapeHtml(universalSpeechState.installPollError)} Reconnecting…</div>`
+            : '';
+        return `<div class="universal-state-card universal-state-pending" aria-live="polite">
+            <div class="universal-state-copy"><span class="universal-state-label">Installing ${escapeHtml(target.label)}</span>
+                <div class="universal-state-detail">${escapeHtml(detail)}</div>
+                ${job.currentArtifact ? `<div class="universal-state-meta">${escapeHtml(job.currentArtifact)}</div>` : ''}
+                ${pollError}
+                <progress value="${downloaded}" ${total > 0 ? `max="${total}"` : ''} style="width:100%"></progress>
+            </div>
+            <button type="button" class="btn btn-sm" onclick="cancelUniversalInstall()">Cancel</button>
+        </div>`;
+    }
+    if (error || job?.state === 'failed') {
+        const message = job?.error?.message || error;
+        return `<div class="universal-state-card universal-state-error"><div class="universal-state-copy">
+            <span class="universal-state-label">Download unavailable</span><div class="universal-state-detail">${escapeHtml(message)}</div></div>
+            <button type="button" class="btn btn-sm" onclick="retryUniversalInstallPlan()">Retry</button></div>`;
+    }
+    if (!plan) {
+        return `<div class="universal-state-card universal-state-pending"><div class="universal-state-copy">
+            <span class="universal-state-label">Checking ${escapeHtml(target.label)}</span>
+            <div class="universal-state-detail">Locking the exact files and sizes before download.</div></div></div>`;
+    }
+    const approximateBytes = plan.artifacts.reduce((sum, item) => {
+        const value = item.approximateSize;
+        return typeof value === 'number' && Number.isFinite(value) ? sum + value : sum;
+    }, 0);
+    const approximateLabels = plan.artifacts
+        .map(item => typeof item.approximateSize === 'string' ? item.approximateSize : null)
+        .filter(Boolean);
+    const size = plan.totalBytes ?? (approximateBytes || null);
+    const sizeText = size
+        ? `${plan.locked ? '' : 'About '}${formatUniversalBytes(size)}`
+        : approximateLabels.length ? approximateLabels.join(' + ') : '';
+    const fileCount = plan.artifacts.length;
+    const acceptance = plan.requiresLicenseAcceptance ? `<label class="field-hint" style="display:block;margin-top:var(--space-sm)">
+        <input type="checkbox" onchange="this.setCustomValidity('')"> I accept the ${escapeHtml(plan.license || 'model')} license for these files.
+    </label>` : '';
+    return `<div class="universal-state-card universal-state-warning"><div class="universal-state-copy">
+        <span class="universal-state-label">Install ${escapeHtml(target.label)}</span>
+        <div class="universal-state-detail">${sizeText ? `${escapeHtml(sizeText)} • ` : ''}${fileCount} file${fileCount === 1 ? '' : 's'} from the CrispASR registry • ${escapeHtml(plan.canonicalBackend)}${plan.license ? ` • ${escapeHtml(plan.license)}` : ''}.</div>
+        <div class="universal-state-meta">Downloads are content-verified before activation.${plan.locked ? '' : ' Exact files are resolved only after license acceptance.'}</div>
+        ${acceptance}</div>
+        <button type="button" class="btn btn-primary btn-sm" onclick="startUniversalInstall(this)">Install</button></div>`;
+}
+
+function retryUniversalInstallPlan() {
+    const target = universalCurrentInstallTarget();
+    if (!target) return;
+    const key = universalInstallTargetKey(target);
+    delete universalSpeechState.installPlans[key];
+    delete universalSpeechState.installPlanErrors[key];
+    universalSpeechState.installJob = null;
+    universalSpeechState.installStartPending = null;
+    refreshUniversalInstallPlan(target);
+}
+
+async function startUniversalInstall(button) {
+    const target = universalCurrentInstallTarget();
+    const targetKey = universalInstallTargetKey(target);
+    if (!target || universalSpeechState.installStartPending
+        || universalSpeechState.installJob && !['completed', 'failed', 'cancelled'].includes(universalSpeechState.installJob.state)) return;
+    const plan = universalSpeechState.installPlans[targetKey];
+    const generation = universalSpeechState.installGeneration;
+    if (!plan) return refreshUniversalInstallPlan(target);
+    const acceptance = button?.closest('.universal-state-card')?.querySelector('input[type="checkbox"]');
+    const acceptLicense = Boolean(acceptance?.checked);
+    if (plan.requiresLicenseAcceptance && !acceptLicense) {
+        acceptance?.setCustomValidity('Accept the model license before starting this download.');
+        acceptance?.reportValidity();
+        return;
+    }
+    universalSpeechState.installStartPending = targetKey;
+    delete universalSpeechState.installPlanErrors[targetKey];
+    universalRenderInstallSurfaces();
+    try {
+        const response = await fetch('/api/speech-server/install/start', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(universalDraftPayload({
+                component: target.component, ...(target.model ? { model: target.model } : {}),
+                accept_license: acceptLicense,
+            })),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (generation !== universalSpeechState.installGeneration) return;
+        if (!response.ok || !data.job) throw new Error(data.error?.message || `Install failed (HTTP ${response.status})`);
+        universalSpeechState.installStartPending = null;
+        universalSpeechState.installJob = data.job;
+        universalSpeechState.installPollError = null;
+        universalRenderInstallSurfaces();
+        if (!['completed', 'failed', 'cancelled'].includes(data.job.state)) {
+            scheduleUniversalInstallPoll();
+        }
+    } catch (error) {
+        if (generation !== universalSpeechState.installGeneration) return;
+        universalSpeechState.installStartPending = null;
+        universalSpeechState.installPlanErrors[targetKey] = error.message || 'Unable to start the download.';
+        universalRenderInstallSurfaces();
+    }
+}
+
+function scheduleUniversalInstallPoll() {
+    clearInterval(universalSpeechState.installPollTimer);
+    universalSpeechState.installPollTimer = setInterval(pollUniversalInstall, 750);
+    pollUniversalInstall();
+}
+
+async function pollUniversalInstall() {
+    const jobId = universalSpeechState.installJob?.jobId;
+    if (!jobId || universalSpeechState.installPollInFlight) return;
+    universalSpeechState.installPollInFlight = true;
+    const generation = universalSpeechState.installGeneration;
+    try {
+        const response = await fetch('/api/speech-server/install/status', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(universalDraftPayload({ job_id: jobId })),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (generation !== universalSpeechState.installGeneration) return;
+        if (!response.ok || !data.job) throw new Error(data.error?.message || `Install status failed (HTTP ${response.status})`);
+        universalSpeechState.installJob = data.job;
+        universalSpeechState.installPollError = null;
+        if (data.job.state === 'completed') {
+            clearInterval(universalSpeechState.installPollTimer);
+            universalSpeechState.installPollTimer = null;
+            if (data.capabilities) universalSpeechState.capabilities = data.capabilities;
+            if ('resources' in data) universalSpeechState.resources = data.resources;
+            universalSpeechState.loadPlan = null;
+            universalRenderInstallSurfaces();
+            if (universalIsSelected()) refreshUniversalVoiceSetupStatus();
+            refreshUniversalLoadPlan();
+            refreshUniversalStackInstallPlans();
+        } else if (['failed', 'cancelled'].includes(data.job.state)) {
+            clearInterval(universalSpeechState.installPollTimer);
+            universalSpeechState.installPollTimer = null;
+        }
+        universalRenderInstallSurfaces();
+    } catch (error) {
+        if (generation !== universalSpeechState.installGeneration) return;
+        clearInterval(universalSpeechState.installPollTimer);
+        universalSpeechState.installPollTimer = null;
+        universalSpeechState.installPollError = error.message || 'Installation progress is temporarily unavailable.';
+        universalRenderInstallSurfaces();
+        scheduleUniversalReconnect();
+    } finally {
+        if (generation === universalSpeechState.installGeneration) {
+            universalSpeechState.installPollInFlight = false;
+        }
+    }
+}
+
+async function cancelUniversalInstall() {
+    const jobId = universalSpeechState.installJob?.jobId;
+    if (!jobId) return;
+    const generation = universalSpeechState.installGeneration;
+    try {
+        const response = await fetch('/api/speech-server/install/cancel', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(universalDraftPayload({ job_id: jobId })),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (generation !== universalSpeechState.installGeneration) return;
+        if (!response.ok || !data.job) throw new Error(data.error?.message || 'Unable to cancel the download.');
+        universalSpeechState.installJob = data.job;
+        universalSpeechState.installPollError = null;
+        universalRenderInstallSurfaces();
+        if (!['completed', 'failed', 'cancelled'].includes(data.job.state)) {
+            scheduleUniversalInstallPoll();
+        }
+    } catch (error) {
+        if (generation !== universalSpeechState.installGeneration) return;
+        universalSpeechState.installPollError = error.message || 'Unable to cancel the download.';
+        universalRenderInstallSurfaces();
+    }
+}
+
+function clearUniversalTimers({ keepPoll = false } = {}) {
+    clearTimeout(universalSpeechState.retryTimer);
+    universalSpeechState.retryTimer = null;
+    if (!keepPoll && universalSpeechState.pollTimer) {
+        clearInterval(universalSpeechState.pollTimer);
+        universalSpeechState.pollTimer = null;
+    }
+    if (universalSpeechState.voiceSetupPollTimer) {
+        clearInterval(universalSpeechState.voiceSetupPollTimer);
+        universalSpeechState.voiceSetupPollTimer = null;
+    }
+    if (universalSpeechState.installPollTimer) {
+        clearInterval(universalSpeechState.installPollTimer);
+        universalSpeechState.installPollTimer = null;
+    }
+}
+
+function suspendUniversalUiWork() {
+    clearUniversalTimers();
+    clearTimeout(universalSpeechState.debounceTimer);
+    universalSpeechState.debounceTimer = null;
+    if (universalSpeechState.controller) {
+        universalSpeechState.controller.abort();
+        universalSpeechState.controller = null;
+    }
+    // Invalidate requests without discarding last-known capabilities. Switching
+    // back can reconnect from that stale-but-useful state.
+    universalSpeechState.requestId += 1;
+    universalSpeechState.voiceSetupRequestId += 1;
+    universalSpeechState.loadPlanRequestId += 1;
+    universalSpeechState.resourcePollRequestId += 1;
+    universalSpeechState.resourcePollInFlight = false;
+    universalSpeechState.warmupRequestId += 1;
+    universalSpeechState.installPollInFlight = false;
+}
+
+function scheduleUniversalReconnect() {
+    if (!speechServerIsSelected() || universalSpeechState.retryTimer) return;
+    const delay = universalSpeechState.retryDelay;
+    universalSpeechState.retryTimer = setTimeout(() => {
+        universalSpeechState.retryTimer = null;
+        connectUniversalSpeechServer(false);
+    }, delay);
+    universalSpeechState.retryDelay = Math.min(delay * 2, 30000);
+}
+
+async function connectUniversalSpeechServer(refresh = false) {
+    if (!speechServerIsSelected()) return;
+    const forceDiscovery = refresh || universalSpeechState.status === 'stale'
+        || !universalSpeechState.capabilities;
+    const draftPayload = universalDraftPayload({ refresh: forceDiscovery });
+    const installScope = `${draftPayload.api_url}\n${draftPayload.api_key}`;
+    const activeInstall = universalSpeechState.installJob
+        && !['completed', 'failed', 'cancelled'].includes(universalSpeechState.installJob.state);
+    if (universalSpeechState.installScope !== installScope || (forceDiscovery && !activeInstall)) {
+        universalSpeechState.installPlans = {};
+        universalSpeechState.installPlanErrors = {};
+        universalSpeechState.installPlanRequests.clear();
+        universalSpeechState.installGeneration += 1;
+        universalSpeechState.installStartPending = null;
+        if (universalSpeechState.installScope !== installScope) universalSpeechState.installJob = null;
+        if (universalSpeechState.installScope !== installScope) universalSpeechState.installPollError = null;
+        universalSpeechState.installScope = installScope;
+    }
+    clearUniversalTimers();
+    universalSpeechState.voiceSetupRequestId += 1;
+    universalSpeechState.loadPlanRequestId += 1;
+    universalSpeechState.resourcePollRequestId += 1;
+    universalSpeechState.resourcePollInFlight = false;
+    universalSpeechState.warmupRequestId += 1;
+    if (universalSpeechState.controller) universalSpeechState.controller.abort();
+    const requestId = ++universalSpeechState.requestId;
+    const controller = new AbortController();
+    universalSpeechState.controller = controller;
+    universalSpeechState.status = universalSpeechState.capabilities ? 'reconnecting' : 'connecting';
+    universalSpeechState.error = null;
+    const container = document.getElementById('ttsProviderSettings');
+    if (container && universalIsSelected()) refreshUniversalConnectionUI();
+    if (universalASRIsSelected()) refreshUniversalASRConnectionUI();
+
+    try {
+        const response = await fetch('/api/speech-server/connect', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(draftPayload),
+            signal: controller.signal
+        });
+        const responseBody = await response.text();
+        let data = {};
+        try {
+            data = JSON.parse(responseBody);
+        } catch {
+            throw new Error('The Sonorus connection proxy returned a malformed response.');
+        }
+        if (requestId !== universalSpeechState.requestId || !speechServerIsSelected()) return;
+
+        if (!response.ok) {
+            const connectedDetails = data.error?.details;
+            if (data.error?.code === 'no_compatible_models' && connectedDetails?.capabilities) {
+                universalSpeechState.capabilities = connectedDetails.capabilities;
+                universalSpeechState.resources = connectedDetails.resources || null;
+                universalSpeechState.status = 'incompatible';
+                universalSpeechState.error = data.error.message;
+                universalSpeechState.lastChecked = Date.now();
+                if (container && universalIsSelected()) refreshUniversalConnectionUI();
+                if (universalASRIsSelected()) refreshUniversalASRConnectionUI();
+                refreshUniversalOverrideAutocompletes();
+                refreshSetupStateFromConfig();
+                return;
+            }
+            throw new Error(data.error?.message || `Connection failed (HTTP ${response.status})`);
+        }
+
+        if (!data.capabilities || !Array.isArray(data.capabilities.compatibleModels)
+            || !Array.isArray(data.capabilities.compatibleASRModels)) {
+            throw new Error('The speech server returned an incomplete capability response.');
+        }
+        universalSpeechState.capabilities = data.capabilities;
+        universalSpeechState.resources = data.resources || null;
+        const advertisedJobs = Array.isArray(data.capabilities.activeInstallations)
+            ? data.capabilities.activeInstallations : [];
+        const localActive = universalSpeechState.installJob
+            && !['completed', 'failed', 'cancelled'].includes(universalSpeechState.installJob.state);
+        if (localActive) {
+            universalSpeechState.installJob = advertisedJobs.find(
+                job => job.jobId === universalSpeechState.installJob.jobId
+            ) || null;
+        } else {
+            universalSpeechState.installJob = advertisedJobs[0] || universalSpeechState.installJob;
+        }
+        universalSpeechState.loadPlan = null;
+        universalSpeechState.lastChecked = Date.now();
+        universalSpeechState.status = 'connected';
+        universalSpeechState.error = data.resourceError?.message || null;
+        universalSpeechState.retryDelay = 3000;
+        universalSpeechState.voiceSetup = null;
+        universalSpeechState.voiceSetupError = null;
+        universalSpeechState.installPollError = null;
+        if (universalIsSelected()) ensureUniversalSelection();
+        if (universalASRIsSelected()) ensureUniversalASRSelection();
+        if (container && universalIsSelected()) refreshUniversalConnectionUI();
+        if (universalASRIsSelected()) refreshUniversalASRConnectionUI();
+        refreshUniversalOverrideAutocompletes();
+        startUniversalResourcePolling();
+        if (universalIsSelected()) refreshUniversalVoiceSetupStatus();
+        refreshUniversalLoadPlan();
+        refreshUniversalStackInstallPlans();
+        if (universalSpeechState.installJob
+            && !['completed', 'failed', 'cancelled'].includes(universalSpeechState.installJob.state)) {
+            scheduleUniversalInstallPoll();
+        }
+        refreshSetupStateFromConfig();
+    } catch (error) {
+        if (error.name === 'AbortError' || requestId !== universalSpeechState.requestId
+            || !speechServerIsSelected()) return;
+        universalSpeechState.status = universalSpeechState.capabilities ? 'stale' : 'error';
+        universalSpeechState.error = error.message || 'Connection failed.';
+        universalSpeechState.lastChecked = Date.now();
+        if (container && universalIsSelected()) refreshUniversalConnectionUI();
+        if (universalASRIsSelected()) refreshUniversalASRConnectionUI();
+        scheduleUniversalReconnect();
+        refreshSetupStateFromConfig();
+    }
+}
+
+function universalCompatibleModels() {
+    return universalSpeechState.capabilities?.compatibleModels || [];
+}
+
+function ensureUniversalSelection() {
+    const models = universalCompatibleModels();
+    if (!models.length) return;
+    const settings = config.tts.universal ||= {};
+    const validIds = new Set(models.map(model => model.id));
+    if (!validIds.has(settings.model)) {
+        const previous = settings.model;
+        settings.model = universalSpeechState.capabilities.recommendedModelId || models[0].id;
+        universalSpeechState.selectionWarning = previous
+            ? `Saved model “${previous}” is no longer compatible. ${settings.model} is selected as a draft; save to confirm.`
+            : `${settings.model} was selected from the connected server; save to confirm.`;
+        markDirty();
+    } else {
+        universalSpeechState.selectionWarning = '';
+    }
+    ensureUniversalModelProfile(settings.model);
+}
+
+function ensureUniversalModelProfile(modelId) {
+    const settings = config.tts.universal ||= {};
+    const profiles = settings.model_settings ||= {};
+    const model = universalCompatibleModels().find(item => item.id === modelId);
+    if (!model) return null;
+    let changed = false;
+    if (!profiles[modelId] || typeof profiles[modelId] !== 'object') {
+        profiles[modelId] = { options: {} };
+        changed = true;
+    }
+    const profile = profiles[modelId];
+    profile.options ||= {};
+    for (const control of model.controls || []) {
+        if (!(control.id in profile.options)) {
+            profile.options[control.id] = model.defaults?.options?.[control.id] ?? control.default;
+            changed = true;
+        }
+    }
+    if (model.upscaleEligible) {
+        if (!('upscale' in profile)) {
+            profile.upscale = true;
+            changed = true;
+        }
+    } else if (profile.upscale === true) {
+        profile.upscale = false;
+        changed = true;
+    }
+    const batchingEligible = !!(model.segmentation && model.alignmentCompatible
+        && universalSpeechState.capabilities?.capabilitiesVersion >= 3);
+    if (batchingEligible && !('adaptive_batching' in profile)) {
+        profile.adaptive_batching = model.defaults?.adaptive_batching !== false;
+        changed = true;
+    }
+    if (changed) markDirty();
+    return profile;
+}
+
+function formatUniversalBytes(value) {
+    if (value === null || value === undefined || !Number.isFinite(Number(value))) return 'Unavailable';
+    const gib = Number(value) / (1024 ** 3);
+    return gib >= 10 ? `${gib.toFixed(1)} GiB` : `${gib.toFixed(2)} GiB`;
+}
+
+const UNIVERSAL_ESTIMATE_QUANTUM_BYTES = 256 * 1024 * 1024;
+
+function universalRequirementEstimate(model, kind) {
+    const advertised = model?.resources?.[kind];
+    const advertisedBytes = advertised?.estimatedBytes;
+    if (advertisedBytes !== null && advertisedBytes !== undefined
+        && Number.isFinite(Number(advertisedBytes)) && Number(advertisedBytes) >= 0) {
+        return {
+            bytes: Number(advertisedBytes),
+            source: advertised.source || 'server',
+            confidence: advertised.confidence || 'unknown',
+        };
+    }
+
+    // Before installation there are no local component files for the server's
+    // normal file-size heuristic.  A locked install plan has the exact complete
+    // bundle size, so apply the same conservative 2x / 256-MiB rounding used by
+    // ModelSpec.resource_requirements().  Keep it explicitly low confidence:
+    // download bytes are not a measurement of runtime residency.
+    const plan = model?.id
+        ? universalSpeechState.installPlans[`model:${model.id}`]
+        : null;
+    const bundleBytes = plan?.locked ? Number(plan.totalBytes) : NaN;
+    if (Number.isFinite(bundleBytes) && bundleBytes > 0) {
+        return {
+            bytes: Math.ceil((bundleBytes * 2) / UNIVERSAL_ESTIMATE_QUANTUM_BYTES)
+                * UNIVERSAL_ESTIMATE_QUANTUM_BYTES,
+            source: 'locked-download-size-heuristic',
+            confidence: 'low',
+        };
+    }
+    return null;
+}
+
+function universalEstimateText(model) {
+    const ram = universalRequirementEstimate(model, 'ram');
+    const vram = universalRequirementEstimate(model, 'vram');
+    const estimate = value => value ? `~${formatUniversalBytes(value.bytes)}` : 'Unavailable';
+    return `${estimate(ram)} RAM / ${estimate(vram)} VRAM`;
+}
+
+function universalEstimateSource(model) {
+    const sources = ['ram', 'vram']
+        .map(kind => universalRequirementEstimate(model, kind))
+        .filter(Boolean);
+    if (!sources.length) return 'estimate unavailable';
+    if (sources.some(value => value.source === 'locked-download-size-heuristic')) {
+        return 'low-confidence locked-download-size estimate';
+    }
+    return sources.every(value => value.source === 'registry')
+        ? 'registry estimate'
+        : 'low-confidence file-size estimate';
+}
+
+function universalFitTone(status) {
+    return ['comfortable', 'tight', 'insufficient', 'busy'].includes(status) ? status : 'unknown';
+}
+
+function universalModelBadges(model) {
+    return `${model?.recommended ? '<span class="universal-badge universal-badge-recommended">Recommended</span>' : ''}
+        ${model?.loaded ? '<span class="universal-badge universal-badge-loaded">TTS loaded</span>' : ''}
+        ${model?.installed === false ? '<span class="universal-badge">Download required</span>' : ''}
+        ${model?.upscaleEligible ? '<span class="universal-badge universal-badge-upscaler">48 kHz upscale</span>' : ''}`;
+}
+
+const UNIVERSAL_ALIGNMENT_VRAM_OVERHEAD_BYTES = 500 * 1024 * 1024;
+const UNIVERSAL_UPSCALER_VRAM_OVERHEAD_BYTES = 500 * 1024 * 1024;
+
+function universalLoadPlanMatches(plan, model, profile) {
+    const batching = !!(profile?.adaptive_batching && model?.segmentation
+        && model?.alignmentCompatible);
+    if (Array.isArray(plan?.desiredModels)) {
+        const ids = new Set(plan.desiredModels.map(item => item.id));
+        const expected = universalStackSelection();
+        const expectedIds = [expected.tts_model, expected.asr_model].filter(Boolean);
+        return ids.size === expectedIds.length
+            && expectedIds.every(id => ids.has(id))
+            && plan.upscale === expected.upscale
+            && plan.alignment === expected.alignment;
+    }
+    return !!(plan && plan.modelId === model?.id
+        && plan.upscale === !!profile?.upscale
+        && plan.adaptiveBatching === batching);
+}
+
+function universalStackSelection() {
+    const ttsModel = universalIsSelected() ? config.tts?.universal?.model || null : null;
+    const asrModel = universalASRIsSelected() ? config.stt?.universal?.model || null : null;
+    const model = ttsModel
+        ? universalCompatibleModels().find(item => item.id === ttsModel)
+        : null;
+    const profile = model ? ensureUniversalModelProfile(model.id) : null;
+    const alignment = !!(profile?.adaptive_batching && model?.segmentation
+        && model?.alignmentCompatible);
+    return {
+        tts_model: ttsModel,
+        asr_model: asrModel,
+        upscale: !!(model && profile?.upscale),
+        alignment,
+        model,
+        profile,
+    };
+}
+
+function universalStackPayload(selection = universalStackSelection()) {
+    return {
+        tts_model: selection.tts_model,
+        asr_model: selection.asr_model,
+        upscale: selection.upscale,
+        alignment: selection.alignment,
+    };
+}
+
+function universalSelectedStackLoaded(model, profile) {
+    const resources = universalSpeechState.resources;
+    if (!resources) return false;
+    const selection = universalStackSelection();
+    if (!selection.tts_model && !selection.asr_model) return false;
+    const batching = !!(profile?.adaptive_batching && model?.segmentation
+        && model?.alignmentCompatible);
+    return (!selection.tts_model || (resources.loadedModelIds || []).includes(selection.tts_model))
+        && (!selection.asr_model || (resources.loadedModelIds || []).includes(selection.asr_model))
+        && (!profile?.upscale || resources.upscalerLoaded)
+        && (!batching || resources.alignerLoaded);
+}
+
+function universalMissingStackComponents(model, profile) {
+    const resources = universalSpeechState.resources;
+    const selection = universalStackSelection();
+    if (!resources) {
+        return [
+            ...(selection.tts_model ? ['TTS model'] : []),
+            ...(selection.asr_model ? ['ASR model'] : []),
+        ];
+    }
+    const missing = [];
+    if (selection.tts_model && !(resources.loadedModelIds || []).includes(selection.tts_model)) {
+        missing.push('TTS model');
+    }
+    if (selection.asr_model && !(resources.loadedModelIds || []).includes(selection.asr_model)) {
+        missing.push('ASR model');
+    }
+    if (profile?.upscale && !resources.upscalerLoaded) missing.push('AudioVAE');
+    const batching = !!(profile?.adaptive_batching && model?.segmentation
+        && model?.alignmentCompatible);
+    if (batching && !resources.alignerLoaded) missing.push('CTC');
+    return missing;
+}
+
+function universalLoadButtonLabel(missing) {
+    const selection = universalStackSelection();
+    if (selection.tts_model && selection.asr_model) return 'Load selected speech stack';
+    if (missing.length === 1 && missing[0] === 'TTS model') return 'Load selected TTS model';
+    if (missing.length === 1 && missing[0] === 'ASR model') return 'Load selected ASR model';
+    if (missing.includes('TTS model') || missing.includes('ASR model')) {
+        return 'Load selected speech stack';
+    }
+    return `Load ${missing.join(' + ')}`;
+}
+
+function universalResidentCapacityOk() {
+    const selection = universalStackSelection();
+    const required = [selection.tts_model, selection.asr_model].filter(Boolean).length;
+    const advertised = Number(universalSpeechState.capabilities?.residentLimit || 1);
+    if (required > advertised) return false;
+    return universalSpeechState.loadPlan?.residentCapacitySatisfied !== false;
+}
+
+function universalResidentLimit() {
+    return Number(
+        universalSpeechState.loadPlan?.residentLimit
+        ?? universalSpeechState.capabilities?.residentLimit
+        ?? 1
+    );
+}
+
+function universalMissingStackDetail(missing) {
+    const options = missing.filter(component => !['TTS model', 'ASR model'].includes(component));
+    if (missing.includes('TTS model') || missing.includes('ASR model') || !options.length) return '';
+    return `TTS model loaded; ${options.join(' and ')} ${options.length === 1 ? 'is' : 'are'} still not loaded.`;
+}
+
+function universalFitNote(fit) {
+    const displayNames = ids => ids.map(id =>
+        universalSpeechState.capabilities?.models?.find(model => model.id === id)?.name
+        || id
+    ).join(', ');
+    if (fit?.busyIds?.length) {
+        return `Waiting for ${displayNames(fit.busyIds)} to finish speaking`;
+    }
+    if (fit?.evictIds?.length) {
+        return `Projected after replacing ${displayNames(fit.evictIds)}`;
+    }
+    if (fit?.allResident) return 'Selected option stack is already loaded';
+    const resources = universalSpeechState.resources;
+    const ramFree = resources?.ram?.freeBytes;
+    const gpuFree = (resources?.gpus || [])
+        .map(gpu => gpu?.freeBytes)
+        .filter(value => value !== null && value !== undefined
+            && Number.isFinite(Number(value)))
+        .map(Number);
+    const available = [];
+    if (ramFree !== null && ramFree !== undefined && Number.isFinite(Number(ramFree))) {
+        available.push(`${formatUniversalBytes(ramFree)} RAM`);
+    }
+    if (gpuFree.length) available.push(`${formatUniversalBytes(Math.max(...gpuFree))} VRAM`);
+    return available.length
+        ? `Compared with ${available.join(' / ')} free`
+        : 'Free RAM/VRAM telemetry unavailable';
+}
+
+function calculateUniversalFit(model, profile) {
+    const resources = universalSpeechState.resources;
+    if (!resources) return { status: 'unknown', ratio: null };
+    const serverPlan = universalSpeechState.loadPlan;
+    if (universalLoadPlanMatches(serverPlan, model, profile)) {
+        return {
+            status: serverPlan.fit?.status || 'unknown',
+            ratio: serverPlan.fit?.ratio ?? null,
+            evictIds: (serverPlan.evict || []).map(item => item.id),
+            busyIds: (serverPlan.busy || []).map(item => item.id),
+            allResident: universalSelectedStackLoaded(model, profile),
+            serverPlan: true,
+        };
+    }
+    // Only the capability-v6 stack planner can account for a simultaneously
+    // selected ASR model and its steady-state evictions without double counting.
+    // Do not briefly show a confident TTS-only result while that plan is pending.
+    if (universalASRIsSelected()) return { status: 'unknown', ratio: null };
+    const loaded = new Set(resources.loadedModelIds || []);
+    const upscaler = universalSpeechState.capabilities?.upscaler;
+    const residentLimit = Math.max(1, Number(
+        universalSpeechState.capabilities?.residentLimit || 1
+    ));
+    const residentModels = (resources.components || []).filter(component =>
+        component?.kind === 'model' && component.loaded);
+    const evictionsNeeded = loaded.has(model.id)
+        ? 0 : Math.max(0, residentModels.length + 1 - residentLimit);
+    const victims = residentModels.filter(component => component.evictable)
+        .slice(0, evictionsNeeded);
+    const busyIds = evictionsNeeded > victims.length
+        ? residentModels.filter(component => component.busy)
+            .slice(0, evictionsNeeded - victims.length).map(component => component.id)
+        : [];
+    const ratios = [];
+    const requirement = kind => {
+        let bytes = loaded.has(model.id)
+            ? 0
+            : universalRequirementEstimate(model, kind)?.bytes;
+        if (bytes === null || bytes === undefined || !Number.isFinite(Number(bytes))) return null;
+        if (profile?.upscale && !resources.upscalerLoaded) {
+            const upscaleBytes = upscaler?.resources?.[kind]?.estimatedBytes;
+            if (kind === 'vram') {
+                const measured = Number.isFinite(Number(upscaleBytes))
+                    ? Number(upscaleBytes) : 0;
+                bytes += Math.max(measured, UNIVERSAL_UPSCALER_VRAM_OVERHEAD_BYTES);
+            } else {
+                if (upscaleBytes === null || upscaleBytes === undefined
+                    || !Number.isFinite(Number(upscaleBytes))) return null;
+                bytes += Number(upscaleBytes);
+            }
+        }
+        const batchingEffective = !!(profile?.adaptive_batching && model.segmentation
+            && model.alignmentCompatible);
+        if (batchingEffective && !resources.alignerLoaded) {
+            const advertisedBytes = universalSpeechState.capabilities?.alignment
+                ?.resources?.[kind]?.estimatedBytes;
+            if (kind === 'vram') {
+                const measured = Number.isFinite(Number(advertisedBytes))
+                    ? Number(advertisedBytes) : 0;
+                bytes += Math.max(measured, UNIVERSAL_ALIGNMENT_VRAM_OVERHEAD_BYTES);
+            } else {
+                if (advertisedBytes === null || advertisedBytes === undefined
+                    || !Number.isFinite(Number(advertisedBytes))) return null;
+                bytes += Number(advertisedBytes);
+            }
+        }
+        return Number(bytes);
+    };
+    const ramRequired = requirement('ram');
+    const reclaimable = kind => victims.reduce((total, component) => {
+        const value = component?.resources?.[kind]?.estimatedBytes;
+        return total + (Number.isFinite(Number(value)) ? Number(value) : 0);
+    }, 0);
+    if (ramRequired !== null && resources.ram?.freeBytes !== null
+        && resources.ram?.freeBytes !== undefined && Number.isFinite(Number(resources.ram.freeBytes))) {
+        ratios.push(ramRequired === 0 ? Infinity
+            : (Number(resources.ram.freeBytes) + reclaimable('ram')) / ramRequired);
+    }
+    const gpuFreeValues = (resources.gpus || [])
+        .map(gpu => gpu?.freeBytes)
+        .filter(value => value !== null && value !== undefined && Number.isFinite(Number(value)))
+        .map(Number);
+    const bestGpuFree = gpuFreeValues.length ? Math.max(...gpuFreeValues) : null;
+    const vramRequired = requirement('vram');
+    if (vramRequired !== null && bestGpuFree !== null) {
+        ratios.push(vramRequired === 0 ? Infinity
+            : (bestGpuFree + reclaimable('vram')) / vramRequired);
+    }
+    if (busyIds.length) {
+        return {
+            status: 'busy', ratio: null,
+            evictIds: victims.map(component => component.id), busyIds,
+            allResident: false,
+        };
+    }
+    if (!ratios.length) return { status: 'unknown', ratio: null };
+    const ratio = Math.min(...ratios);
+    return {
+        status: ratio >= 1.5 ? 'comfortable' : ratio >= 1 ? 'tight' : 'insufficient',
+        ratio,
+        evictIds: victims.map(component => component.id),
+        busyIds: [],
+        allResident: universalSelectedStackLoaded(model, profile),
+    };
+}
+
+function refreshUniversalFits() {
+    for (const model of universalCompatibleModels()) {
+        const saved = config.tts?.universal?.model_settings?.[model.id];
+        const profile = saved || model.defaults || {};
+        model.loaded = (universalSpeechState.resources?.loadedModelIds || []).includes(model.id);
+        model.fit = calculateUniversalFit(model, profile);
+    }
+}
+
+function renderUniversalModelPanel() {
+    const panel = document.getElementById('universalModelPanel');
+    if (!panel) return;
+    const caps = universalSpeechState.capabilities;
+    if (!caps) {
+        panel.innerHTML = '';
+        return;
+    }
+    const models = caps.compatibleModels || [];
+    if (!models.length) {
+        panel.innerHTML = '<div class="universal-empty-state">The server is connected, but no voice-cloning model supports the current game language.</div>';
+        return;
+    }
+    const selectedId = config.tts?.universal?.model || caps.recommendedModelId || models[0].id;
+    const model = models.find(item => item.id === selectedId) || models[0];
+    const profile = ensureUniversalModelProfile(model.id);
+    refreshUniversalFits();
+    const disabled = universalSpeechState.status !== 'connected';
+    const outputRate = profile?.upscale && caps.upscaler ? caps.upscaler.sampleRate : model.sampleRate;
+    const controls = (model.controls || []).map(control => {
+        const value = profile?.options?.[control.id] ?? control.default;
+        return `<div class="field-group universal-dynamic-control">
+            <label class="field-label">${escapeHtml(control.label || control.id)}</label>
+            <div class="range-wrapper">
+                <input type="range" min="${control.minimum}" max="${control.maximum}" step="${control.step}"
+                       value="${value}" ${disabled ? 'disabled' : ''}
+                       oninput="updateUniversalModelOption('${escapeHtml(control.id)}', this.value, '${control.type}'); this.nextElementSibling.textContent = this.value">
+                <span class="range-value">${value}</span>
+            </div>
+        </div>`;
+    }).join('');
+    const upscale = model.upscaleEligible ? `
+        <div class="toggle-wrapper">
+            <div>
+                <span class="toggle-label">Upscale to ${Number(caps.upscaler.sampleRate / 1000).toFixed(0)} kHz</span>
+                <p class="field-hint">Uses VoxCPM2 AudioVAE V2 super-resolution to render lower-rate speech at 48 kHz and automatically applies smoothing EQ. Adds about 500 MB of VRAM overhead.</p>
+            </div>
+            <label class="toggle"><input type="checkbox" ${profile?.upscale ? 'checked' : ''} ${disabled ? 'disabled' : ''}
+                onchange="updateUniversalProfileValue('upscale', this.checked, true)">
+                <span class="toggle-track"><span class="toggle-thumb"></span></span></label>
+        </div>` : '';
+    const batchingEligible = !!(model.segmentation && model.alignmentCompatible
+        && caps.capabilitiesVersion >= 3);
+    const batching = model.segmentation ? `
+        <div class="toggle-wrapper field-group" data-simple-hide="true">
+            <div>
+                <span class="toggle-label">Adaptive sentence batching</span>
+                <p class="field-hint">Produces the best multi-sentence speech quality, but adds about 500 MB of VRAM overhead.${batchingEligible ? '' : ' Unavailable for the current language or server.'}</p>
+            </div>
+            <label class="toggle"><input type="checkbox" ${batchingEligible && profile?.adaptive_batching ? 'checked' : ''}
+                ${disabled || !batchingEligible ? 'disabled' : ''}
+                onchange="updateUniversalProfileValue('adaptive_batching', this.checked, true)">
+                <span class="toggle-track"><span class="toggle-thumb"></span></span></label>
+        </div>` : '';
+    const voiceSetup = model.installed === false ? '' : renderUniversalVoiceSetup(model, disabled);
+    const fit = calculateUniversalFit(model, profile);
+    const fitTone = universalFitTone(fit.status);
+    const stackLoaded = universalSelectedStackLoaded(model, profile);
+    const missingStack = universalMissingStackComponents(model, profile);
+    const missingStackDetail = universalMissingStackDetail(missingStack);
+    const installTarget = universalCurrentInstallTarget();
+    const installCard = renderUniversalInstall(installTarget);
+    panel.innerHTML = `<fieldset class="universal-model-fieldset" ${disabled ? 'disabled' : ''}>
+        <div class="field-group">
+            <label class="field-label">Speech Model</label>
+            <p class="field-hint">Search by model, backend, or language. Only compatible voice-cloning models are listed.</p>
+            <div class="model-autocomplete-combobox universal-model-combobox">
+                <input type="text" id="universalModelInput" value="${escapeHtml(model.name)}" autocomplete="off">
+                <button type="button" class="model-autocomplete-dropdown-btn" aria-label="Browse speech models" ${disabled ? 'disabled' : ''}>&#9662;</button>
+            </div>
+            ${universalSpeechState.selectionWarning ? `<p class="field-hint universal-warning">${escapeHtml(universalSpeechState.selectionWarning)}</p>` : ''}
+        </div>
+        <div class="universal-model-summary universal-model-card">
+            <div class="universal-model-card-header">
+                <strong class="universal-model-card-name">${escapeHtml(model.name)}</strong>
+                <span class="universal-badge-row">${universalModelBadges(model)}</span>
+            </div>
+            <div class="universal-model-description">${escapeHtml(model.description || 'Server-provided model.')}</div>
+            <div class="universal-model-spec-grid">
+                <div class="universal-model-spec universal-model-spec-rate">
+                    <span class="universal-model-spec-label">Audio</span>
+                    <strong>${Number(model.sampleRate / 1000).toFixed(1)} kHz <span aria-hidden="true">→</span> ${Number(outputRate / 1000).toFixed(1)} kHz</strong>
+                    <span class="universal-model-spec-note">Native → output</span>
+                </div>
+                <div class="universal-model-spec universal-model-spec-memory">
+                    <span class="universal-model-spec-label">Estimated requirement</span>
+                    <strong>${escapeHtml(universalEstimateText(model))}</strong>
+                    <span class="universal-model-spec-note">${escapeHtml(universalEstimateSource(model))}</span>
+                </div>
+                <div class="universal-model-spec universal-model-spec-fit">
+                    <span class="universal-model-spec-label">Hardware fit</span>
+                    <strong id="universalSelectedFit" class="universal-fit-badge universal-fit-${fitTone}">${escapeHtml(fit.status)}</strong>
+                    <span class="universal-model-spec-note" id="universalSelectedFitNote">${escapeHtml(universalFitNote(fit))}</span>
+                </div>
+            </div>
+        </div>
+        ${voiceSetup}
+        ${controls}${upscale}${batching}
+        ${installCard}
+        <div class="universal-model-actions">
+            <button type="button" class="btn btn-sm" onclick="resetUniversalModelProfile()">${model.recommended ? 'Reset to recommended' : 'Reset to server defaults'}</button>
+            <button type="button" class="btn btn-primary btn-sm" id="universalWarmupButton"
+                onclick="warmupUniversalModel()" ${stackLoaded || installTarget ? 'hidden' : ''}>${universalLoadButtonLabel(missingStack)}</button>
+            <span id="universalWarmupLoaded" class="universal-fit-badge universal-fit-comfortable"
+                ${stackLoaded ? '' : 'hidden'}>Selected stack loaded</span>
+        </div>
+        <p class="field-hint universal-stack-load-detail" id="universalStackLoadDetail"
+            ${missingStackDetail ? '' : 'hidden'}>${missingStackDetail}</p>
+        <p class="field-hint" id="universalWarmupStatus"></p>
+        <div id="universalRemoteResources" class="universal-resource-grid"></div>
+    </fieldset>`;
+    initializeUniversalModelAutocomplete();
+    updateUniversalResourceDisplay();
+    applySimpleMode();
+}
+
+function initializeUniversalModelAutocomplete() {
+    const input = document.getElementById('universalModelInput');
+    if (!input || !window.Awesomplete) return;
+    const models = universalCompatibleModels();
+    const lookup = new Map(models.map(model => [model.id, model]));
+    const awesomplete = new Awesomplete(input, {
+        list: models.map(model => ({ label: model.name, value: model.id })),
+        minChars: 0, maxItems: 20, autoFirst: false, sort: false,
+        filter(text, query) {
+            const model = lookup.get(String(text.value));
+            const haystack = [model?.name, model?.id, model?.backend, ...(model?.languages || [])].join(' ').toLowerCase();
+            return input._universalShowFullList || haystack.includes(String(query || '').toLowerCase());
+        },
+        item(text, query, index) {
+            const model = lookup.get(String(text.value));
+            const fitStatus = model?.fit?.status || 'unknown';
+            const li = document.createElement('li');
+            li.setAttribute('role', 'option');
+            li.id = `awesomplete_list_universal_item_${index}`;
+            li.innerHTML = `<span class="universal-option-heading">
+                    <span class="universal-option-title">${escapeHtml(model?.name || String(text))}</span>
+                    <span class="universal-badge-row">${universalModelBadges(model)}</span>
+                </span>
+                <span class="universal-option-detail">
+                    <span class="universal-option-backend">${escapeHtml(model?.backend || 'Unknown backend')}</span>
+                    <span>${Number((model?.sampleRate || 0) / 1000).toFixed(1)} kHz native</span>
+                    <span>${escapeHtml(universalEstimateText(model || {}))}</span>
+                    <span class="universal-fit-badge universal-fit-${universalFitTone(fitStatus)}">${escapeHtml(fitStatus)} fit</span>
+                </span>`;
+            return li;
+        },
+        replace(text) {
+            input.value = text.label;
+        }
+    });
+    input._universalAwesomplete = awesomplete;
+    const dropdown = input.closest('.universal-model-combobox')
+        ?.querySelector('.model-autocomplete-dropdown-btn');
+    if (dropdown) {
+        dropdown.onclick = event => {
+            event.preventDefault();
+            input.focus();
+            if (!awesomplete.ul.hasAttribute('hidden')) {
+                awesomplete.close();
+                return;
+            }
+            input._universalShowFullList = true;
+            awesomplete.evaluate();
+            awesomplete.open();
+            input._universalShowFullList = false;
+        };
+    }
+    const accept = event => {
+        const selectedValue = event?.text?.value;
+        const typedValue = input.value.trim().toLocaleLowerCase();
+        const typedMatches = models.filter(model => model.name.toLocaleLowerCase() === typedValue
+            || model.id.toLocaleLowerCase() === typedValue);
+        const value = lookup.has(String(selectedValue))
+            ? String(selectedValue)
+            : typedMatches.length === 1 ? typedMatches[0].id : '';
+        if (!lookup.has(value)) {
+            const selectedModel = lookup.get(config.tts.universal.model);
+            input.value = selectedModel?.name || '';
+            input.classList.add('input-error');
+            return;
+        }
+        input.classList.remove('input-error');
+        if (value === config.tts.universal.model) {
+            input.value = lookup.get(value).name;
+            return;
+        }
+        selectUniversalModel(value);
+    };
+    input.addEventListener('awesomplete-selectcomplete', accept);
+    input.addEventListener('change', accept);
+}
+
+function selectUniversalModel(modelId) {
+    if (!universalCompatibleModels().some(model => model.id === modelId)) return;
+    config.tts.universal.model = modelId;
+    universalSpeechState.selectionWarning = '';
+    universalSpeechState.voiceSetup = null;
+    universalSpeechState.voiceSetupError = null;
+    universalSpeechState.voiceSetupRequestId += 1;
+    ensureUniversalModelProfile(modelId);
+    markDirty();
+    renderUniversalModelPanel();
+    refreshUniversalLoadPlan();
+    refreshUniversalStackInstallPlans();
+    refreshUniversalVoiceSetupStatus();
+    refreshUniversalOverrideAutocompletes();
+}
+
+function renderUniversalVoiceSetup(model, disabled) {
+    const policy = model.voiceReference || {};
+    const transcriptPolicy = policy.transcript || 'unused';
+    const preparationMode = policy.preparation?.mode || 'lazy';
+    const setup = universalSpeechState.voiceSetup;
+    const setupError = universalSpeechState.voiceSetupError;
+    const progress = universalSpeechState.voiceSetupProgress;
+    const running = progress?.status === 'processing' && progress.model === model.id;
+    const anotherModelRunning = progress?.status === 'processing' && progress.model !== model.id;
+    const setupCurrent = setup?.model === model.id;
+    const setupComplete = Boolean(setupCurrent && setup.complete);
+    let detail = 'Checking local and remote voice references...';
+    let warning = '';
+    let buttonDisabled = disabled || !setup;
+    if (running) {
+        const total = Number(progress.total || 0);
+        const completed = Number(progress.completed || 0);
+        const transcriptProgress = [];
+        if (progress.reused) transcriptProgress.push(`${progress.reused} local transcript${progress.reused === 1 ? '' : 's'} reused`);
+        if (progress.transcribed) transcriptProgress.push(`${progress.transcribed} transcript${progress.transcribed === 1 ? '' : 's'} generated`);
+        detail = `${progress.phase || 'Processing'}: ${completed}/${total}${progress.current ? ` - ${escapeHtml(progress.current)}` : ''}${transcriptProgress.length ? ` · ${transcriptProgress.join(', ')}` : ''}`;
+        buttonDisabled = true;
+    } else if (anotherModelRunning) {
+        detail = `Voice setup is currently running for ${escapeHtml(progress.model)}.`;
+        buttonDisabled = true;
+    } else if (setupError) {
+        detail = escapeHtml(setupError);
+        buttonDisabled = true;
+    } else if (setup && setup.model === model.id) {
+        const parts = [];
+        if (setup.transcriptsMissing) parts.push(`${setup.transcriptsMissing} transcript${setup.transcriptsMissing === 1 ? '' : 's'}`);
+        if (setup.uploadsMissing) parts.push(`${setup.uploadsMissing} upload${setup.uploadsMissing === 1 ? '' : 's'}`);
+        if (setup.preparationsMissing) parts.push(`${setup.preparationsMissing} encoding${setup.preparationsMissing === 1 ? '' : 's'}`);
+        detail = setup.complete
+            ? `${setup.total} active-language voice references are ready for this model.`
+            : `${parts.join(', ') || 'Preparation pending'} for ${setup.total} active-language references.`;
+        if (transcriptPolicy === 'required' && setup.transcriptsMissing && !setup.sttConfigured) {
+            warning = 'This model requires reference transcripts. Configure a Speech-to-Text provider before preparing or lazily cloning new voices.';
+            buttonDisabled = true;
+        } else if (preparationMode === 'lazy') {
+            detail += ' This backend encodes each voice on first use.';
+        }
+    }
+    const failures = progress?.failures?.length
+        ? `<p class="field-hint universal-warning">${progress.failures.length} voice reference${progress.failures.length === 1 ? '' : 's'} failed; retry resumes unfinished work.</p>`
+        : '';
+    let stateLabel = 'Checking';
+    let stateTone = 'unknown';
+    if (setupComplete) {
+        stateLabel = 'Ready';
+        stateTone = 'comfortable';
+    } else if (running) {
+        stateLabel = 'Processing';
+        stateTone = 'busy';
+    } else if (anotherModelRunning) {
+        stateLabel = 'Waiting';
+        stateTone = 'busy';
+    } else if (setupError || progress?.failures?.length) {
+        stateLabel = 'Attention';
+        stateTone = 'insufficient';
+    } else if (setupCurrent) {
+        stateLabel = 'Setup needed';
+        stateTone = 'tight';
+    }
+    return `<div class="universal-model-summary universal-voice-setup-card${setupComplete ? ' universal-voice-setup-ready' : ''}" id="universalVoiceSetupCard">
+        <div class="universal-voice-setup-heading">
+            <strong>Voice Reference Setup</strong>
+            <span class="universal-fit-badge universal-fit-${stateTone}">${stateLabel}</span>
+        </div>
+        <div>${detail}</div>
+        ${warning ? `<p class="field-hint universal-warning">${escapeHtml(warning)}</p>` : ''}
+        ${failures}
+        ${setupComplete ? '' : `<div class="universal-model-actions">
+            <button type="button" class="btn btn-sm" onclick="startUniversalVoiceSetup()"
+                ${buttonDisabled ? 'disabled' : ''}>Prepare Voice References</button>
+            ${running ? '<button type="button" class="btn btn-sm" onclick="cancelUniversalVoiceSetup()">Cancel</button>' : ''}
+        </div>`}
+        <p class="field-hint universal-voice-setup-note">Full setup is optional. Without it, Sonorus performs the same required transcript, upload, and supported encoding work when a voice is first used.</p>
+    </div>`;
+}
+
+function renderUniversalVoiceSetupCard() {
+    const card = document.getElementById('universalVoiceSetupCard');
+    const model = universalCompatibleModels().find(
+        item => item.id === config.tts?.universal?.model
+    );
+    if (!card || !model) return;
+    card.outerHTML = renderUniversalVoiceSetup(
+        model, universalSpeechState.status !== 'connected'
+    );
+}
+
+async function refreshUniversalVoiceSetupStatus() {
+    if (!universalIsSelected() || universalSpeechState.status !== 'connected'
+        || !config.tts?.universal?.model) return;
+    const modelId = config.tts.universal.model;
+    if (!universalCompatibleModels().find(model => model.id === modelId)?.installed) {
+        universalSpeechState.voiceSetup = null;
+        universalSpeechState.voiceSetupError = null;
+        renderUniversalVoiceSetupCard();
+        return;
+    }
+    const requestId = ++universalSpeechState.voiceSetupRequestId;
+    universalSpeechState.voiceSetupError = null;
+    renderUniversalVoiceSetupCard();
+    try {
+        const response = await fetch('/api/tts/universal/voice-setup/status', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(universalDraftPayload({ model: modelId }))
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error?.message || 'Voice setup check failed.');
+        if (!universalIsSelected()
+            || requestId !== universalSpeechState.voiceSetupRequestId
+            || modelId !== config.tts?.universal?.model
+            || universalSpeechState.status !== 'connected') return;
+        universalSpeechState.voiceSetup = data.setup;
+        universalSpeechState.voiceSetupError = null;
+        universalSpeechState.voiceSetupProgress = data.progress;
+        renderUniversalVoiceSetupCard();
+        if (data.progress?.status === 'processing') startUniversalVoiceSetupPolling();
+    } catch (error) {
+        if (!universalIsSelected()
+            || requestId !== universalSpeechState.voiceSetupRequestId
+            || modelId !== config.tts?.universal?.model) return;
+        universalSpeechState.voiceSetupError = error.message || 'Voice setup check failed.';
+        renderUniversalVoiceSetupCard();
+        console.warn('[Universal] Voice setup status failed:', error);
+    }
+}
+
+async function startUniversalVoiceSetup() {
+    const modelId = config.tts.universal.model;
+    try {
+        const response = await fetch('/api/tts/universal/voice-setup/start', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(universalDraftPayload({ model: modelId }))
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error?.message || 'Voice setup failed to start.');
+        universalSpeechState.voiceSetupProgress = {
+            status: 'processing', model: modelId,
+            total: 0, completed: 0, phase: 'starting', current: '', failures: []
+        };
+        universalSpeechState.voiceSetupError = null;
+        renderUniversalVoiceSetupCard();
+        startUniversalVoiceSetupPolling();
+    } catch (error) {
+        showToast(error.message || 'Voice setup failed to start.', 'error');
+    }
+}
+
+function startUniversalVoiceSetupPolling() {
+    if (universalSpeechState.voiceSetupPollTimer) return;
+    universalSpeechState.voiceSetupPollTimer = setInterval(pollUniversalVoiceSetup, 1000);
+    pollUniversalVoiceSetup();
+}
+
+async function pollUniversalVoiceSetup() {
+    if (!universalIsSelected()) {
+        clearInterval(universalSpeechState.voiceSetupPollTimer);
+        universalSpeechState.voiceSetupPollTimer = null;
+        return;
+    }
+    if (universalSpeechState.voiceSetupPollInFlight) return;
+    universalSpeechState.voiceSetupPollInFlight = true;
+    try {
+        const response = await fetch('/api/tts/universal/voice-setup/progress');
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error('Voice setup progress failed.');
+        if (!universalIsSelected()) return;
+        universalSpeechState.voiceSetupProgress = data.progress;
+        renderUniversalVoiceSetupCard();
+        if (data.progress?.status !== 'processing') {
+            clearInterval(universalSpeechState.voiceSetupPollTimer);
+            universalSpeechState.voiceSetupPollTimer = null;
+            await refreshUniversalVoiceSetupStatus();
+            pollUniversalResources();
+        }
+    } catch (error) {
+        clearInterval(universalSpeechState.voiceSetupPollTimer);
+        universalSpeechState.voiceSetupPollTimer = null;
+    } finally {
+        universalSpeechState.voiceSetupPollInFlight = false;
+    }
+}
+
+async function cancelUniversalVoiceSetup() {
+    await fetch('/api/tts/universal/voice-setup/cancel', { method: 'POST' });
+}
+
+function updateUniversalModelOption(controlId, rawValue, type) {
+    const profile = ensureUniversalModelProfile(config.tts.universal.model);
+    if (!profile) return;
+    profile.options[controlId] = type === 'integer' ? parseInt(rawValue, 10) : parseFloat(rawValue);
+    markDirty();
+}
+
+function updateUniversalProfileValue(key, value, rerender = false) {
+    const profile = ensureUniversalModelProfile(config.tts.universal.model);
+    if (!profile) return;
+    profile[key] = value;
+    markDirty();
+    if (rerender) {
+        universalSpeechState.loadPlan = null;
+        renderUniversalModelPanel();
+        refreshUniversalLoadPlan();
+        refreshUniversalStackInstallPlans();
+    }
+}
+
+function resetUniversalModelProfile() {
+    const model = universalCompatibleModels().find(item => item.id === config.tts.universal.model);
+    if (!model) return;
+    const profile = ensureUniversalModelProfile(model.id);
+    const advertised = new Set((model.controls || []).map(control => control.id));
+    const preserved = Object.fromEntries(
+        Object.entries(profile.options || {}).filter(([id]) => !advertised.has(id))
+    );
+    profile.options = { ...preserved, ...(model.defaults?.options || {}) };
+    if (model.upscaleEligible) profile.upscale = model.defaults?.upscale !== false;
+    if (model.segmentation && model.alignmentCompatible) {
+        profile.adaptive_batching = model.defaults?.adaptive_batching !== false;
+    }
+    markDirty();
+    universalSpeechState.loadPlan = null;
+    renderUniversalModelPanel();
+    refreshUniversalLoadPlan();
+    refreshUniversalStackInstallPlans();
+}
+
+async function warmupUniversalModel() {
+    if (universalCurrentInstallTarget()) {
+        refreshUniversalStackInstallPlans();
+        return;
+    }
+    const button = document.getElementById('universalWarmupButton');
+    const asrButton = document.getElementById('universalASRWarmupButton');
+    const status = document.getElementById('universalWarmupStatus');
+    const asrStatus = document.getElementById('universalASRWarmupStatus');
+    const selection = universalStackSelection();
+    const connectionRequestId = universalSpeechState.requestId;
+    const warmupRequestId = ++universalSpeechState.warmupRequestId;
+    const components = [];
+    if (selection.tts_model) components.push('TTS');
+    if (selection.asr_model) components.push('ASR');
+    if (selection.upscale) components.push('AudioVAE');
+    if (selection.alignment) components.push('CTC');
+    if (button) button.disabled = true;
+    if (asrButton) asrButton.disabled = true;
+    const setStatus = value => {
+        if (status) status.textContent = value;
+        if (asrStatus) asrStatus.textContent = value;
+    };
+    setStatus(`Loading ${components.join(', ')} on the speech server…`);
+    try {
+        const combined = (universalSpeechState.capabilities?.capabilitiesVersion || 1) >= 6;
+        const endpoint = combined ? '/api/speech-server/warmup' : '/api/tts/universal/warmup';
+        const payload = combined ? universalStackPayload(selection) : {
+            model: selection.tts_model,
+            upscale: selection.upscale,
+            adaptive_batching: selection.alignment,
+        };
+        const response = await fetch(endpoint, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(universalDraftPayload(payload))
+        });
+        const data = await response.json().catch(() => ({}));
+        if (
+            connectionRequestId !== universalSpeechState.requestId
+            || warmupRequestId !== universalSpeechState.warmupRequestId
+            || !speechServerIsSelected()
+        ) return;
+        if (!response.ok || data.ok === false) {
+            const failures = data.warmup?.results?.filter(result => !result.loaded)
+                .map(result => `${result.id}: ${result.error || 'not loaded'}`).join('; ');
+            throw new Error(data.error?.message || failures || 'Warmup failed.');
+        }
+        universalSpeechState.resources = data.resources || universalSpeechState.resources;
+        setStatus(`${components.join(', ')} loaded.`);
+        // Warmup changes residency, not the model registry. Keep the successful
+        // capability discovery and update the existing panel in place; forcing a
+        // reconnect here can replace it with an empty shell if that follow-up
+        // request is interrupted or returns an incomplete response.
+        universalSpeechState.loadPlan = null;
+        refreshUniversalFits();
+        if (universalIsSelected()) refreshUniversalModelPanelIfIdle();
+        if (universalASRIsSelected()) refreshUniversalASRConnectionUI();
+        await refreshUniversalLoadPlan();
+    } catch (error) {
+        if (
+            connectionRequestId !== universalSpeechState.requestId
+            || warmupRequestId !== universalSpeechState.warmupRequestId
+            || !speechServerIsSelected()
+        ) return;
+        setStatus(error.message || 'Warmup failed.');
+    } finally {
+        if (button) button.disabled = false;
+        if (asrButton) asrButton.disabled = false;
+    }
+}
+
+function updateUniversalWarmupAction(model, profile) {
+    const button = document.getElementById('universalWarmupButton');
+    const loaded = document.getElementById('universalWarmupLoaded');
+    const detail = document.getElementById('universalStackLoadDetail');
+    const stackLoaded = universalSelectedStackLoaded(model, profile);
+    const installTarget = universalCurrentInstallTarget();
+    const missing = universalMissingStackComponents(model, profile);
+    const missingDetail = universalMissingStackDetail(missing);
+    const capacityOk = universalResidentCapacityOk();
+    if (button) {
+        button.hidden = stackLoaded || Boolean(installTarget);
+        button.textContent = universalLoadButtonLabel(missing);
+        button.disabled = !capacityOk || Boolean(installTarget);
+    }
+    if (loaded) loaded.hidden = !stackLoaded;
+    if (detail) {
+        const residentLimit = universalResidentLimit();
+        const capacityDetail = capacityOk ? ''
+            : `The server allows ${residentLimit} resident model ${residentLimit === 1 ? 'slot' : 'slots'}; two are required for remote TTS and ASR.`;
+        detail.hidden = !(capacityDetail || missingDetail);
+        detail.textContent = capacityDetail || missingDetail;
+    }
+}
+
+function updateUniversalSelectedFitDisplay() {
+    const selectedModel = universalCompatibleModels().find(
+        model => model.id === config.tts?.universal?.model
+    );
+    if (!selectedModel) return;
+    const profile = config.tts?.universal?.model_settings?.[selectedModel.id];
+    const result = calculateUniversalFit(selectedModel, profile);
+    const fit = document.getElementById('universalSelectedFit');
+    const note = document.getElementById('universalSelectedFitNote');
+    if (fit) {
+        fit.textContent = result.status;
+        fit.className = `universal-fit-badge universal-fit-${universalFitTone(result.status)}`;
+    }
+    if (note) note.textContent = universalFitNote(result);
+    updateUniversalWarmupAction(selectedModel, profile);
+}
+
+async function refreshUniversalLoadPlan() {
+    const caps = universalSpeechState.capabilities;
+    const selection = universalStackSelection();
+    if (!speechServerIsSelected() || universalSpeechState.status !== 'connected'
+        || !caps?.loadPlanning || universalCurrentInstallTarget()
+        || (!selection.tts_model && !selection.asr_model)) {
+        universalSpeechState.loadPlan = null;
+        updateUniversalSelectedFitDisplay();
+        return;
+    }
+    const requestId = ++universalSpeechState.loadPlanRequestId;
+    try {
+        const combined = (caps.capabilitiesVersion || 1) >= 6;
+        if (!combined && !selection.tts_model) {
+            throw new Error('Combined load planning requires an updated speech server.');
+        }
+        const endpoint = combined ? '/api/speech-server/plan' : '/api/tts/universal/plan';
+        const payload = combined ? universalStackPayload(selection) : {
+            model: selection.tts_model,
+            upscale: selection.upscale,
+            adaptive_batching: selection.alignment,
+        };
+        const response = await fetch(endpoint, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(universalDraftPayload(payload))
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!speechServerIsSelected()
+            || requestId !== universalSpeechState.loadPlanRequestId) return;
+        if (!response.ok) throw new Error(
+            data.error?.message || 'Component load planning failed.'
+        );
+        universalSpeechState.loadPlan = data.plan;
+        refreshUniversalFits();
+        updateUniversalSelectedFitDisplay();
+        if (universalASRIsSelected()) refreshUniversalASRModelPanelIfIdle();
+    } catch (error) {
+        if (!speechServerIsSelected()
+            || requestId !== universalSpeechState.loadPlanRequestId) return;
+        universalSpeechState.loadPlan = null;
+        refreshUniversalFits();
+        updateUniversalSelectedFitDisplay();
+        if (universalASRIsSelected()) refreshUniversalASRModelPanelIfIdle();
+        console.warn('[Universal] Load planning unavailable:', error);
+    }
+}
+
+function startUniversalResourcePolling() {
+    if (!speechServerIsSelected() || universalSpeechState.status !== 'connected'
+        || universalSpeechState.capabilities?.resourcesAvailable === false) return;
+    if (!universalSpeechState.pollTimer) {
+        universalSpeechState.pollTimer = setInterval(pollUniversalResources, 3000);
+    }
+}
+
+async function pollUniversalResources() {
+    if (!speechServerIsSelected() || universalSpeechState.status !== 'connected'
+        || document.hidden || universalSpeechState.resourcePollInFlight) return;
+    const connectionRequestId = universalSpeechState.requestId;
+    const pollRequestId = ++universalSpeechState.resourcePollRequestId;
+    universalSpeechState.resourcePollInFlight = true;
+    try {
+        const response = await fetch('/api/speech-server/resources', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(universalDraftPayload())
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!speechServerIsSelected()
+            || connectionRequestId !== universalSpeechState.requestId
+            || pollRequestId !== universalSpeechState.resourcePollRequestId) return;
+        if (!response.ok) throw new Error(data.error?.message || 'Resource polling failed.');
+        universalSpeechState.resources = data.resources;
+        universalSpeechState.lastChecked = Date.now();
+        refreshUniversalFits();
+        updateUniversalResourceDisplay();
+        updateUniversalSelectedFitDisplay();
+        if (universalASRIsSelected()) refreshUniversalASRModelPanelIfIdle();
+        refreshUniversalLoadPlan();
+    } catch (error) {
+        if (!speechServerIsSelected()
+            || connectionRequestId !== universalSpeechState.requestId
+            || pollRequestId !== universalSpeechState.resourcePollRequestId) return;
+        universalSpeechState.status = 'stale';
+        universalSpeechState.error = error.message;
+        clearUniversalTimers();
+        const container = document.getElementById('ttsProviderSettings');
+        if (container && universalIsSelected()) refreshUniversalConnectionUI();
+        if (universalASRIsSelected()) refreshUniversalASRConnectionUI();
+        scheduleUniversalReconnect();
+        refreshSetupStateFromConfig();
+    } finally {
+        if (pollRequestId === universalSpeechState.resourcePollRequestId) {
+            universalSpeechState.resourcePollInFlight = false;
+        }
+    }
+}
+
+function updateUniversalResourceDisplay() {
+    const target = document.getElementById('universalRemoteResources');
+    if (!target) return;
+    const resources = universalSpeechState.resources;
+    if (!resources) {
+        target.innerHTML = '<p class="field-hint">Remote RAM/VRAM telemetry unavailable.</p>';
+        return;
+    }
+    const ram = resources.ram;
+    const gpu = [...(resources.gpus || [])].sort((a, b) => (b.totalBytes || 0) - (a.totalBytes || 0))[0];
+    const meter = (label, item, detail = '') => {
+        if (!item?.totalBytes) return `<div class="universal-resource-meter"><strong>${escapeHtml(label)}</strong><span>Unavailable</span></div>`;
+        const pct = Math.max(0, Math.min(100, item.usedBytes / item.totalBytes * 100));
+        const tone = pct >= 90 ? 'red' : pct >= 75 ? 'yellow' : 'green';
+        return `<div class="universal-resource-meter"><strong>${escapeHtml(label)}</strong>
+            <span>${formatUniversalBytes(item.usedBytes)} / ${formatUniversalBytes(item.totalBytes)}</span>
+            <div class="vram-bar" role="meter" aria-label="${escapeHtml(label)} usage"
+                aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct.toFixed(1)}">
+                <div class="vram-fill ${tone}" style="width:${pct.toFixed(1)}%"></div>
+            </div>
+            <span class="field-hint">${formatUniversalBytes(item.freeBytes)} free · remote measurement${detail}</span></div>`;
+    };
+    const processDetail = resources.processRamBytes !== null
+        && resources.processRamBytes !== undefined
+        && Number.isFinite(Number(resources.processRamBytes))
+        ? ` · speech process ${formatUniversalBytes(resources.processRamBytes)}` : '';
+    target.innerHTML = meter('Server RAM', ram, processDetail) + meter(gpu?.name || 'Server GPU VRAM', gpu);
+}
+
+function refreshUniversalOverrideAutocompletes() {
+    const enabled = universalIsSelected() && !!universalSpeechState.capabilities;
+    const models = enabled ? universalCompatibleModels() : [];
+    const ids = models.map(model => model.id);
+    document.querySelectorAll('#playerVoiceModel, .character-model-override').forEach(input => {
+        if (window.Awesomplete) {
+            if (!input._universalOverrideAwesomplete) {
+                input._universalOverrideAwesomplete = new Awesomplete(input, { list: ids, minChars: 0, maxItems: 20, sort: false });
+                input.addEventListener('awesomplete-selectcomplete', () => input.dispatchEvent(new Event('change', { bubbles: true })));
+            } else {
+                input._universalOverrideAwesomplete.list = ids;
+            }
+        }
+        const invalid = enabled && input.value.trim() && !ids.includes(input.value.trim());
+        input.classList.toggle('universal-ignored-override', invalid);
+        input.title = invalid ? 'Ignored by Universal Speech Server: this model is not currently compatible.' : '';
+        let warning = input.parentElement?.querySelector('.universal-override-warning');
+        if (invalid && !warning) {
+            warning = document.createElement('p');
+            warning.className = 'field-hint universal-warning universal-override-warning';
+            warning.textContent = 'Saved value is retained but ignored; Universal uses the global model.';
+            input.insertAdjacentElement('afterend', warning);
+        } else if (!invalid && warning) {
+            warning.remove();
+        }
+    });
+}
+
+document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+        if (universalSpeechState.status === 'connected') pollUniversalResources();
+        else if (speechServerIsSelected()) connectUniversalSpeechServer(false);
+    }
+});
+
 function renderProviderSettings(category, providerId) {
     const providers = category === 'tts' ? TTS_PROVIDERS : {};
     const providerConfig = providers[providerId];
@@ -601,17 +2459,26 @@ function renderProviderSettings(category, providerId) {
         return;
     }
 
+    if (category === 'tts' && providerId === 'universal') {
+        renderUniversalProviderSettings(container, providerConfig);
+        return;
+    }
+
     let html = '';
     if (providerConfig.description) {
         html += `<p class="field-hint" style="margin-bottom: var(--space-md);">${providerConfig.description}</p>`;
     }
     html += providerConfig.fields.map(f => renderField(f, category, providerId)).join('');
     container.innerHTML = html;
+    updateProviderFieldDependencies(category, providerId);
     applySimpleMode();
 }
 
 function switchProvider(category, providerId) {
     updateSetting(`${category}.provider`, providerId);
+    if (category === 'tts' && providerId !== 'universal' && !universalASRIsSelected()) {
+        suspendUniversalUiWork();
+    }
     renderProviderSettings(category, providerId);
 
     // Handle TTS-specific UI updates
@@ -620,6 +2487,14 @@ function switchProvider(category, providerId) {
         updateVramMonitoring();
         updateRamMonitoring();
         updateOmniVoicePanel();
+        updateOmniVoiceCppPanel();
+        if (providerId === 'universal') {
+            connectUniversalSpeechServer(false);
+        } else if (universalASRIsSelected()) {
+            renderSTTProviderSettings('universal');
+            refreshUniversalLoadPlan();
+        }
+        refreshUniversalOverrideAutocompletes();
     }
 
     refreshSetupStateFromConfig();
@@ -696,6 +2571,7 @@ function updatePlayerVoiceSectionState(providerId) {
     const input = document.getElementById('playerVoiceName');
     const pronunciationSection = document.getElementById('pronunciationSection');
     const pronunciationTextarea = document.getElementById('pronunciationReplacements');
+    const settingsTestButton = document.getElementById('ttsSettingsTestBtn');
 
     if (section) {
         section.style.opacity = isDisabled ? '0.5' : '1';
@@ -713,6 +2589,12 @@ function updatePlayerVoiceSectionState(providerId) {
     }
     if (pronunciationTextarea) {
         pronunciationTextarea.disabled = isDisabled;
+    }
+    if (settingsTestButton) {
+        settingsTestButton.disabled = isDisabled;
+        settingsTestButton.title = isDisabled
+            ? 'Voice testing is unavailable while TTS is set to Disabled (Subtitles Only).'
+            : 'Open the TTS voice test in Setup.';
     }
 
     // Update sub-settings (spatial, voice override) based on player voice toggle
@@ -1031,7 +2913,8 @@ function renderOmniVoicePanel(data) {
     // Voice setup section (step 2 — same prominent spot as install)
     const voiceSetup = document.getElementById('omnivoiceVoiceSetup');
     const progress = data.setup_progress || {};
-    const isProcessing = progress.status === 'processing' || progress.status === 'loading';
+    const isProcessing = progress.status === 'transcribing'
+        || progress.status === 'processing' || progress.status === 'loading';
 
     if (voiceSetup) {
         voiceSetup.style.display = (needsVoiceSetup || isProcessing) ? 'block' : 'none';
@@ -1058,7 +2941,9 @@ function renderOmniVoicePanel(data) {
             if (voiceCount) {
                 voiceCount.textContent = progress.status === 'loading'
                     ? 'Loading OmniVoice model (first time may download ~3GB)...'
-                    : 'Processing voice references...';
+                    : progress.status === 'transcribing'
+                        ? 'Transcribing voice references...'
+                        : 'Processing voice references...';
                 voiceCount.style.color = '';
             }
             if (progressStatus) {
@@ -1075,8 +2960,10 @@ function renderOmniVoicePanel(data) {
                 voiceCount.textContent = data.voices_needing_setup + ' voice reference(s) need processing before OmniVoice can be used.';
                 voiceCount.style.color = '';
             }
-            if (sttWarning) sttWarning.style.display = data.stt_configured ? 'none' : 'block';
-            if (pretokenizeBtn) pretokenizeBtn.style.display = data.stt_configured ? '' : 'none';
+            const needsTranscription = Number(data.transcripts_needing_setup || 0) > 0;
+            const canPrepare = data.stt_configured || !needsTranscription;
+            if (sttWarning) sttWarning.style.display = canPrepare ? 'none' : 'block';
+            if (pretokenizeBtn) pretokenizeBtn.style.display = canPrepare ? '' : 'none';
         }
     }
 
@@ -1164,26 +3051,493 @@ async function fetchOmniVoiceResources(modelLoaded) {
         ]);
         const vramData = await vramResp.json();
         const ramData = await ramResp.json();
-
-        const vramEl = document.getElementById('omnivoiceVramIndicator');
-        if (vramEl) {
-            const gpuLabel = vramData.gpu_name ? ' - ' + vramData.gpu_name : '';
-            const label = modelLoaded ? 'GPU VRAM (OmniVoice loaded)' : 'GPU VRAM (needs ~2.5 GB' + gpuLabel + ')';
-            _updateMeter(vramEl, vramData.vram_used_gb, vramData.vram_total_gb, vramData.vram_free_gb, 2.5, label, modelLoaded);
-        }
-
-        const ramEl = document.getElementById('omnivoiceRamIndicator');
-        if (ramEl) {
-            // When loaded, subtract our process RAM from used to show what
-            // free RAM would look like without us — avoids false "insufficient" warnings
-            const processRam = ramData.process_ram_gb || 0;
-            const adjustedFree = modelLoaded ? ramData.ram_free_gb + processRam : ramData.ram_free_gb;
-            const adjustedUsed = modelLoaded ? ramData.ram_used_gb - processRam : ramData.ram_used_gb;
-            const ramLabel = modelLoaded ? 'System RAM (OmniVoice loaded)' : 'System RAM (needs ~2.5 GB)';
-            _updateMeter(ramEl, adjustedUsed, ramData.ram_total_gb, adjustedFree, 2.5, ramLabel, modelLoaded);
-        }
+        renderOmniVoiceResourceMeters('omnivoice', vramData, ramData, modelLoaded);
     } catch (e) {
         console.error('[OmniVoice] Resource fetch failed:', e);
+    }
+}
+
+// ============================================
+// OmniVoice (Vulkan) Setup & Monitoring
+// ============================================
+let omnivoiceCppStatusInterval = null;
+let omnivoiceCppPollMs = 0;
+let _omnivoiceCppSavedDevice = null;
+let _omnivoiceCppStatusPromise = null;
+let _omnivoiceCppInstallStarting = false;
+let _omnivoiceCppBackendReady = null;
+let _omnivoiceCppInstallRunning = false;
+
+function updateOmniVoiceCppPanel() {
+    const provider = config.tts?.provider;
+    const panel = document.getElementById('omnivoiceCppSetup');
+    if (provider !== 'omnivoice_cpp') {
+        if (panel) panel.style.display = 'none';
+        if (omnivoiceCppStatusInterval) {
+            clearInterval(omnivoiceCppStatusInterval);
+            omnivoiceCppStatusInterval = null;
+            omnivoiceCppPollMs = 0;
+        }
+        return;
+    }
+    if (panel) panel.style.display = 'block';
+    fetchOmniVoiceCppStatus();
+    _setOmniVoiceCppPoll(3000);
+}
+
+function _setOmniVoiceCppPoll(ms) {
+    if (omnivoiceCppPollMs === ms && omnivoiceCppStatusInterval) return;
+    omnivoiceCppPollMs = ms;
+    if (omnivoiceCppStatusInterval) clearInterval(omnivoiceCppStatusInterval);
+    omnivoiceCppStatusInterval = setInterval(fetchOmniVoiceCppStatus, ms);
+}
+
+function fetchOmniVoiceCppStatus() {
+    if (_omnivoiceCppStatusPromise) return _omnivoiceCppStatusPromise;
+    _omnivoiceCppStatusPromise = (async () => {
+        try {
+            const device = config.tts?.omnivoice_cpp?.device || 'auto';
+            const [gpuResp, setupResp, ramResp] = await Promise.all([
+                fetch('/api/tts/vram-status?provider=omnivoice_cpp&device=' + encodeURIComponent(device)),
+                fetch('/api/tts/omnivoice-cpp/status'),
+                fetch('/api/system/ram-status')
+            ]);
+            if (!gpuResp.ok || !setupResp.ok || !ramResp.ok) throw new Error('Status request failed');
+            const [gpuData, setupData, ramData] = await Promise.all([
+                gpuResp.json(),
+                setupResp.json(),
+                ramResp.json()
+            ]);
+            if (config.tts?.provider !== 'omnivoice_cpp') return true;
+            renderOmniVoiceCppPanel({ ...gpuData, ...setupData, ram_status: ramData });
+            return true;
+        } catch (e) {
+            console.error('[OmniVoiceCpp] Status check failed:', e);
+            return false;
+        } finally {
+            _omnivoiceCppStatusPromise = null;
+        }
+    })();
+    return _omnivoiceCppStatusPromise;
+}
+
+function renderOmniVoiceCppPanel(data) {
+    const serverProgress = data.install_progress || {};
+    if (_omnivoiceCppInstallStarting && serverProgress.status === 'idle') {
+        data = {
+            ...data,
+            install_progress: {
+                ...serverProgress,
+                status: 'installing',
+                current: 'Waiting for the installer to start...',
+                message: 'Saving configuration and starting verified downloads...',
+            },
+        };
+    } else if (serverProgress.status === 'installing' ||
+               serverProgress.status === 'complete' ||
+               serverProgress.status === 'error') {
+        _omnivoiceCppInstallStarting = false;
+    }
+
+    const gpus = Array.isArray(data.gpus) ? data.gpus : [];
+    // selected_device reflects the saved settings on the server — use it as
+    // the baseline for the "restart needed" notice.
+    _omnivoiceCppSavedDevice = data.selected_device || 'auto';
+
+    const runtimeReady = data.runtime_present === true;
+    const modelsReady = data.models_present === true;
+    const backendReady = runtimeReady && modelsReady;
+
+    const progress = data.install_progress || {};
+    const installing = progress.status === 'installing';
+    _omnivoiceCppBackendReady = backendReady;
+    _omnivoiceCppInstallRunning = installing;
+
+    // Runtime and Vulkan state
+    const hintGroup = document.getElementById('omnivoiceCppRuntimeHint');
+    const hintText = document.getElementById('omnivoiceCppRuntimeHintText');
+    if (hintGroup && hintText) {
+        if (!runtimeReady && !installing) {
+            hintText.textContent = 'The native runtime is not shipped with the mod. Sonorus downloads and verifies runtime ' + (data.runtime_version || '') + ' from its GitHub release when this provider is activated.';
+            hintText.style.color = 'var(--warning)';
+            hintGroup.style.display = 'block';
+        } else if (gpus.length === 0) {
+            hintText.textContent = 'No Vulkan GPU was detected. Auto may fall back to CPU, which is much slower.';
+            hintText.style.color = 'var(--warning)';
+            hintGroup.style.display = 'block';
+        } else {
+            hintGroup.style.display = 'none';
+        }
+    }
+
+    renderOmniVoiceCppInstall(data, runtimeReady, modelsReady);
+    renderOmniVoiceCppVoiceSetup(data, backendReady);
+
+    const gpuPicker = document.getElementById('omnivoiceCppGpuPicker');
+    const restartSection = document.getElementById('omnivoiceCppRestartSection');
+    if (gpuPicker) gpuPicker.style.display = backendReady ? '' : 'none';
+    if (restartSection) restartSection.style.display = backendReady ? '' : 'none';
+
+    renderOmniVoiceCppGpuPicker(gpus);
+    updateOmniVoiceCppRestartNotice();
+
+    if (runtimeReady) {
+        const modelLoadedOnSelectedDevice = data.model_loaded === true
+            && data.server_device === data.selected_device;
+        renderOmniVoiceResourceMeters(
+            'omnivoice_cpp',
+            data,
+            data.ram_status || {},
+            modelLoadedOnSelectedDevice
+        );
+    } else {
+        setOmniVoiceResourceMetersVisible('omnivoice_cpp', false);
+    }
+
+    // Poll fast only while something is actually in flight; idle panels
+    // (everything installed, or waiting on user action) tick slowly.
+    const installBusy = (data.install_progress || {}).status === 'installing';
+    const voiceBusy = (data.voice_progress || {}).status === 'processing';
+    _setOmniVoiceCppPoll(installBusy || voiceBusy ? 3000 : 15000);
+}
+
+function renderOmniVoiceCppInstall(data, runtimeReady, modelsReady) {
+    const section = document.getElementById('omnivoiceCppInstallSection');
+    if (!section) return;
+
+    const progress = data.install_progress || {};
+    const installing = progress.status === 'installing';
+    const backendReady = runtimeReady && modelsReady;
+    section.style.display = !backendReady || installing ? 'block' : 'none';
+
+    const btn = document.getElementById('omnivoiceCppInstallBtn');
+    const hint = document.getElementById('omnivoiceCppInstallHint');
+    const progressBox = document.getElementById('omnivoiceCppInstallProgress');
+    const progressFill = document.getElementById('omnivoiceCppInstallProgressFill');
+    const progressCount = document.getElementById('omnivoiceCppInstallProgressCount');
+    const progressStatus = document.getElementById('omnivoiceCppInstallProgressStatus');
+    const completed = Number(progress.completed || 0);
+    const total = Number(progress.total || 4);
+
+    if (btn) {
+        btn.disabled = installing;
+        btn.textContent = installing
+            ? 'Downloading OmniVoice...'
+            : (progress.status === 'error' ? 'Retry OmniVoice Download' : 'Download OmniVoice Now');
+    }
+    if (hint) {
+        if (progress.status === 'error') {
+            hint.textContent = progress.message;
+        } else if (installing) {
+            hint.textContent = progress.message || 'Downloading and verifying the native runtime and three GGUF models...';
+        } else {
+            hint.textContent = 'Saving this provider starts the verified native runtime and three GGUF model downloads automatically (approximately 1.5 GB total). Use this button only to download before saving or to retry; existing partial downloads are resumed.';
+        }
+        hint.style.color = progress.status === 'error' ? 'var(--error)' : '';
+    }
+    if (progressBox) progressBox.style.display = installing ? 'block' : 'none';
+    if (progressFill) progressFill.style.width = (total > 0 ? Math.round(completed / total * 100) : 0) + '%';
+    if (progressCount) progressCount.textContent = completed + '/' + total;
+    if (progressStatus) {
+        progressStatus.textContent = progress.current || progress.message || 'Starting installer...';
+    }
+}
+
+function showOmniVoiceCppInstallStarting() {
+    if (config.tts?.provider !== 'omnivoice_cpp') return;
+    if (_omnivoiceCppBackendReady === true) return;
+    if (_omnivoiceCppInstallRunning) {
+        _setOmniVoiceCppPoll(3000);
+        return;
+    }
+    _omnivoiceCppInstallStarting = true;
+    renderOmniVoiceCppInstall({
+        install_progress: {
+            status: 'installing',
+            total: 4,
+            completed: 0,
+            current: 'Saving configuration and starting downloads...',
+            message: 'Saving configuration and starting verified downloads...',
+        },
+    }, false, false);
+    _setOmniVoiceCppPoll(3000);
+}
+
+function cancelOmniVoiceCppInstallStarting() {
+    _omnivoiceCppInstallStarting = false;
+    fetchOmniVoiceCppStatus();
+}
+
+function renderOmniVoiceCppVoiceSetup(data, backendReady) {
+    const section = document.getElementById('omnivoiceCppVoiceSetup');
+    if (!section) return;
+
+    const progress = data.voice_progress || {};
+    const processing = progress.status === 'processing';
+    const missing = Number(data.voices_needing_setup || 0);
+    const missingTranscripts = Number(data.transcripts_needing_setup || 0);
+    const missingTokens = Number(data.tokens_needing_setup || 0);
+    const canPrepare = data.stt_configured || missingTranscripts === 0;
+    section.style.display = backendReady && (missing > 0 || processing) ? 'block' : 'none';
+
+    const count = document.getElementById('omnivoiceCppVoiceCount');
+    const warning = document.getElementById('omnivoiceCppSttWarning');
+    const btn = document.getElementById('omnivoiceCppPrepareVoicesBtn');
+    const progressBox = document.getElementById('omnivoiceCppVoiceProgress');
+    const progressFill = document.getElementById('omnivoiceCppVoiceProgressFill');
+    const progressCount = document.getElementById('omnivoiceCppVoiceProgressCount');
+    const progressStatus = document.getElementById('omnivoiceCppVoiceProgressStatus');
+    const completed = Number(progress.completed || 0);
+    const total = Number(progress.total || missing);
+
+    if (count) {
+        if (processing) {
+            const phase = progress.phase || 'processing';
+            count.textContent = phase === 'transcribing'
+                ? 'Creating transcript sidecars for voice references...'
+                : 'Encoding voice references for future reuse...';
+            count.style.color = '';
+        } else if (progress.error) {
+            count.textContent = progress.error;
+            count.style.color = 'var(--error)';
+        } else {
+            const work = [];
+            if (missingTokens > 0) work.push(`${missingTokens} need audio encoding`);
+            if (missingTranscripts > 0) work.push(`${missingTranscripts} need transcription`);
+            const detail = work.length > 0 ? ' (' + work.join('; ') + ')' : '';
+            count.textContent = missing + ' voice reference(s) need preparation' + detail + '. Preparing them avoids first-conversation setup delays.';
+            count.style.color = '';
+        }
+    }
+    if (warning) warning.style.display = !processing && !canPrepare ? 'block' : 'none';
+    if (btn) {
+        btn.style.display = processing ? 'none' : '';
+        btn.disabled = processing || !canPrepare;
+        btn.textContent = canPrepare
+            ? 'Prepare Voice References'
+            : 'Configure STT to Prepare Voices';
+        btn.title = canPrepare
+            ? ''
+            : 'Select and configure a Speech-to-Text provider first.';
+    }
+    if (progressBox) progressBox.style.display = processing ? 'block' : 'none';
+    if (progressFill) progressFill.style.width = (total > 0 ? Math.round(completed / total * 100) : 0) + '%';
+    if (progressCount) progressCount.textContent = completed + '/' + total;
+    if (progressStatus) {
+        const phaseLabels = {
+            transcribing: 'Transcribing',
+            loading: 'Loading OmniVoice for encoding',
+            encoding: 'Encoding',
+        };
+        const phaseLabel = phaseLabels[progress.phase] || 'Processing';
+        progressStatus.textContent = progress.current ? phaseLabel + ': ' + progress.current : (progress.error || 'Starting...');
+    }
+}
+
+function renderOmniVoiceCppGpuPicker(gpus) {
+    const select = document.getElementById('omnivoiceCppGpuSelect');
+    if (!select) return;
+
+    const configured = config.tts?.omnivoice_cpp?.device || 'auto';
+    const desiredValue = gpus.some(g => g.device === configured) ? configured : 'auto';
+    const signature = JSON.stringify(gpus.map(g => [g.device, g.name]));
+
+    // Rebuilding the options collapses the dropdown if the user has it open —
+    // skip while neither the device list nor the selection has changed.
+    if (select.dataset.gpuSignature === signature && select.value === desiredValue) {
+        return;
+    }
+
+    select.dataset.gpuSignature = signature;
+    select.innerHTML = '';
+
+    const autoOpt = document.createElement('option');
+    autoOpt.value = 'auto';
+    autoOpt.textContent = 'Auto (best device)';
+    select.appendChild(autoOpt);
+
+    for (const gpu of gpus) {
+        const opt = document.createElement('option');
+        opt.value = gpu.device;
+        const memory = Number.isFinite(gpu.vram_total_gb) ? ` (${gpu.vram_total_gb.toFixed(1)} GB)` : '';
+        opt.textContent = `GPU ${gpu.index}: ${gpu.name}${memory}`;
+        select.appendChild(opt);
+    }
+
+    select.value = desiredValue;
+}
+
+function updateOmniVoiceCppGpu(device) {
+    if (!device) return;
+    updateProviderSetting('tts', 'omnivoice_cpp', 'device', device);
+    updateOmniVoiceCppRestartNotice();
+    fetchOmniVoiceCppStatus();
+}
+
+function updateOmniVoiceCppRestartNotice() {
+    const notice = document.getElementById('omnivoiceCppRestartNotice');
+    if (!notice) return;
+    const current = config.tts?.omnivoice_cpp?.device || 'auto';
+    const changed = _omnivoiceCppSavedDevice !== null && current !== _omnivoiceCppSavedDevice;
+    notice.style.display = changed ? 'block' : 'none';
+}
+
+async function installOmniVoiceCpp() {
+    const btn = document.getElementById('omnivoiceCppInstallBtn');
+    showOmniVoiceCppInstallStarting();
+    try {
+        const resp = await fetch('/api/tts/omnivoice-cpp/install', { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok && data.status === 'already_installed') {
+            showToast('OmniVoice (Vulkan) is already installed', 'info');
+        } else if (resp.ok && data.status === 'installing') {
+            showToast('OmniVoice runtime and model install started', 'success');
+        } else {
+            _omnivoiceCppInstallStarting = false;
+            showToast(data.error || 'Could not start OmniVoice installation', 'error');
+        }
+    } catch (e) {
+        _omnivoiceCppInstallStarting = false;
+        showToast('Could not start OmniVoice installation: ' + e.message, 'error');
+    } finally {
+        const refreshed = await fetchOmniVoiceCppStatus();
+        if (!refreshed && btn) {
+            btn.disabled = false;
+            btn.textContent = 'Retry OmniVoice Download';
+        }
+    }
+}
+
+async function prepareOmniVoiceCppVoices() {
+    const btn = document.getElementById('omnivoiceCppPrepareVoicesBtn');
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Starting...';
+    }
+    try {
+        const resp = await fetch('/api/tts/omnivoice-cpp/prepare-voices', { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok && data.status === 'already_prepared') {
+            showToast('Voice references are already prepared', 'info');
+        } else if (resp.ok && data.status === 'processing') {
+            showToast('Preparing voice references...', 'success');
+        } else {
+            showToast(data.error || 'Could not prepare voice references', 'error');
+        }
+    } catch (e) {
+        showToast('Could not prepare voice references: ' + e.message, 'error');
+    } finally {
+        const refreshed = await fetchOmniVoiceCppStatus();
+        if (!refreshed && btn) {
+            btn.disabled = false;
+            btn.textContent = 'Prepare Voice References';
+        }
+    }
+}
+
+async function restartOmniVoiceCppWorker() {
+    const btn = document.getElementById('omnivoiceCppRestartBtn');
+    const status = document.getElementById('omnivoiceCppRestartStatus');
+    if (btn) btn.disabled = true;
+    if (status) status.textContent = 'Restarting TTS worker...';
+    try {
+        const resp = await fetch('/api/tts/omnivoice-cpp/restart-worker', { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok && data.status === 'ok') {
+            if (status) {
+                status.textContent = data.warming_up
+                    ? 'Worker restarting in the background.'
+                    : 'Worker stopped. It will start on the next voice request.';
+            }
+            showToast('TTS worker restarted');
+        } else {
+            if (status) status.textContent = '';
+            showToast(data.error || 'Restart failed', 'error');
+        }
+    } catch (e) {
+        if (status) status.textContent = '';
+        showToast('Restart failed: ' + e.message, 'error');
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
+const OMNIVOICE_RESOURCE_METERS = {
+    omnivoice: {
+        displayName: 'OmniVoice',
+        vramElementId: 'omnivoiceVramIndicator',
+        ramElementId: 'omnivoiceRamIndicator',
+        vramNeededGb: 2.5,
+        ramNeededGb: 2.5,
+    },
+    omnivoice_cpp: {
+        displayName: 'OmniVoice (Vulkan)',
+        vramElementId: 'omnivoiceCppVramIndicator',
+        ramElementId: 'omnivoiceCppRamIndicator',
+        vramNeededGb: 2.0,
+        ramNeededGb: 0.5,
+    },
+};
+
+function setOmniVoiceResourceMetersVisible(provider, visible) {
+    const meterConfig = OMNIVOICE_RESOURCE_METERS[provider];
+    if (!meterConfig) return;
+    for (const id of [meterConfig.vramElementId, meterConfig.ramElementId]) {
+        const el = document.getElementById(id);
+        if (el) el.style.display = visible ? 'block' : 'none';
+    }
+}
+
+function renderOmniVoiceResourceMeters(provider, vramData, ramData, modelLoaded) {
+    const meterConfig = OMNIVOICE_RESOURCE_METERS[provider];
+    if (!meterConfig) return;
+
+    const vramEl = document.getElementById(meterConfig.vramElementId);
+    const hasVram = Number.isFinite(vramData.vram_total_gb)
+        && Number.isFinite(vramData.vram_free_gb)
+        && Number.isFinite(vramData.vram_used_gb);
+    if (vramEl) {
+        vramEl.style.display = hasVram ? 'block' : 'none';
+        if (hasVram) {
+            const gpuLabel = vramData.gpu_name ? ' - ' + vramData.gpu_name : '';
+            const label = modelLoaded
+                ? `GPU VRAM (${meterConfig.displayName} loaded)`
+                : `GPU VRAM (needs ~${meterConfig.vramNeededGb} GB${gpuLabel})`;
+            _updateMeter(
+                vramEl,
+                vramData.vram_used_gb,
+                vramData.vram_total_gb,
+                vramData.vram_free_gb,
+                meterConfig.vramNeededGb,
+                label,
+                modelLoaded
+            );
+        }
+    }
+
+    const ramEl = document.getElementById(meterConfig.ramElementId);
+    const hasRam = Number.isFinite(ramData.ram_total_gb) && ramData.ram_total_gb > 0;
+    if (ramEl) {
+        ramEl.style.display = hasRam ? 'block' : 'none';
+        if (hasRam) {
+            // Estimate the pre-load baseline once the model is resident so its
+            // own process memory does not cause a false insufficient warning.
+            const processRam = Number(ramData.process_ram_gb || 0);
+            const adjustedFree = modelLoaded ? ramData.ram_free_gb + processRam : ramData.ram_free_gb;
+            const adjustedUsed = modelLoaded ? Math.max(0, ramData.ram_used_gb - processRam) : ramData.ram_used_gb;
+            const label = modelLoaded
+                ? `System RAM (${meterConfig.displayName} loaded)`
+                : `System RAM (needs ~${meterConfig.ramNeededGb} GB)`;
+            _updateMeter(
+                ramEl,
+                adjustedUsed,
+                ramData.ram_total_gb,
+                adjustedFree,
+                meterConfig.ramNeededGb,
+                label,
+                modelLoaded
+            );
+        }
     }
 }
 
@@ -1298,8 +3652,8 @@ async function pretokenizeOmniVoice() {
 
 const LLM_PROVIDER_HINTS = {
     gemini: 'Google\'s Gemini API with powerful models on a limited free tier. <a href="https://aistudio.google.com/app/apikey" target="_blank">Get your free API key</a>. If you experience errors, you may be at a minute-by-minute or daily limit, in which case we recommend you switch to Ollama Cloud (free) or OpenRouter (best quality).',
-    openrouter: '<strong>(Recommended)</strong> Access 100+ AI models through one API. <a href="https://openrouter.ai/" target="_blank">Sign up at openrouter.ai</a> and add credits ($5 minimum purchase - generally lasts a long time).',
-    openai: 'Direct access to OpenAI models (GPT-5, etc). <a href="https://auth.openai.com/create-account" target="_blank">Create account</a>, then get API key from <a href="https://platform.openai.com/api-keys" target="_blank">platform.openai.com</a>. Requires prepaid credits ($5 minimum top-up). New accounts often have very low rate limits, which can lead to a poor experience. If you use OpenAI, we recommend disabling Owl Post and Long-Term Memory until your account reaches Tier 2 or higher.',
+        openrouter: '<strong>(Recommended)</strong> Access 100+ AI models through one API. <a href="https://openrouter.ai/" target="_blank">Sign up at openrouter.ai</a> and add credits ($5 minimum purchase - generally lasts a long time). Review <a href="https://openrouter.ai/settings/privacy" target="_blank">OpenRouter privacy settings</a> to control data/privacy preferences.',
+    openai: 'OpenAI-compatible third-party endpoints and direct access to OpenAI models (GPT-5, etc). For OpenAI directly: <a href="https://auth.openai.com/create-account" target="_blank">create an account</a>, then get an API key from <a href="https://platform.openai.com/api-keys" target="_blank">platform.openai.com</a>. OpenAI direct access requires prepaid credits ($5 minimum top-up). New OpenAI accounts often have very low rate limits, which can lead to a poor experience; these OpenAI-specific restrictions may not apply to third-party endpoints. If you use OpenAI directly, we recommend disabling Owl Post and Long-Term Memory until your account reaches Tier 2 or higher.',
     ollama: '<strong>Free tier:</strong> <a href="https://signin.ollama.com/sign-up" target="_blank">Sign up for Ollama Cloud</a>. Ollama Cloud has a generous free tier, but only for small models that do not compare with Gemini or OpenRouter. They are still sufficient for roleplaying. <strong>Monitor your free usage here: <a href="https://ollama.com/settings" target="_blank">ollama.com/settings</a>.</strong> Keep provider features disabled on the free plan because its maximum concurrent request limit is 1, which conflicts with Owl Post, Vision, Input Correction, and memory workflows.',
     llamacpp: 'Use a local or remote llama.cpp server through its OpenAI-compatible API. API key is optional unless your server requires one. <strong>Hardware warning:</strong> llama.cpp is not recommended unless you have an extra GPU with 12-24GB VRAM, ideally 24GB, while using a 24B+ model such as <code>unsloth/gemma-4-26B-A4B-it-qat-GGUF UD-Q4_K_XL</code> (great, slower, smaller) or <code>Qwen/Qwen3.5-35B-A3B Q4</code> (good, faster, bigger). <strong>Never run llama.cpp on the same GPU Hogwarts Legacy is using.</strong> <a href="https://discord.com/channels/1460397759675895820/1476935126901461154" target="_blank">Read our guide on Discord</a>.'
 };
@@ -1323,15 +3677,49 @@ function validateLLMApiKey(value, providerId) {
     return null;
 }
 
-// Gemini chat default - switches to Gemini 3.5 Flash after June 1, 2027
-const GEMINI_3_5_SWITCH_DATE = new Date('2027-06-01');
+// Gemini defaults follow Google's expected preview deprecation dates.
+const GEMINI_3_5_SWITCH_DATE = new Date(2027, 5, 1);
 const GEMINI_3_5_ENABLED = new Date() >= GEMINI_3_5_SWITCH_DATE;
 const GEMINI_CHAT_DEFAULT = GEMINI_3_5_ENABLED ? 'gemini-3.5-flash' : 'gemini-3-flash-preview';
 const GEMINI_CHAT_DEFAULT_OR = GEMINI_3_5_ENABLED ? 'google/gemini-3.5-flash' : 'google/gemini-3-flash-preview';
 
+const GEMINI_2_5_FLASH_LITE_SWITCH_DATE = new Date(2026, 7, 3);
+const GEMINI_3_1_FLASH_LITE_SWITCH_DATE = new Date(2027, 4, 7);
+
+function applyDatedGeminiPresetDefaults(presets) {
+    const replacements = new Map();
+    if (new Date() >= GEMINI_2_5_FLASH_LITE_SWITCH_DATE) {
+        replacements.set('gemini-2.5-flash-lite', 'gemini-3.1-flash-lite');
+        replacements.set('google/gemini-2.5-flash-lite', 'google/gemini-3.1-flash-lite');
+    }
+    if (new Date() >= GEMINI_3_1_FLASH_LITE_SWITCH_DATE) {
+        replacements.set('gemini-3.1-flash-lite', 'gemini-3.5-flash-lite');
+        replacements.set('google/gemini-3.1-flash-lite', 'google/gemini-3.5-flash-lite');
+    }
+
+    for (const providerPresets of Object.values(presets)) {
+        for (const [key, model] of Object.entries(providerPresets)) {
+            if (typeof model !== 'string') continue;
+            const separatorIndex = model.indexOf(':');
+            const baseModel = separatorIndex === -1 ? model : model.slice(0, separatorIndex);
+            const suffix = separatorIndex === -1 ? '' : model.slice(separatorIndex);
+            let currentModel = baseModel;
+            let replacement = replacements.get(currentModel);
+            while (replacement) {
+                currentModel = replacement;
+                replacement = replacements.get(currentModel);
+            }
+            if (currentModel !== baseModel) {
+                providerPresets[key] = `${currentModel}${suffix}`;
+            }
+        }
+    }
+}
+
 // Model presets per provider - loaded from shared JSON file (with fallback)
 let MODEL_PRESETS = null;
 let MODEL_FIELDS_PATHS = null;
+let MODEL_PROVIDER_ROUTE_PRESETS = {};
 
 async function loadModelPresets() {
     if (MODEL_PRESETS !== null) return MODEL_PRESETS;
@@ -1350,6 +3738,7 @@ async function loadModelPresets() {
 
         // Extract field paths
         MODEL_FIELDS_PATHS = data._model_fields || {};
+        MODEL_PROVIDER_ROUTE_PRESETS = data._provider_routes || {};
 
         // Apply Gemini chat default date logic (always, to ensure consistency)
         if (MODEL_PRESETS.gemini) {
@@ -1358,6 +3747,7 @@ async function loadModelPresets() {
         if (MODEL_PRESETS.openrouter) {
             MODEL_PRESETS.openrouter.chat = GEMINI_CHAT_DEFAULT_OR;
         }
+        applyDatedGeminiPresetDefaults(MODEL_PRESETS);
 
         console.log('[ModelPresets] Loaded presets for providers:', Object.keys(MODEL_PRESETS));
         return MODEL_PRESETS;
@@ -1365,30 +3755,53 @@ async function loadModelPresets() {
         console.error('[ModelPresets] Failed to load presets, using fallback:', e);
         // Fallback to hardcoded defaults if JSON load fails
         MODEL_PRESETS = getHardcodedPresets();
+        MODEL_PROVIDER_ROUTE_PRESETS = getHardcodedProviderRoutePresets();
         return MODEL_PRESETS;
     }
 }
 
+function getHardcodedProviderRoutePresets() {
+    return {
+        openrouter: {
+            chat: ['google-ai-studio', 'google-vertex'],
+            vision: ['google-ai-studio', 'google-vertex'],
+            target: ['mistral', 'deepinfra'],
+            interjection: ['google-ai-studio', 'google-vertex'],
+            commentary: ['mistral', 'deepinfra'],
+            inputCorrection: ['wandb', 'groq', 'deepinfra', 'novita'],
+            chapter: ['google-ai-studio', 'google-vertex'],
+            prose: ['google-ai-studio', 'google-vertex'],
+            graphiti: ['google-ai-studio', 'google-vertex'],
+            graphitiSmall: ['google-ai-studio', 'google-vertex'],
+            reranker: ['wandb', 'groq', 'deepinfra', 'novita'],
+            owlSummarize: ['google-ai-studio', 'google-vertex'],
+            locationResolver: ['google-ai-studio', 'google-vertex']
+        }
+    };
+}
+
 function getHardcodedPresets() {
     // Fallback presets if JSON fails to load (must match model_presets.json)
-    return {
+    const presets = {
         gemini: {
             chat: GEMINI_CHAT_DEFAULT,
-            vision: 'gemini-2.5-flash-lite',
-            target: 'gemini-2.5-flash-lite',
-            interjection: 'gemini-2.5-flash-lite',
-            commentary: 'gemini-2.5-flash-lite',
-            inputCorrection: 'gemini-2.5-flash-lite',
-            chapter: 'gemini-2.5-flash-lite',
-            prose: 'gemini-2.5-flash-lite',
-            graphiti: 'gemini-2.5-flash-lite',
-            graphitiSmall: 'gemini-2.5-flash-lite',
-            reranker: 'gemini-2.5-flash-lite',
-            locationResolver: 'gemini-2.5-flash-lite'
+            vision: 'gemini-3.1-flash-lite',
+            target: 'gemini-3.1-flash-lite',
+            interjection: 'gemini-3.1-flash-lite',
+            commentary: 'gemini-3.1-flash-lite',
+            inputCorrection: 'gemini-3.1-flash-lite',
+            embedding: 'gemini-embedding-2',
+            chapter: 'gemini-3.1-flash-lite',
+            prose: 'gemini-3.1-flash-lite',
+            graphiti: 'gemini-3.1-flash-lite',
+            graphitiSmall: 'gemini-3.1-flash-lite',
+            reranker: 'gemini-3.1-flash-lite',
+            owlSummarize: 'gemini-3.1-flash-lite',
+            locationResolver: 'gemini-3.1-flash-lite'
         },
         openrouter: {
             chat: GEMINI_CHAT_DEFAULT_OR,
-            vision: 'google/gemini-2.5-flash-lite:nitro',
+            vision: 'google/gemini-3.1-flash-lite',
             target: 'mistralai/mistral-small-3.2-24b-instruct:nitro',
             interjection: 'google/gemini-3.1-flash-lite',
             commentary: 'mistralai/mistral-small-3.2-24b-instruct:nitro',
@@ -1396,10 +3809,11 @@ function getHardcodedPresets() {
             embedding: 'openai/text-embedding-3-small',
             chapter: 'google/gemini-3.1-flash-lite',
             prose: 'google/gemini-3.1-flash-lite',
-            graphiti: 'openai/gpt-4.1-nano',
-            graphitiSmall: 'openai/gpt-4.1-nano',
+            graphiti: 'google/gemini-3.1-flash-lite',
+            graphitiSmall: 'google/gemini-3.1-flash-lite',
             reranker: 'meta-llama/llama-3.1-8b-instruct:nitro',
-            locationResolver: 'mistralai/mistral-small-3.2-24b-instruct:nitro'
+            owlSummarize: 'google/gemini-3.1-flash-lite',
+            locationResolver: 'google/gemini-3.1-flash-lite'
         },
         openai: {
             chat: 'gpt-5-mini',
@@ -1446,6 +3860,8 @@ function getHardcodedPresets() {
             locationResolver: 'local-model'
         }
     };
+    applyDatedGeminiPresetDefaults(presets);
+    return presets;
 }
 
 // Model field mappings: { key: { settingPath, elementId, isAgent } }
@@ -1473,16 +3889,38 @@ const OPENROUTER_MODEL_AUTOCOMPLETE_EXTRA_INPUTS = [
     'owlPostBoardModel'
 ];
 
+const OPENROUTER_MODEL_AUTOCOMPLETE_MAX_ITEMS = 500;
+
+function getModelProviderPath(field) {
+    if (field.providerPath) return field.providerPath;
+    if (field.path.endsWith('.model')) return field.path.replace(/\.model$/, '.providers');
+    if (field.path.endsWith('_model')) return `${field.path}_providers`;
+    return null;
+}
+
+function applyProviderRoutePresets(providerId) {
+    const routePresets = MODEL_PROVIDER_ROUTE_PRESETS?.[providerId];
+    if (!routePresets) return;
+
+    for (const [key, providers] of Object.entries(routePresets)) {
+        const field = MODEL_FIELDS[key];
+        const providerPath = field ? getModelProviderPath(field) : null;
+        if (!providerPath || !Array.isArray(providers)) continue;
+        updateSetting(providerPath, providers.slice());
+        console.log(`[ModelPresets] ${key} providers: ${providers.join(', ') || 'none'}`);
+    }
+}
+
 // Default reasoning toggle states per provider and model field
 // Only specified fields will have reasoning enabled by default
 const REASONING_DEFAULTS = {
     gemini: {
-        graphiti: true,          // gemini-2.5-flash-lite
-        graphitiSmall: true      // gemini-2.5-flash-lite
+        graphiti: true,          // gemini-3.1-flash-lite
+        graphitiSmall: true      // gemini-3.1-flash-lite
     },
     openrouter: {
         graphiti: false,         // google/gemini-3.1-flash-lite
-        graphitiSmall: true      // google/gemini-2.5-flash-lite:nitro
+        graphitiSmall: true      // google/gemini-3.1-flash-lite
     },
     openai: {
         graphiti: true,          // gpt-4.1-nano
@@ -1561,6 +3999,8 @@ async function applyModelPresets(newProviderId) {
         }
     }
 
+    applyProviderRoutePresets(newProviderId);
+
     // Apply reasoning defaults for this provider
     const reasoningDefaults = REASONING_DEFAULTS[newProviderId];
     if (reasoningDefaults) {
@@ -1593,6 +4033,9 @@ async function applyModelPresets(newProviderId) {
     // Refresh reasoning toggles after model changes
     if (window.ReasoningToggle) {
         ReasoningToggle.refresh();
+    }
+    if (window.ProviderRouting) {
+        ProviderRouting.refresh();
     }
 
     updateGemini3TempHint();
@@ -1659,6 +4102,9 @@ async function switchLLMProvider(providerId) {
         }
         ReasoningToggle.setMasterEnabled(masterEnabled);
     }
+    if (window.ProviderRouting) {
+        ProviderRouting.refresh();
+    }
 
     // Disable long-term memory for Gemini due to embedding incompatibility
     updateMemoryAvailability(providerId);
@@ -1716,8 +4162,182 @@ function renderLLMProviderSettings(providerId) {
 function switchSTTProvider(providerId) {
     updateSetting('stt.provider', providerId);
     renderSTTProviderSettings(providerId);
+    if (providerId === 'universal') {
+        connectUniversalSpeechServer(false);
+    } else if (!speechServerIsSelected()) {
+        suspendUniversalUiWork();
+    } else {
+        renderProviderSettings('tts', config.tts?.provider);
+        refreshUniversalLoadPlan();
+    }
     updateRamMonitoring();
     restoreProviderSectionScroll('chapterSTT');
+}
+
+function universalCompatibleASRModels() {
+    return universalSpeechState.capabilities?.compatibleASRModels || [];
+}
+
+function ensureUniversalASRSelection() {
+    const models = universalCompatibleASRModels();
+    if (!models.length) return;
+    const settings = config.stt.universal ||= {};
+    if (!models.some(model => model.id === settings.model)) {
+        const previous = settings.model;
+        settings.model = universalSpeechState.capabilities.recommendedASRModelId || models[0].id;
+        universalSpeechState.asrSelectionWarning = previous
+            ? `Saved ASR model “${previous}” is unavailable. ${settings.model} is selected as a draft; save to confirm.`
+            : `${settings.model} was selected from the connected server; save to confirm.`;
+        markDirty();
+    } else {
+        universalSpeechState.asrSelectionWarning = '';
+    }
+}
+
+function universalSharedConnectionCard() {
+    const [title, rawDetail, tone] = universalStatusPresentation();
+    return `<div class="universal-state-card universal-state-${tone}" id="universalASRConnectionState">
+        <div class="universal-state-copy">
+            <span class="universal-state-label"><span class="universal-state-dot"></span>${escapeHtml(title)}</span>
+            <div class="universal-state-detail">Using the shared Speech Server connection configured under Voice.</div>
+            ${rawDetail ? `<div class="universal-state-meta">${escapeHtml(universalFriendlyConnectionDetail(rawDetail))}</div>` : ''}
+        </div>
+        <button type="button" class="btn btn-sm" onclick="document.getElementById('speech_server_api_url')?.scrollIntoView({behavior:'smooth', block:'center'}); document.getElementById('speech_server_api_url')?.focus();">Configure</button>
+        </div>`;
+}
+
+function updateUniversalASRConnectionState() {
+    if (!universalIsSelected()) {
+        updateUniversalConnectionState();
+        return;
+    }
+    const [title, rawDetail, tone] = universalStatusPresentation();
+    updateUniversalStateCard(
+        document.getElementById('universalASRConnectionState'),
+        title,
+        'Using the shared Speech Server connection configured under Voice.',
+        tone,
+        rawDetail ? [universalFriendlyConnectionDetail(rawDetail)] : []
+    );
+}
+
+function refreshUniversalASRConnectionUI() {
+    updateUniversalASRConnectionState();
+    refreshUniversalASRModelPanelIfIdle();
+    applySimpleMode();
+}
+
+function renderUniversalASRModelPanel() {
+    const panel = document.getElementById('universalASRModelPanel');
+    if (!panel) return;
+    const models = universalCompatibleASRModels();
+    if (universalSpeechState.status !== 'connected' && !universalSpeechState.capabilities) {
+        panel.innerHTML = '';
+        return;
+    }
+    if (!models.length) {
+        const message = (universalSpeechState.capabilities?.capabilitiesVersion || 1) < 6
+            ? 'This server must be updated to capabilities version 6 before it can provide speech recognition.'
+            : 'The server is connected, but no installed ASR model supports the current game language.';
+        panel.innerHTML = `<div class="universal-empty-state">${escapeHtml(message)}</div>`;
+        return;
+    }
+    ensureUniversalASRSelection();
+    const selected = models.find(model => model.id === config.stt?.universal?.model) || models[0];
+    const disabled = universalSpeechState.status !== 'connected';
+    const loaded = (universalSpeechState.resources?.loadedModelIds || []).includes(selected.id);
+    const stackSelection = universalStackSelection();
+    const stackLoaded = universalSelectedStackLoaded(stackSelection.model, stackSelection.profile);
+    const missing = universalMissingStackComponents(stackSelection.model, stackSelection.profile);
+    const planMatches = universalLoadPlanMatches(
+        universalSpeechState.loadPlan, stackSelection.model, stackSelection.profile
+    );
+    const fit = planMatches ? universalSpeechState.loadPlan.fit?.status || 'unknown' : 'unknown';
+    const capacityOk = universalResidentCapacityOk();
+    const residentLimit = universalResidentLimit();
+    const capacityWarning = capacityOk ? ''
+        : `The server allows ${residentLimit} resident model ${residentLimit === 1 ? 'slot' : 'slots'}; remote TTS and ASR need two.`;
+    const installTarget = universalCurrentInstallTarget();
+    const installCard = renderUniversalInstall(installTarget);
+    panel.innerHTML = `<fieldset class="universal-model-fieldset" ${disabled ? 'disabled' : ''}>
+        <legend>Speech recognition model</legend>
+        <div class="field-group">
+            <label class="field-label" for="universalASRModelInput">Model</label>
+            <div class="model-autocomplete-combobox universal-model-combobox">
+                <input type="text" id="universalASRModelInput" value="${escapeHtml(selected.name)}" autocomplete="off">
+                <button type="button" class="autocomplete-dropdown-btn" aria-label="Show all ASR models">▼</button>
+            </div>
+            ${universalSpeechState.asrSelectionWarning ? `<p class="field-hint universal-warning">${escapeHtml(universalSpeechState.asrSelectionWarning)}</p>` : ''}
+        </div>
+        <div class="universal-model-summary universal-model-card">
+            <div class="universal-model-card-header">
+                <strong class="universal-model-card-name">${escapeHtml(selected.name)}</strong>
+                <span class="universal-badge-row">
+                    ${selected.recommended ? '<span class="universal-badge universal-badge-recommended">Recommended</span>' : ''}
+                    ${loaded ? '<span class="universal-badge universal-badge-loaded">ASR loaded</span>' : ''}
+                    ${selected.installed === false ? '<span class="universal-badge">Download required</span>' : ''}
+                </span>
+            </div>
+            <div class="universal-model-description">${escapeHtml(selected.description)}</div>
+            <div class="universal-model-spec-grid">
+                <div class="universal-model-spec"><span class="universal-model-spec-label">Languages</span><strong>${selected.languages.length} supported</strong><span class="universal-model-spec-note">Automatic detection${selected.transcription?.automaticLanguageDetection ? ' available' : ' unavailable'}</span></div>
+                <div class="universal-model-spec universal-model-spec-memory"><span class="universal-model-spec-label">Estimated requirement</span><strong>${escapeHtml(universalEstimateText(selected))}</strong><span class="universal-model-spec-note">${escapeHtml(universalEstimateSource(selected))}</span></div>
+                <div class="universal-model-spec universal-model-spec-fit"><span class="universal-model-spec-label">Full-stack fit</span><strong class="universal-fit-badge universal-fit-${universalFitTone(fit)}">${escapeHtml(fit)}</strong><span class="universal-model-spec-note">Includes selected remote speech components</span></div>
+            </div>
+        </div>
+        ${installCard}
+        <div class="universal-model-actions">
+            <button type="button" class="btn btn-primary btn-sm" id="universalASRWarmupButton" onclick="warmupUniversalModel()" ${stackLoaded || installTarget ? 'hidden' : ''} ${capacityOk ? '' : 'disabled'}>${escapeHtml(universalLoadButtonLabel(missing))}</button>
+            <span class="universal-fit-badge universal-fit-comfortable" ${stackLoaded ? '' : 'hidden'}>Loaded</span>
+        </div>
+        <p class="field-hint" id="universalASRWarmupStatus"></p>
+        ${capacityWarning ? `<p class="field-hint universal-warning">${escapeHtml(capacityWarning)}</p>` : ''}
+        ${universalIsSelected() ? '' : '<div id="universalRemoteResources" class="universal-resource-grid"></div>'}
+    </fieldset>`;
+    initializeUniversalASRPicker();
+    updateUniversalResourceDisplay();
+}
+
+function initializeUniversalASRPicker() {
+    const input = document.getElementById('universalASRModelInput');
+    if (!input || !window.Awesomplete) return;
+    const models = universalCompatibleASRModels();
+    const selected = models.find(model => model.id === config.stt?.universal?.model) || models[0];
+    const byName = new Map(models.map(model => [model.name, model]));
+    const awesomplete = new Awesomplete(input, {
+        list: models.map(model => model.name), minChars: 0, maxItems: 20, sort: false,
+        filter(text, query) {
+            const model = byName.get(String(text));
+            const haystack = `${model?.name || ''} ${model?.id || ''} ${model?.backend || ''} ${(model?.languages || []).join(' ')}`.toLowerCase();
+            return input._universalShowFullList || haystack.includes(String(query || '').toLowerCase());
+        },
+        item(text) {
+            const model = byName.get(String(text));
+            const li = document.createElement('li');
+            li.innerHTML = `<span class="universal-option-heading"><span class="universal-option-title">${escapeHtml(model?.name || String(text))}</span>${model?.recommended ? '<span class="universal-badge universal-badge-recommended">Recommended</span>' : ''}${model?.installed === false ? '<span class="universal-badge">Download required</span>' : ''}</span><span class="universal-option-detail"><span>${escapeHtml(model?.backend || '')}</span><span>${escapeHtml(universalEstimateText(model || {}))}</span></span>`;
+            return li;
+        },
+    });
+    input.closest('.universal-model-combobox')?.querySelector('.autocomplete-dropdown-btn')?.addEventListener('click', () => {
+        input._universalShowFullList = true;
+        awesomplete.evaluate();
+        awesomplete.open();
+        input._universalShowFullList = false;
+    });
+    input.addEventListener('awesomplete-selectcomplete', event => {
+        const model = byName.get(event.text?.value || input.value);
+        if (!model) return;
+        config.stt.universal.model = model.id;
+        universalSpeechState.asrSelectionWarning = '';
+        universalSpeechState.loadPlan = null;
+        markDirty();
+        renderUniversalASRModelPanel();
+        refreshUniversalLoadPlan();
+        refreshUniversalStackInstallPlans();
+    });
+    input.addEventListener('change', () => {
+        if (!byName.has(input.value)) input.value = selected?.name || '';
+    });
 }
 
 function renderSTTProviderSettings(providerId) {
@@ -1729,6 +4349,14 @@ function renderSTTProviderSettings(providerId) {
         return;
     }
 
+    if (providerId === 'universal') {
+        container.innerHTML = `<p class="field-hint" style="margin-bottom: var(--space-md);">${providerConfig.description}</p>
+            ${speechServerDownloadCTA()}
+            ${universalIsSelected() ? universalSharedConnectionCard() : speechServerConnectionEditor()}
+            <div id="universalASRModelPanel"></div>`;
+        renderUniversalASRModelPanel();
+        applySimpleMode();
+    } else {
     let html = '';
     if (providerConfig.description) {
         let desc = providerConfig.description;
@@ -1741,6 +4369,7 @@ function renderSTTProviderSettings(providerId) {
     }
     html += providerConfig.fields.map(f => renderField(f, 'stt', providerId)).join('');
     container.innerHTML = html;
+    }
 
     // Show/hide mic gain boost (visible for all active STT providers)
     const micGainGroup = document.getElementById('sttMicGain');
@@ -2218,6 +4847,8 @@ let openRouterModelIds = [];
 let openRouterModelIdsPromise = null;
 let openRouterEmbeddingModelIds = ['openai/text-embedding-3-small'];
 let openRouterEmbeddingModelIdsPromise = null;
+let openRouterVisionModelIds = [];
+let openRouterVisionModelIdsPromise = null;
 
 // In-flight request guards (prevent stacking when server is offline)
 let statusCheckInFlight = false;
@@ -2227,6 +4858,10 @@ let eventCostsLoadInFlight = false;
 let restartInProgress = false;  // Prevents status polling from resetting restart button
 let restartWentOffline = false; // Tracks if server went offline during restart
 let wasGameAvailable = false;   // Tracks game connection for display name refresh
+let currentPlayerContext = { ready: false, player_name: '', normalized_name: '' };
+let loadedPlayerContext = { ready: false, player_name: '', normalized_name: '' };
+let playerContextCheckInFlight = false;
+let lastPlayerDirtyWarningKey = '';
 
 // Setup wizard state
 let setupStatus = null;
@@ -2299,11 +4934,16 @@ function updateSetupConfigLinks() {
 
 function isCurrentTtsConfigured() {
     const ttsProvider = config.tts?.provider || 'inworld';
+    if (ttsProvider === 'universal') {
+        return universalSpeechState.status === 'connected'
+            && universalCompatibleModels().length > 0;
+    }
     return (
         ttsProvider === 'none' ||
         ttsProvider === 'pocket' ||
         ttsProvider === 'neutts' ||
         ttsProvider === 'omnivoice' ||
+        ttsProvider === 'omnivoice_cpp' ||
         Boolean(config.tts?.[ttsProvider]?.api_key)
     );
 }
@@ -2332,13 +4972,14 @@ function getCurrentSetupLlmModelsFromConfig() {
     };
 
     if (visionConfig.enabled !== false && !isLLMFeatureDisabledByProvider('vision')) {
-        models.vision = visionSettings.model || 'google/gemini-2.5-flash-lite:nitro';
+        models.vision = visionSettings.model || 'google/gemini-3.1-flash-lite';
     }
     if (convSettings.input_correction_enabled && convSettings.input_correction_model && !isLLMFeatureDisabledByProvider('input_correction')) {
         models.input_correction = convSettings.input_correction_model;
     }
     if (memorySettings.enabled) {
         for (const [key, settingKey] of [
+            ['embedding', 'embedding_model'],
             ['chapter', 'chapter_model'],
             ['prose', 'prose_model'],
             ['graphiti', 'graphiti_model'],
@@ -2845,6 +5486,17 @@ function updateSetupStep(stepNum, stepData) {
             if (skipBtn) skipBtn.disabled = false;
             break;
     }
+    if (stepNum === 3 && config.tts?.provider === 'none') {
+        btn.disabled = true;
+        btn.title = 'Voice testing is unavailable while TTS is set to Disabled (Subtitles Only).';
+    } else if (stepNum === 3 && !isCurrentTtsConfigured()) {
+        btn.disabled = true;
+        btn.title = config.tts?.provider === 'universal'
+            ? 'Connect to a compatible Universal Speech Server before testing.'
+            : 'Configure the selected TTS provider before testing.';
+    } else if (stepNum === 3) {
+        btn.title = '';
+    }
 }
 
 function updateVoiceProgress(stepData) {
@@ -3030,9 +5682,17 @@ async function startVoiceExtraction() {
 }
 
 async function startTtsTest() {
+    if (config.tts?.provider === 'none') {
+        showToast('Voice testing is unavailable while TTS is disabled.', 'warning');
+        return;
+    }
     // Require saved configuration before testing
     if (dirty) {
         showToast('Please save your configuration before testing', 'error');
+        return;
+    }
+    if (!isCurrentTtsConfigured()) {
+        showToast('Connect to a compatible TTS provider before testing', 'error');
         return;
     }
 
@@ -3125,9 +5785,10 @@ function updateLlmModelResults(results) {
         div.className = 'setup-model-item ' + (info.success ? 'success' : 'error');
         div.innerHTML = `
                     <span class="setup-model-status">${info.success ? '✓' : '✗'}</span>
-                    <span class="setup-model-name">${modelId}</span>
-                    <span class="setup-model-uses">(${info.used_for.join(', ')})</span>
-                    ${info.error ? `<div class="setup-model-error">${info.error}</div>` : ''}
+                    <span class="setup-model-name">${escapeHtml(modelId)}</span>
+                    <span class="setup-model-uses">(${escapeHtml(info.used_for.join(', '))})</span>
+                    ${info.warning ? `<div class="setup-model-warning">${escapeHtml(info.warning)}</div>` : ''}
+                    ${info.error ? `<div class="setup-model-error">${escapeHtml(info.error)}</div>` : ''}
                 `;
         container.appendChild(div);
     }
@@ -3359,6 +6020,10 @@ const ConfigPageSearch = (() => {
             parent.normalize();
         });
 
+        root.querySelectorAll('.config-search-input-match, .config-search-input-match-active').forEach(el => {
+            el.classList.remove('config-search-input-match', 'config-search-input-match-active');
+        });
+
         matches = [];
         activeIndex = -1;
         updateStatus();
@@ -3379,6 +6044,17 @@ const ConfigPageSearch = (() => {
         return false;
     }
 
+    function shouldSkipValueElement(el) {
+        if (!el) return true;
+        if (el.closest('#configSearchPanel')) return true;
+        if (el.closest('#chapterEvents')) return true;
+        if (el.closest('#historyTableBody, #historyAllTableBody, #historyAllCount, #commitmentRecentBody, #commitmentAllBody, #commitmentAllCount, #commitmentRecentEmpty')) return true;
+        if (el.closest('.toast, .toast-container')) return true;
+        if (el.matches('input[type="hidden"], input[type="checkbox"], input[type="radio"], input[type="range"], input[type="file"], input[type="button"], input[type="submit"], input[type="reset"]')) return true;
+
+        return false;
+    }
+
     function collectTextNodes(root) {
         const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
             acceptNode(node) {
@@ -3395,6 +6071,34 @@ const ConfigPageSearch = (() => {
             current = walker.nextNode();
         }
         return nodes;
+    }
+
+    function collectValueMatches(root, queryLower) {
+        const valueMatches = [];
+        const controls = root.querySelectorAll('input, textarea, select');
+
+        controls.forEach(control => {
+            if (shouldSkipValueElement(control)) return;
+
+            const value = control.tagName === 'SELECT'
+                ? control.options[control.selectedIndex]?.text || control.value || ''
+                : control.value || '';
+            const valueLower = value.toLowerCase();
+            let matchIndex = valueLower.indexOf(queryLower);
+
+            while (matchIndex !== -1) {
+                control.classList.add('config-search-input-match');
+                valueMatches.push({
+                    type: 'value',
+                    element: control,
+                    start: matchIndex,
+                    end: matchIndex + queryLower.length
+                });
+                matchIndex = valueLower.indexOf(queryLower, matchIndex + queryLower.length);
+            }
+        });
+
+        return valueMatches;
     }
 
     function highlightNode(node, queryLower) {
@@ -3428,7 +6132,7 @@ const ConfigPageSearch = (() => {
         }
 
         node.parentNode.replaceChild(fragment, node);
-        return nodeMatches;
+        return nodeMatches.map(mark => ({ type: 'text', element: mark }));
     }
 
     function resizePanelTextareas(panel) {
@@ -3464,14 +6168,35 @@ const ConfigPageSearch = (() => {
         if (matches.length === 0) return;
 
         if (activeIndex >= 0 && matches[activeIndex]) {
-            matches[activeIndex].classList.remove('config-search-match-active');
+            const previous = matches[activeIndex];
+            const previousElement = previous.element;
+            if (previous.type === 'value') {
+                previousElement.classList.remove('config-search-input-match-active');
+            } else {
+                previousElement.classList.remove('config-search-match-active');
+            }
         }
 
         activeIndex = (index + matches.length) % matches.length;
         const match = matches[activeIndex];
-        expandParents(match);
-        match.classList.add('config-search-match-active');
-        match.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+        const matchElement = match.element;
+        expandParents(matchElement);
+
+        if (match.type === 'value') {
+            matchElement.classList.add('config-search-input-match-active');
+            matchElement.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+            matchElement.focus({ preventScroll: true });
+            if (typeof matchElement.setSelectionRange === 'function') {
+                try {
+                    matchElement.setSelectionRange(match.start, match.end);
+                } catch (e) {
+                    // Some form controls expose a value but do not support text selection.
+                }
+            }
+        } else {
+            matchElement.classList.add('config-search-match-active');
+            matchElement.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+        }
 
         updateStatus();
         updateButtonState();
@@ -3491,6 +6216,7 @@ const ConfigPageSearch = (() => {
         textNodes.forEach(node => {
             matches.push(...highlightNode(node, queryLower));
         });
+        matches.push(...collectValueMatches(root, queryLower));
 
         if (matches.length > 0) {
             focusMatch(0);
@@ -3814,6 +6540,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Initialize OmniVoice panel if selected
     updateOmniVoicePanel();
 
+    // Initialize OmniVoice (Vulkan) panel if selected
+    updateOmniVoiceCppPanel();
+
     // Initialize reasoning toggles for model inputs (after config loaded)
     if (window.ReasoningToggle) {
         await ReasoningToggle.init(config);
@@ -3823,11 +6552,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         const masterEnabled = config.llm?.[provider]?.reasoning_enabled === true;
         ReasoningToggle.setMasterEnabled(masterEnabled);
     }
+    if (window.ProviderRouting) {
+        ProviderRouting.init(config);
+    }
 
     await refreshOpenRouterModelAutocompletes();
 
     await loadDialogueHistory();
     await loadMigrationStatus();
+    await loadVectorMigrationStatus();
     await loadGraphBackups();
     checkServerStatus();
 
@@ -4031,6 +6764,34 @@ async function loadOpenRouterEmbeddingModelIds() {
     return openRouterEmbeddingModelIdsPromise;
 }
 
+async function loadOpenRouterVisionModelIds() {
+    if (openRouterVisionModelIdsPromise) {
+        return openRouterVisionModelIdsPromise;
+    }
+
+    openRouterVisionModelIdsPromise = fetch('/api/openrouter-vision-models', { cache: 'no-store' })
+        .then(resp => {
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            return resp.json();
+        })
+        .then(data => {
+            openRouterVisionModelIds = Array.isArray(data)
+                ? data.filter(id => typeof id === 'string' && id.trim())
+                    .sort((a, b) => a.localeCompare(b))
+                : [];
+            return openRouterVisionModelIds;
+        })
+        .catch(err => {
+            console.error('Failed to load OpenRouter vision model IDs:', err);
+            openRouterVisionModelIds = [];
+            return openRouterVisionModelIds;
+        });
+
+    return openRouterVisionModelIdsPromise;
+}
+
 function getOpenRouterModelAutocompleteInputIds() {
     return [
         ...new Set([
@@ -4045,7 +6806,9 @@ function isOpenRouterAutocompleteEnabled() {
 }
 
 function getOpenRouterAutocompleteListForInput(input) {
-    return input?.id === 'embeddingModel' ? openRouterEmbeddingModelIds : openRouterModelIds;
+    if (input?.id === 'embeddingModel') return openRouterEmbeddingModelIds;
+    if (input?.id === MODEL_FIELDS.vision.elementId) return openRouterVisionModelIds;
+    return openRouterModelIds;
 }
 
 function ensureModelAutocompleteCombobox(input) {
@@ -4088,15 +6851,17 @@ function initializeOpenRouterModelAutocomplete(input, enabled) {
 
     const filterFn = Awesomplete.FILTER_CONTAINS || ((text, userInput) =>
         text.toLowerCase().includes(userInput.toLowerCase()));
+    const openRouterFilterFn = (text, userInput) =>
+        input._openrouterShowFullList || filterFn(text, userInput);
 
     if (!input._openrouterAwesomplete) {
         const awesomplete = new Awesomplete(input, {
             list: enabled ? getOpenRouterAutocompleteListForInput(input) : [],
             minChars: 1,
-            maxItems: 20,
+            maxItems: OPENROUTER_MODEL_AUTOCOMPLETE_MAX_ITEMS,
             autoFirst: false,
             sort: false,
-            filter: filterFn
+            filter: openRouterFilterFn
         });
 
         input._openrouterAwesomplete = awesomplete;
@@ -4118,18 +6883,18 @@ function initializeOpenRouterModelAutocomplete(input, enabled) {
 
         input.focus();
 
-        const previousMinChars = awesomplete.minChars;
-        awesomplete.minChars = 0;
-
-        if (awesomplete.ul.childNodes.length === 0) {
-            awesomplete.evaluate();
-        } else if (awesomplete.ul.hasAttribute('hidden')) {
-            awesomplete.open();
-        } else {
+        if (!awesomplete.ul.hasAttribute('hidden')) {
             awesomplete.close();
+            return;
         }
 
+        const previousMinChars = awesomplete.minChars;
+        input._openrouterShowFullList = true;
+        awesomplete.minChars = 0;
+        awesomplete.evaluate();
+        awesomplete.open();
         awesomplete.minChars = previousMinChars;
+        input._openrouterShowFullList = false;
     };
 
     if (!enabled) {
@@ -4142,7 +6907,8 @@ async function refreshOpenRouterModelAutocompletes() {
     if (enabled) {
         await Promise.all([
             loadOpenRouterModelIds(),
-            loadOpenRouterEmbeddingModelIds()
+            loadOpenRouterEmbeddingModelIds(),
+            loadOpenRouterVisionModelIds()
         ]);
     }
 
@@ -4212,6 +6978,7 @@ async function checkServerStatus() {
                 loadCharacterDisplayNames();
             }
             wasGameAvailable = gameNowAvailable;
+            refreshPlayerContextFromServer();
             // Update game time display + cache for commitments
             cachedGameTime = data.game_time;
             updateGameTimeDisplay(data.game_time);
@@ -4351,6 +7118,37 @@ function updateAttentionMeterToggleState() {
     if (isDisabled && coldToggle.checked) {
         coldToggle.checked = false;
         updateSetting('conversation.attention_cold_approach_enabled', false);
+    }
+}
+
+function updateNarrationToggleState() {
+    const narrationEnabled = document.getElementById('conv_narration_enabled')?.checked;
+    const childrenWrapper = document.getElementById('conv_narration_children');
+    if (!childrenWrapper) return;
+
+    const isDisabled = !narrationEnabled;
+    childrenWrapper.querySelectorAll('input, select, textarea, button').forEach(control => {
+        control.disabled = isDisabled;
+    });
+    childrenWrapper.style.opacity = isDisabled ? '0.5' : '1';
+    childrenWrapper.style.pointerEvents = isDisabled ? 'none' : 'auto';
+}
+
+function updateFreeformEmoteToggleState() {
+    const toggle = document.getElementById('conv_freeform_emote_tags');
+    const wrapper = document.getElementById('conv_freeform_emote_tags_wrapper');
+    if (!toggle) return;
+
+    const emotesEnabled = document.getElementById('conv_emotes_enabled')?.checked === true;
+    toggle.disabled = !emotesEnabled;
+    if (wrapper) {
+        wrapper.style.opacity = emotesEnabled ? '1' : '0.5';
+        wrapper.style.pointerEvents = emotesEnabled ? 'auto' : 'none';
+    }
+
+    if (!emotesEnabled && toggle.checked) {
+        toggle.checked = false;
+        updateSetting('conversation.freeform_emote_tags', false);
     }
 }
 
@@ -4587,14 +7385,156 @@ async function loadConfig() {
         const response = await fetch('/api/config');
         if (response.ok) {
             config = await response.json();
+            currentPlayerContext = config.player_context || { ready: false, player_name: '', normalized_name: '' };
+            loadedPlayerContext = { ...currentPlayerContext };
             stripLegacyConfigFields(config);
             await populateForm(config);
+            updateMemoryDataManagementPlayerState();
+            updateOwlPostPlayerState();
         }
     } catch (e) {
         console.error('Failed to load config:', e);
         showToast('Failed to load configuration', 'error');
     } finally {
         isInitializing = false;
+    }
+}
+
+function getPlayerCardTitle() {
+    const playerName = (loadedPlayerContext?.player_name || '').trim();
+    return playerName ? `Player: ${playerName}` : 'Player';
+}
+
+function getPlayerCardNameLabel() {
+    return (loadedPlayerContext?.player_name || '').trim() || 'Player';
+}
+
+function updatePlayerCardLabels() {
+    document.querySelectorAll('#bioList .character-card.player-card').forEach(card => {
+        const title = card.querySelector('.character-title-text');
+        if (title) title.textContent = getPlayerCardTitle();
+        const nameLabel = card.querySelector('.player-name-label');
+        if (nameLabel) nameLabel.textContent = getPlayerCardNameLabel();
+    });
+}
+
+function isPlayerContextReady() {
+    return currentPlayerContext?.ready === true;
+}
+
+function setMemoryDataStatus(elementId, text, color = 'var(--text-secondary)') {
+    const el = document.getElementById(elementId);
+    if (!el) return;
+    el.textContent = text || '';
+    el.style.color = color;
+}
+
+function setMemoryDataButton(elementId, enabled, title = '') {
+    const btn = document.getElementById(elementId);
+    if (!btn) return;
+    btn.style.display = 'inline-block';
+    btn.disabled = !enabled;
+    btn.title = title;
+}
+
+function setMemoryDataManagementNoPlayerState() {
+    setMemoryDataStatus('migratePendingCount', '');
+    setMemoryDataStatus('vectorMigratePendingCount', '');
+    setMemoryDataStatus('graphBackupsStatus', '');
+
+    setMemoryDataButton('migrateBtn', false, '');
+    setMemoryDataButton('vectorMigrateBtn', false, '');
+    setMemoryDataButton('clearAllMemoriesBtn', false, '');
+    setMemoryDataButton('resetMemorySystemBtn', false, '');
+    setMemoryDataButton('refreshGraphBackupsBtn', false, '');
+
+    const backupsList = document.getElementById('graphBackupsList');
+    if (backupsList) backupsList.innerHTML = '';
+}
+
+function updateMemoryDataManagementPlayerState() {
+    if (!isPlayerContextReady()) {
+        setMemoryDataManagementNoPlayerState();
+        return false;
+    }
+
+    setMemoryDataButton('clearAllMemoriesBtn', true, 'Clear memory data for the loaded player');
+    setMemoryDataButton('resetMemorySystemBtn', true, 'Reset memory data for the loaded player');
+    setMemoryDataButton('refreshGraphBackupsBtn', true, 'Refresh memory snapshots for the loaded player');
+    return true;
+}
+
+function setOwlPostStatus(elementId, text, color = 'var(--text-secondary)') {
+    const el = document.getElementById(elementId);
+    if (!el) return;
+    el.textContent = text || '';
+    el.style.color = color;
+}
+
+function setOwlPostButton(elementId, enabled, title = '') {
+    const btn = document.getElementById(elementId);
+    if (!btn) return;
+    btn.disabled = !enabled;
+    btn.title = title;
+}
+
+function setOwlPostNoPlayerState() {
+    setOwlPostStatus('owlMailDangerStatus', '');
+    setOwlPostStatus('owlBoardsDangerStatus', '');
+    setOwlPostStatus('owlLogStatus', '');
+    setOwlPostButton('resetOwlMailBtn', false, '');
+    setOwlPostButton('resetOwlBoardsBtn', false, '');
+    setOwlPostButton('clearOwlLogBtn', false, '');
+}
+
+function updateOwlPostPlayerState() {
+    if (!isPlayerContextReady()) {
+        setOwlPostNoPlayerState();
+        return false;
+    }
+
+    setOwlPostStatus('owlMailDangerStatus', '');
+    setOwlPostStatus('owlBoardsDangerStatus', '');
+    setOwlPostStatus('owlLogStatus', '');
+    setOwlPostButton('resetOwlMailBtn', true, 'Reset owl mail for the loaded player');
+    setOwlPostButton('resetOwlBoardsBtn', true, 'Reset notice boards for the loaded player');
+    setOwlPostButton('clearOwlLogBtn', true, 'Clear the Owl Post activity log for the loaded player');
+    return true;
+}
+
+async function refreshPlayerContextFromServer() {
+    if (playerContextCheckInFlight) return;
+    playerContextCheckInFlight = true;
+    try {
+        const response = await fetch('/api/player-context', { cache: 'no-store' });
+        if (!response.ok) return;
+        const data = await response.json();
+        const oldKey = currentPlayerContext?.normalized_name || '';
+        const newKey = data?.normalized_name || '';
+        const changed = !!newKey && oldKey !== newKey;
+
+        currentPlayerContext = data || { ready: false, player_name: '', normalized_name: '' };
+        updateMemoryDataManagementPlayerState();
+        updateOwlPostPlayerState();
+
+        if (!changed) return;
+
+        if (dirty) {
+            if (lastPlayerDirtyWarningKey !== newKey) {
+                lastPlayerDirtyWarningKey = newKey;
+                showToast('Player changed. This page is still editing the previous character bio until you save or reload.', 'warning');
+            }
+            return;
+        }
+
+        lastPlayerDirtyWarningKey = '';
+        isInitializing = true;
+        await loadConfig();
+        showToast(`Loaded settings for ${currentPlayerContext.player_name || 'current player'}`, 'info');
+    } catch (e) {
+        console.error('Failed to refresh player context:', e);
+    } finally {
+        playerContextCheckInFlight = false;
     }
 }
 
@@ -4626,7 +7566,7 @@ async function populateForm(cfg) {
     renderProviderSettings('tts', currentTTSProvider);
     // Apply model-dependent field states after render
     if (currentTTSProvider === 'inworld') {
-        onInworldModelChange(cfg.tts?.inworld?.model || 'inworld-tts-1.5-max');
+        onInworldModelChange(cfg.tts?.inworld?.model || 'inworld-tts-2');
     }
     updatePlayerVoiceSectionState(currentTTSProvider);
 
@@ -4639,6 +7579,11 @@ async function populateForm(cfg) {
     const sttDropdown = document.getElementById('sttProvider');
     sttDropdown.innerHTML = generateSTTProviderDropdown(currentSTTProvider);
     renderSTTProviderSettings(currentSTTProvider);
+    if (currentTTSProvider === 'universal' || currentSTTProvider === 'universal') {
+        setTimeout(() => connectUniversalSpeechServer(false), 0);
+    } else {
+        suspendUniversalUiWork();
+    }
     updateRamMonitoring();
     setFieldValue('stt_hotkey', cfg.stt?.hotkey || 'middle_mouse');
     setFieldValue('input_stt_hotkey', cfg.stt?.hotkey || 'middle_mouse');
@@ -4787,7 +7732,7 @@ async function populateForm(cfg) {
     setCheckbox('conv_followup_nudge', cfg.conversation?.followup_nudge !== false);
     setCheckbox('conv_farewell_line', cfg.conversation?.farewell_line !== false);
     setCheckbox('conv_sentence_subtitles', cfg.conversation?.sentence_subtitles !== false);
-    setCheckbox('conv_auto_mute_ambient', cfg.conversation?.auto_mute_ambient !== false);
+    setCheckbox('conv_auto_mute_ambient', cfg.conversation?.auto_mute_ambient === true);
     setCheckbox('conv_gaze_enabled', cfg.conversation?.gaze_enabled !== false);
     setCheckbox('conv_commentary_enabled', cfg.commentary?.enabled !== false);
     const commentaryCooldown = cfg.commentary?.global_cooldown_seconds ?? 60;
@@ -4799,7 +7744,12 @@ async function populateForm(cfg) {
     updateCommentaryControlsState();
     setCheckbox('conv_companion_move_enabled', cfg.conversation?.companion_move_enabled !== false);
     setCheckbox('conv_emotes_enabled', cfg.conversation?.emotes_enabled !== false);
+    setCheckbox('conv_freeform_emote_tags', cfg.conversation?.freeform_emote_tags !== false);
+    updateFreeformEmoteToggleState();
     setCheckbox('conv_narration_enabled', cfg.conversation?.narration_enabled === true);
+    setCheckbox('conv_player_narration_enabled', cfg.conversation?.player_narration_enabled !== false);
+    setCheckbox('conv_spatial_grounding_enabled', cfg.conversation?.spatial_grounding_enabled !== false);
+    updateNarrationToggleState();
     // Companion follow distance (meters)
     const followDist = cfg.conversation?.companion_follow_distance_m ?? 2.0;
     setFieldValue('companion_follow_distance', followDist);
@@ -5016,9 +7966,6 @@ function getLLMProviderFeatureDefault(provider, fieldId) {
 }
 
 function isLLMFeatureDisabledByProvider(feature, provider = config.llm?.provider || 'gemini') {
-    if (feature === 'memory') {
-        return provider !== 'openai' && provider !== 'openrouter';
-    }
     if (feature === 'owl_post' && provider === 'gemini') {
         return true;
     }
@@ -5094,7 +8041,7 @@ function updateMemoryAvailability(provider) {
     setControlsDisabled(['embeddingModel'], memoryDisabled);
 
     if (memoryDisabled) {
-        // Disable memory for providers that cannot use OpenAI-compatible embeddings.
+        // Disable memory for providers that should not run memory-heavy workflows.
         const wasEnabled = memoryToggle?.checked;
         if (memoryToggle) {
             memoryToggle.checked = false;
@@ -5102,7 +8049,7 @@ function updateMemoryAvailability(provider) {
         }
         if (memoryWarning) {
             const providerLabel = LLM_PROVIDERS[provider]?.label || provider;
-            memoryWarning.innerHTML = `<i data-lucide="alert-triangle"></i> Long-term memory is disabled for ${escapeHtml(providerLabel)}. Use OpenRouter or OpenAI so memory can use OpenAI-compatible embeddings.`;
+            memoryWarning.innerHTML = `<i data-lucide="alert-triangle"></i> Long-term memory is disabled for ${escapeHtml(providerLabel)} by LLM Provider settings.`;
             memoryWarning.style.display = 'block';
         }
         updateSetting('memory.enabled', false);
@@ -5112,7 +8059,7 @@ function updateMemoryAvailability(provider) {
             showToast('Long-term memory disabled for this LLM provider', 'info');
         }
     } else {
-        // Enable memory toggle for OpenRouter/OpenAI
+        // Enable memory toggle when the provider gate allows it.
         if (memoryToggle) {
             memoryToggle.disabled = false;
         }
@@ -5173,7 +8120,7 @@ async function populateCharacters(staticBios = {}, editorGuidance = {}, npcScale
     const memoryEnabled = config?.memory?.enabled || false;
 
     // Always show Player bio first (not collapsible)
-    const playerBio = staticBios.Player || editorGuidance.Player || '';
+    const playerBio = staticBios.Player || '';
     addCharacterCard('Player', playerBio, '', 1.0, 0, true, memoryEnabled, '', false, memoryWhitelistOnly);
 
     // Collect all unique NPC names from bios, guidance, scales, temp mods, model overrides, and generated bios
@@ -5453,11 +8400,11 @@ function addCharacterCard(
     card.dataset.npcId = name;  // Store NPC ID for bio fetching
     const effectiveMemoryEnabled = memoryEnabled && (!showLongTermMemoryToggle || longTermMemoryEnabled);
 
-    const displayName = isPlayer ? 'Player' : getCharacterDisplayName(name, 'New Character');
+    const displayName = isPlayer ? getPlayerCardTitle() : getCharacterDisplayName(name, 'New Character');
     const toggleIcon = isPlayer ? '' : '<span class="character-accordion-toggle">&#9660;</span>';
 
     const nameField = isPlayer
-        ? `<span style="font-family: var(--font-display); font-weight: 600;">Player</span>`
+        ? `<span class="player-name-label" style="font-family: var(--font-display); font-weight: 600;">${escapeHtml(getPlayerCardNameLabel())}</span>`
         : `
             <div class="character-id-combobox">
                 <input type="text" class="character-name-input" value="${escapeHtml(name)}" placeholder="Character ID (e.g. SebastianSallow)" autocomplete="off" spellcheck="false" onchange="handleCharacterIdChange(this)">
@@ -5571,6 +8518,7 @@ function addCharacterCard(
         if (llmModelInput) {
             initializeOpenRouterModelAutocomplete(llmModelInput, isOpenRouterAutocompleteEnabled());
         }
+        refreshUniversalOverrideAutocompletes();
     }
 
     // Load generated bio if memory is effectively enabled for this NPC
@@ -6818,14 +9766,33 @@ function toggleSubPanel(el) {
 
 let providerSectionScrollTimeout = null;
 
-function scrollToSection(id) {
+function scrollToSection(id, block = 'start') {
     const section = document.getElementById(id);
-    if (section) {
-        // Expand the section first
-        section.classList.remove('collapsed');
-        // Scroll to section with smooth behavior
-        section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (!section) return;
+
+    // A target may sit inside an auto-collapsed chapter or nested sub-panel.
+    // Open the entire ancestor chain before measuring its scroll position.
+    let current = section;
+    while (current) {
+        if (current.classList?.contains('chapter')
+            || current.classList?.contains('sub-panel')) {
+            current.classList.remove('collapsed');
+        }
+        current = current.parentElement;
     }
+
+    requestAnimationFrame(() => {
+        section.scrollIntoView({ behavior: 'smooth', block });
+    });
+}
+
+function scrollToTtsSettings() {
+    scrollToSection('chapterTTS');
+}
+
+function scrollToTtsTest() {
+    if (config.tts?.provider === 'none') return;
+    scrollToSection('setupStep3', 'center');
 }
 
 function restoreProviderSectionScroll(sectionId) {
@@ -6950,9 +9917,13 @@ function validateModelNames() {
 }
 
 async function saveSettings() {
-    const btn = document.querySelector('.btn-primary');
+    const btn = document.getElementById('saveConfigBtn');
     btn.classList.add('loading');
     document.getElementById('saveText').innerHTML = '<span class="spinner"></span> Saving...';
+
+    if (window.ProviderRouting) {
+        ProviderRouting.sync();
+    }
 
     // Ensure latest API key text is captured even if the field never blurred.
     const llmKeyField = document.getElementById('llmApiKey');
@@ -7043,7 +10014,7 @@ async function saveSettings() {
         const llmModelOverride = card.querySelector('.character-llm-model-override')?.value.trim() || '';
 
         if (name) {
-            if (staticBio) {
+            if (isPlayer || staticBio) {
                 config.prompts.static_bios[name] = staticBio;
             }
             // Save guidance if not empty
@@ -7088,6 +10059,14 @@ async function saveSettings() {
     }
     stripLegacyConfigFields(config);
 
+    const savingOmniVoiceCpp = config.tts?.provider === 'omnivoice_cpp';
+    if (savingOmniVoiceCpp) {
+        // The save endpoint starts the dependency installer. Reflect that
+        // immediately instead of leaving a live install button visible until
+        // the next background status poll happens to observe the new job.
+        showOmniVoiceCppInstallStarting();
+    }
+
     try {
         const response = await fetch('/api/config', {
             method: 'POST',
@@ -7099,11 +10078,17 @@ async function saveSettings() {
             dirty = false;
             showToast('Configuration saved successfully', 'success');
             document.getElementById('saveText').textContent = 'Save Configuration';
+            if (savingOmniVoiceCpp) {
+                fetchOmniVoiceCppStatus();
+            }
             await checkSetupStatus();
         } else {
             throw new Error('Save failed');
         }
     } catch (e) {
+        if (savingOmniVoiceCpp) {
+            cancelOmniVoiceCppInstallStarting();
+        }
         const isOffline = e instanceof TypeError || e.message === 'Failed to fetch';
         const msg = isOffline
             ? 'Failed to save — server is not running. Make sure the game is open.'
@@ -7303,6 +10288,11 @@ function clearHistoryWithConfirm() {
 }
 
 async function clearAllMemories() {
+    if (!isPlayerContextReady()) {
+        setMemoryDataManagementNoPlayerState();
+        return;
+    }
+
     const message = 'Are you sure you want to clear all NPC long-term memories?\n\n' +
         'This will delete all memory facts and chapter data. ' +
         'NPCs will lose their persistent memories of past adventures.\n\n' +
@@ -7315,6 +10305,7 @@ async function clearAllMemories() {
                 showToast('All NPC memories cleared', 'success');
                 // Refresh migration status
                 await loadMigrationStatus();
+                await loadVectorMigrationStatus();
                 await loadGraphBackups();
             } else {
                 showToast(data.error || 'Clear failed', 'error');
@@ -7326,6 +10317,11 @@ async function clearAllMemories() {
 }
 
 async function resetMemorySystem() {
+    if (!isPlayerContextReady()) {
+        setMemoryDataManagementNoPlayerState();
+        return;
+    }
+
     const message = 'RESET MEMORY SYSTEM\n\n' +
         'This will force-delete all memory database files without creating a backup.\n\n' +
         'Use this only when the database is corrupted and Clear/Restore are not working.\n\n' +
@@ -7344,6 +10340,7 @@ async function resetMemorySystem() {
                 : 'Memory system fully reset';
             showToast(msg, errCount > 0 ? 'warning' : 'success');
             await loadMigrationStatus();
+            await loadVectorMigrationStatus();
             await loadGraphBackups();
         } else {
             showToast(data.error || 'Reset failed', 'error');
@@ -7413,6 +10410,11 @@ async function loadGraphBackups() {
     const refreshBtn = document.getElementById('refreshGraphBackupsBtn');
     if (!listEl || !statusEl) return;
 
+    if (!isPlayerContextReady()) {
+        setMemoryDataManagementNoPlayerState();
+        return;
+    }
+
     if (refreshBtn) refreshBtn.disabled = true;
     statusEl.textContent = 'Loading Cognis memory snapshots...';
     statusEl.style.color = 'var(--text-secondary)';
@@ -7430,11 +10432,16 @@ async function loadGraphBackups() {
         statusEl.style.color = 'var(--danger)';
         listEl.innerHTML = '';
     } finally {
-        if (refreshBtn) refreshBtn.disabled = false;
+        if (refreshBtn) refreshBtn.disabled = !isPlayerContextReady();
     }
 }
 
 async function restoreGraphBackup(backupId, backupTitle) {
+    if (!isPlayerContextReady()) {
+        setMemoryDataManagementNoPlayerState();
+        return;
+    }
+
     const label = backupTitle || 'this memory snapshot';
     const message = `Restore ${label}?\n\n` +
         'Cognis memory snapshots replace memory facts, chapter files, staged chapter content, bios, and memory queue state together.\n\n' +
@@ -7466,7 +10473,7 @@ async function restoreGraphBackup(backupId, backupTitle) {
         console.error('Error restoring memory snapshot:', e);
         showToast(`Restore failed: ${e.message}`, 'error');
     } finally {
-        if (refreshBtn) refreshBtn.disabled = false;
+        if (refreshBtn) refreshBtn.disabled = !isPlayerContextReady();
     }
 }
 
@@ -7481,6 +10488,7 @@ async function refreshMemoryUI() {
 
     // Refresh migration status count
     await loadMigrationStatus();
+    await loadVectorMigrationStatus();
     await loadGraphBackups();
 
     // Refresh memory inspector (if loaded)
@@ -7511,6 +10519,11 @@ async function loadMigrationStatus() {
     const countEl = document.getElementById('migratePendingCount');
     if (!countEl) return;
 
+    if (!isPlayerContextReady()) {
+        setMemoryDataManagementNoPlayerState();
+        return;
+    }
+
     try {
         const response = await fetch('/api/memories/migration-status');
         const data = await response.json();
@@ -7520,25 +10533,189 @@ async function loadMigrationStatus() {
             if (pending_count > 0) {
                 countEl.textContent = `${pending_count} NPC${pending_count !== 1 ? 's' : ''} pending migration (${migrated_count}/${total_npcs} already migrated, ${min_entries_threshold}+ entries required)`;
                 countEl.style.color = 'var(--gold-dark)';
+                setMemoryDataButton('migrateBtn', true, 'Migrate eligible dialogue history for the loaded player');
             } else if (total_npcs > 0) {
                 countEl.textContent = `All ${total_npcs} NPCs already migrated`;
                 countEl.style.color = 'var(--success)';
+                setMemoryDataButton('migrateBtn', false, 'All eligible NPCs are already migrated');
             } else {
                 countEl.textContent = `No NPCs with sufficient dialogue history found (minimum ${min_entries_threshold} entries required)`;
                 countEl.style.color = 'var(--text-secondary)';
+                setMemoryDataButton('migrateBtn', false, 'No eligible dialogue history to migrate');
             }
         } else {
-            countEl.textContent = '';
+            countEl.textContent = data.error || 'Unable to check migration status';
+            countEl.style.color = 'var(--text-secondary)';
+            setMemoryDataButton('migrateBtn', false, 'Migration status is unavailable');
         }
     } catch (e) {
         console.error('Error loading migration status:', e);
-        countEl.textContent = '';
+        countEl.textContent = 'Unable to check migration status';
+        countEl.style.color = 'var(--text-secondary)';
+        setMemoryDataButton('migrateBtn', false, 'Migration status is unavailable');
     }
+}
+
+async function loadVectorMigrationStatus() {
+    const countEl = document.getElementById('vectorMigratePendingCount');
+    const btn = document.getElementById('vectorMigrateBtn');
+    if (!countEl) return;
+
+    if (!isPlayerContextReady()) {
+        setMemoryDataManagementNoPlayerState();
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/memories/vector-migration-status');
+        const data = await response.json();
+
+        if (data.success) {
+            const count = data.mismatched_count || 0;
+            const model = data.current_model || 'current model';
+            if (count > 0) {
+                countEl.textContent = `${count} memor${count === 1 ? 'y has' : 'ies have'} vectors from another embedding model. Rebuild to use ${model}.`;
+                countEl.style.color = 'var(--gold-dark)';
+                if (btn) {
+                    btn.style.display = 'inline-block';
+                    btn.disabled = false;
+                    btn.title = 'Rebuild memory vectors for the current embedding model';
+                }
+            } else {
+                countEl.textContent = `All memory vectors match ${model}`;
+                countEl.style.color = 'var(--success)';
+                if (btn) {
+                    btn.style.display = 'inline-block';
+                    btn.disabled = true;
+                    btn.title = 'No memory vectors need rebuilding';
+                }
+            }
+        } else {
+            countEl.textContent = data.error || 'Unable to check memory vector status';
+            countEl.style.color = 'var(--text-secondary)';
+            if (btn) {
+                btn.style.display = 'inline-block';
+                btn.disabled = true;
+                btn.title = 'Memory vector status is unavailable';
+            }
+        }
+    } catch (e) {
+        console.error('Error loading vector migration status:', e);
+        countEl.textContent = 'Unable to check memory vector status';
+        countEl.style.color = 'var(--text-secondary)';
+        if (btn) {
+            btn.style.display = 'inline-block';
+            btn.disabled = true;
+            btn.title = 'Memory vector status is unavailable';
+        }
+    }
+}
+
+async function migrateMemoryVectors() {
+    const btn = document.getElementById('vectorMigrateBtn');
+    const status = document.getElementById('vectorMigrateStatus');
+    const countEl = document.getElementById('vectorMigratePendingCount');
+
+    if (!isPlayerContextReady()) {
+        setMemoryDataManagementNoPlayerState();
+        return;
+    }
+
+    const message = 'Rebuild memory vectors for the current embedding model?\n\n' +
+        'This will regenerate embeddings from stored memory text and update the vector search index.\n\n' +
+        'It may use embedding API quota and can be resumed safely if interrupted.\n\n' +
+        'Continue?';
+
+    if (!confirm(message)) return;
+
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Rebuilding...';
+    }
+    if (status) {
+        status.style.display = 'block';
+        status.textContent = 'Starting vector rebuild...';
+        status.style.color = 'var(--text-secondary)';
+    }
+
+    const eventSource = new EventSource('/api/memories/vector-migrate/stream');
+
+    eventSource.onmessage = async (event) => {
+        try {
+            const data = JSON.parse(event.data);
+
+            switch (data.type) {
+                case 'start':
+                    if (data.total > 0) {
+                        status.textContent = `Found ${data.total} memor${data.total === 1 ? 'y' : 'ies'} to rebuild for ${data.current_model || 'the current model'}...`;
+                    } else {
+                        status.textContent = 'No memory vectors need rebuilding.';
+                    }
+                    break;
+
+                case 'progress': {
+                    const total = data.total || 0;
+                    const current = data.current || 0;
+                    const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+                    status.textContent = `[${current}/${total}] ${data.message || 'Rebuilding vectors...'} (${pct}%)`;
+                    break;
+                }
+
+                case 'complete':
+                    eventSource.close();
+                    status.textContent = `Complete: rebuilt ${data.rebuilt || 0} memory vector${(data.rebuilt || 0) === 1 ? '' : 's'}.`;
+                    status.style.color = 'var(--success)';
+                    showToast(`Rebuilt ${data.rebuilt || 0} memory vector${(data.rebuilt || 0) === 1 ? '' : 's'}`, 'success');
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.textContent = 'Rebuild Vectors';
+                    }
+                    await loadVectorMigrationStatus();
+                    if (typeof refreshMemoryInspector === 'function') {
+                        await refreshMemoryInspector();
+                    }
+                    break;
+
+                case 'error':
+                    eventSource.close();
+                    status.textContent = `Error: ${data.message || 'Vector rebuild failed'}`;
+                    status.style.color = 'var(--danger)';
+                    showToast(data.message || 'Vector rebuild failed', 'error');
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.textContent = 'Rebuild Vectors';
+                    }
+                    await loadVectorMigrationStatus();
+                    break;
+            }
+        } catch (e) {
+            console.error('Error parsing vector migration SSE event:', e);
+        }
+    };
+
+    eventSource.onerror = () => {
+        eventSource.close();
+        if (status) {
+            status.textContent = 'Vector rebuild connection lost';
+            status.style.color = 'var(--danger)';
+        }
+        showToast('Vector rebuild failed - connection lost', 'error');
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = 'Rebuild Vectors';
+        }
+        if (countEl) loadVectorMigrationStatus();
+    };
 }
 
 async function migrateMemories() {
     const btn = document.getElementById('migrateBtn');
     const status = document.getElementById('migrateStatus');
+
+    if (!isPlayerContextReady()) {
+        setMemoryDataManagementNoPlayerState();
+        return;
+    }
 
     const message = 'This will process all existing dialogue history into chapters and extract searchable memory facts.\n\n' +
         'This may take a while for large histories (multiple LLM calls per NPC).\n\n' +
@@ -8602,7 +11779,7 @@ function formatEventInfo(eventObj) {
 
     switch (type) {
         case 'llm':
-            return `${data.model || 'LLM'} (${data.context || 'chat'})`;
+            return `${data.model || 'LLM'} (${data.context || 'chat'})${data.provider_used ? ` via ${data.provider_used}` : ''}`;
         case 'tts':
             return `Voice: ${data.voice_id || 'unknown'}`;
         case 'voice_clone':
@@ -8652,7 +11829,7 @@ function formatEventMetric(eventObj) {
         case 'llm':
             const cost = data.cost || {};
             const costStr = formatEventCost(cost.total);
-            const tokenStr = tokens.total ? `${tokens.total}T` : null;
+            const tokenStr = tokens.total ? `${tokens.total}T${tokens.reasoning ? ` (${tokens.reasoning}R)` : ''}` : null;
             if (costStr && tokenStr && latency) return `${costStr} / ${tokenStr} / ${latency}`;
             if (costStr && tokenStr) return `${costStr} / ${tokenStr}`;
             if (costStr && latency) return `${costStr} / ${latency}`;
@@ -8684,6 +11861,7 @@ function renderEvent(eventObj) {
     const typeClass = eventObj.type.replace('_', '_');
     const statusClass = eventObj.status || 'success';
     const isError = eventObj.status === 'error' && eventObj.error;
+    const isWarning = eventObj.status === 'warning';
     const isSuccess = eventObj.status === 'success' || !eventObj.status;
     const timeStr = formatRelativeTime(eventObj.timestamp);
     const infoStr = formatEventInfo(eventObj);
@@ -8693,6 +11871,7 @@ function renderEvent(eventObj) {
     const row = document.createElement('div');
     let rowClass = 'event-row-new';
     if (isError) rowClass += ' event-row-error';
+    else if (isWarning) rowClass += ' event-row-warning';
     else if (isSuccess) rowClass += ' event-row-success';
     row.className = rowClass;
     row.id = `event-${eventObj.id}`;
@@ -8702,6 +11881,11 @@ function renderEvent(eventObj) {
     if (isError) {
         errorLine = `<div class="event-error-message">${escapeHtml(eventObj.error)}</div>`;
     }
+    const warning = eventObj.data?.warning || (isWarning ? eventObj.error : '');
+    let warningLine = '';
+    if (isWarning && warning) {
+        warningLine = `<div class="event-warning-message">${escapeHtml(warning)}</div>`;
+    }
 
     row.innerHTML = `
                 <div class="event-time">${timeStr}</div>
@@ -8709,6 +11893,7 @@ function renderEvent(eventObj) {
                 <div class="event-status ${statusClass}"></div>
                 <div class="event-info">${escapeHtml(infoStr)}</div>
                 <div class="event-metric">${escapeHtml(metricStr)}</div>
+                ${warningLine}
                 ${errorLine}
             `;
 
@@ -8963,8 +12148,12 @@ let _owlLogInFlight = false;
 
 function loadOwlPostLog() {
     if (_owlLogInFlight) return;
+    if (!isPlayerContextReady()) {
+        setOwlPostNoPlayerState();
+        return;
+    }
     _owlLogInFlight = true;
-    fetchWithTimeout('/owlpost/api/log?limit=20')
+    fetchWithTimeout('/owlpost/api/log?limit=200')
         .then(r => r.json())
         .then(entries => {
             if (Array.isArray(entries)) updateOwlPostLog(entries);
@@ -8974,12 +12163,17 @@ function loadOwlPostLog() {
 }
 
 async function clearOwlPostLog() {
+    if (!isPlayerContextReady()) {
+        setOwlPostNoPlayerState();
+        return;
+    }
     if (!confirm('Clear owl post activity log?')) return;
     try {
         await fetch('/owlpost/api/log', { method: 'DELETE' });
         _owlLogIds.clear();
         const list = document.getElementById('owlPostLog');
         if (list) list.innerHTML = '<div class="owl-log-empty">No activity yet</div>';
+        updateOwlPostPlayerState();
         showToast('Log cleared', 'success');
     } catch (e) {
         showToast('Failed to clear log', 'error');
@@ -8987,6 +12181,10 @@ async function clearOwlPostLog() {
 }
 
 async function resetOwlBoardsWithConfirm() {
+    if (!isPlayerContextReady()) {
+        setOwlPostNoPlayerState();
+        return;
+    }
     const message = 'Are you sure you want to reset all notice boards?\n\n' +
         'This will delete every board post and thread. ' +
         'Board definitions and unlocks are preserved.\n\n' +
@@ -8994,6 +12192,7 @@ async function resetOwlBoardsWithConfirm() {
     if (!confirm(message)) return;
     try {
         await fetch('/owlpost/api/boards/reset', { method: 'DELETE' });
+        updateOwlPostPlayerState();
         showToast('All board posts cleared', 'success');
     } catch (e) {
         showToast('Failed to reset boards', 'error');
@@ -9001,6 +12200,10 @@ async function resetOwlBoardsWithConfirm() {
 }
 
 async function resetOwlMailWithConfirm() {
+    if (!isPlayerContextReady()) {
+        setOwlPostNoPlayerState();
+        return;
+    }
     const message = 'Are you sure you want to reset all owl mail?\n\n' +
         'This will delete every letter, thread, meeting proposal, cached read-aloud audio file, ' +
         'and mail generation state. Notice boards, settings, and custom characters are preserved.\n\n' +
@@ -9009,6 +12212,7 @@ async function resetOwlMailWithConfirm() {
     try {
         const response = await fetch('/owlpost/api/mail/reset', { method: 'DELETE' });
         if (!response.ok) throw new Error('Request failed');
+        updateOwlPostPlayerState();
         showToast('All owl mail cleared', 'success');
     } catch (e) {
         showToast('Failed to reset owl mail', 'error');

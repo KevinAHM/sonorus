@@ -38,6 +38,13 @@ FRAME_DURATION = SAMPLES_PER_FRAME / SAMPLE_RATE  # 0.08s per frame
 # HuggingFace repo for ONNX models
 HF_REPO_ID = "KevinAHM/pocket-tts-onnx"
 
+
+def _serialized_worker_io(func):
+    def wrapper(self, *args, **kwargs):
+        with self._synthesis_lock:
+            return func(self, *args, **kwargs)
+    return wrapper
+
 # Local models directory (avoids HF cache issues on Windows)
 MODELS_DIR = Path(__file__).resolve().parent.parent / "models" / "pocket"
 
@@ -858,6 +865,7 @@ class PocketONNXProcessManager:
         self._request_queue = None
         self._response_queue = None
         self._lock = threading.Lock()
+        self._synthesis_lock = threading.RLock()
         self._ready = False
 
     def ensure_started(self) -> bool:
@@ -921,6 +929,7 @@ class PocketONNXProcessManager:
         self._response_queue = None
         self._ready = False
 
+    @_serialized_worker_io
     def synthesize(
         self,
         text: str,
@@ -999,72 +1008,74 @@ class PocketONNXProcessManager:
                     cumulative_time += silence_duration
                     print(f"[PocketONNX] Added {silence_duration:.2f}s silence gap")
 
-                # Send request to worker for this chunk
-                self._request_queue.put({
-                    "type": "synthesize",
-                    "text": text_chunk,
-                    "voice_path": voice_path,
-                    "voice_hash": voice_hash,
-                    "temperature": temperature,
-                    "align": align,
-                    "streaming": streaming
-                })
+                with self._synthesis_lock:
+                    # Send request to worker for this chunk. The worker uses one shared
+                    # response queue, so exactly one synthesis caller may own it.
+                    self._request_queue.put({
+                        "type": "synthesize",
+                        "text": text_chunk,
+                        "voice_path": voice_path,
+                        "voice_hash": voice_hash,
+                        "temperature": temperature,
+                        "align": align,
+                        "streaming": streaming
+                    })
 
-                # Receive audio chunks for this text chunk
-                chunk_timeout = 60.0 if not streaming else 30.0
-                is_first_audio_chunk = (chunk_count == 0)
+                    # Receive audio chunks for this text chunk
+                    chunk_timeout = 60.0 if not streaming else 30.0
+                    is_first_audio_chunk = (chunk_count == 0)
 
-                while True:
-                    try:
-                        resp = self._response_queue.get(timeout=chunk_timeout)
-                    except:
-                        print("[PocketONNX] Timeout waiting for worker response")
-                        return False
+                    while True:
+                        try:
+                            resp = self._response_queue.get(timeout=chunk_timeout)
+                        except:
+                            print("[PocketONNX] Timeout waiting for worker response")
+                            return False
 
-                    resp_type = resp.get("type")
+                        resp_type = resp.get("type")
 
-                    if resp_type == "chunk":
-                        # Convert float32 bytes back to numpy, then to int16 PCM
-                        audio_bytes = resp["audio"]
-                        num_samples = resp["samples"]
-                        chunk_alignments = resp.get("alignments")
-                        audio_chunk = np.frombuffer(audio_bytes, dtype=np.float32).copy()
+                        if resp_type == "chunk":
+                            # Convert float32 bytes back to numpy, then to int16 PCM
+                            audio_bytes = resp["audio"]
+                            num_samples = resp["samples"]
+                            chunk_alignments = resp.get("alignments")
+                            audio_chunk = np.frombuffer(audio_bytes, dtype=np.float32).copy()
 
-                        # Apply fade-in on very first chunk only
-                        if is_first_audio_chunk:
-                            fade_samples = int(SAMPLE_RATE * 0.002)
-                            if len(audio_chunk) > fade_samples:
-                                fade_curve = np.linspace(0, 1, fade_samples)
-                                audio_chunk[:fade_samples] *= fade_curve
-                            is_first_audio_chunk = False
+                            # Apply fade-in on very first chunk only
+                            if is_first_audio_chunk:
+                                fade_samples = int(SAMPLE_RATE * 0.002)
+                                if len(audio_chunk) > fade_samples:
+                                    fade_curve = np.linspace(0, 1, fade_samples)
+                                    audio_chunk[:fade_samples] *= fade_curve
+                                is_first_audio_chunk = False
 
-                        # Convert to int16 PCM
-                        audio_np = np.clip(audio_chunk, -1.0, 1.0)
-                        pcm_int16 = (audio_np * 32767).astype(np.int16)
-                        pcm_bytes = pcm_int16.tobytes()
+                            # Convert to int16 PCM
+                            audio_np = np.clip(audio_chunk, -1.0, 1.0)
+                            pcm_int16 = (audio_np * 32767).astype(np.int16)
+                            pcm_bytes = pcm_int16.tobytes()
 
-                        total_bytes += len(pcm_bytes)
-                        chunk_count += 1
+                            total_bytes += len(pcm_bytes)
+                            chunk_count += 1
 
-                        # Convert alignment list to dict format, adjusting times for cumulative offset
-                        word_timing = None
-                        if chunk_alignments:
-                            word_timing = {
-                                "words": [a["word"] for a in chunk_alignments],
-                                "wordStartTimeSeconds": [a["start"] + cumulative_time for a in chunk_alignments],
-                                "wordEndTimeSeconds": [a["end"] + cumulative_time for a in chunk_alignments]
-                            }
+                            # Convert alignment list to dict format, adjusting times for cumulative offset
+                            word_timing = None
+                            if chunk_alignments:
+                                word_timing = {
+                                    "words": [a["word"] for a in chunk_alignments],
+                                    "wordStartTimeSeconds": [a["start"] + cumulative_time for a in chunk_alignments],
+                                    "wordEndTimeSeconds": [a["end"] + cumulative_time for a in chunk_alignments]
+                                }
 
-                        on_chunk(pcm_bytes, word_timing)
+                            on_chunk(pcm_bytes, word_timing)
 
-                    elif resp_type == "done":
-                        # Actually, simpler: track from total_bytes
-                        cumulative_time = total_bytes / (SAMPLE_RATE * 2)
-                        break
+                        elif resp_type == "done":
+                            # Actually, simpler: track from total_bytes
+                            cumulative_time = total_bytes / (SAMPLE_RATE * 2)
+                            break
 
-                    elif resp_type == "error":
-                        print(f"[PocketONNX] Worker error: {resp.get('error')}")
-                        return False
+                        elif resp_type == "error":
+                            print(f"[PocketONNX] Worker error: {resp.get('error')}")
+                            return False
 
             proc_time = time.time() - start_time
             duration = total_bytes / (SAMPLE_RATE * 2)
@@ -1081,6 +1092,7 @@ class PocketONNXProcessManager:
             traceback.print_exc()
             return False
 
+    @_serialized_worker_io
     def synthesize_sentence(self, text: str, voice_path: str, voice_hash: str,
                              on_chunk: Callable, temperature: Optional[float] = None,
                              cumulative_time: float = 0.0, align: bool = True,
@@ -1124,73 +1136,76 @@ class PocketONNXProcessManager:
                 bytes_produced += len(silence_pcm)
                 cumulative_time += silence_duration
 
-            # Send request to worker
-            self._request_queue.put({
-                "type": "synthesize",
-                "text": text_chunk,
-                "voice_path": voice_path,
-                "voice_hash": voice_hash,
-                "temperature": temperature,
-                "align": align,
-                "streaming": streaming
-            })
+            with self._synthesis_lock:
+                # Send request to worker. The worker uses one shared response
+                # queue, so synthesis calls must not consume responses in parallel.
+                self._request_queue.put({
+                    "type": "synthesize",
+                    "text": text_chunk,
+                    "voice_path": voice_path,
+                    "voice_hash": voice_hash,
+                    "temperature": temperature,
+                    "align": align,
+                    "streaming": streaming
+                })
 
-            # Receive audio chunks
-            chunk_timeout = 60.0 if not streaming else 30.0
-            chunk_bytes_in_this_request = 0
+                # Receive audio chunks
+                chunk_timeout = 60.0 if not streaming else 30.0
+                chunk_bytes_in_this_request = 0
 
-            while True:
-                try:
-                    resp = self._response_queue.get(timeout=chunk_timeout)
-                except:
-                    print("[PocketONNX] Timeout waiting for worker response")
-                    return (False, bytes_produced, cumulative_time)
+                while True:
+                    try:
+                        resp = self._response_queue.get(timeout=chunk_timeout)
+                    except:
+                        print("[PocketONNX] Timeout waiting for worker response")
+                        return (False, bytes_produced, cumulative_time)
 
-                resp_type = resp.get("type")
+                    resp_type = resp.get("type")
 
-                if resp_type == "chunk":
-                    audio_bytes = resp["audio"]
-                    chunk_alignments = resp.get("alignments")
-                    audio_chunk = np.frombuffer(audio_bytes, dtype=np.float32).copy()
+                    if resp_type == "chunk":
+                        audio_bytes = resp["audio"]
+                        chunk_alignments = resp.get("alignments")
+                        audio_chunk = np.frombuffer(audio_bytes, dtype=np.float32).copy()
 
-                    # Apply fade-in on very first chunk only
-                    if is_first_audio_chunk:
-                        fade_samples = int(SAMPLE_RATE * 0.002)
-                        if len(audio_chunk) > fade_samples:
-                            fade_curve = np.linspace(0, 1, fade_samples)
-                            audio_chunk[:fade_samples] *= fade_curve
-                        is_first_audio_chunk = False
+                        # Apply fade-in on very first chunk only
+                        if is_first_audio_chunk:
+                            fade_samples = int(SAMPLE_RATE * 0.002)
+                            if len(audio_chunk) > fade_samples:
+                                fade_curve = np.linspace(0, 1, fade_samples)
+                                audio_chunk[:fade_samples] *= fade_curve
+                            is_first_audio_chunk = False
 
-                    # Convert to int16 PCM
-                    audio_np = np.clip(audio_chunk, -1.0, 1.0)
-                    pcm_int16 = (audio_np * 32767).astype(np.int16)
-                    pcm_bytes = pcm_int16.tobytes()
+                        # Convert to int16 PCM
+                        audio_np = np.clip(audio_chunk, -1.0, 1.0)
+                        pcm_int16 = (audio_np * 32767).astype(np.int16)
+                        pcm_bytes = pcm_int16.tobytes()
 
-                    bytes_produced += len(pcm_bytes)
-                    chunk_bytes_in_this_request += len(pcm_bytes)
+                        bytes_produced += len(pcm_bytes)
+                        chunk_bytes_in_this_request += len(pcm_bytes)
 
-                    # Convert alignment to dict format with cumulative offset
-                    word_timing = None
-                    if chunk_alignments:
-                        word_timing = {
-                            "words": [a["word"] for a in chunk_alignments],
-                            "wordStartTimeSeconds": [a["start"] + cumulative_time for a in chunk_alignments],
-                            "wordEndTimeSeconds": [a["end"] + cumulative_time for a in chunk_alignments]
-                        }
+                        # Convert alignment to dict format with cumulative offset
+                        word_timing = None
+                        if chunk_alignments:
+                            word_timing = {
+                                "words": [a["word"] for a in chunk_alignments],
+                                "wordStartTimeSeconds": [a["start"] + cumulative_time for a in chunk_alignments],
+                                "wordEndTimeSeconds": [a["end"] + cumulative_time for a in chunk_alignments]
+                            }
 
-                    on_chunk(pcm_bytes, word_timing)
+                        on_chunk(pcm_bytes, word_timing)
 
-                elif resp_type == "done":
-                    # Update cumulative time from bytes produced in this worker request
-                    cumulative_time += chunk_bytes_in_this_request / (SAMPLE_RATE * 2)
-                    break
+                    elif resp_type == "done":
+                        # Update cumulative time from bytes produced in this worker request
+                        cumulative_time += chunk_bytes_in_this_request / (SAMPLE_RATE * 2)
+                        break
 
-                elif resp_type == "error":
-                    print(f"[PocketONNX] Worker error: {resp.get('error')}")
-                    return (False, bytes_produced, cumulative_time)
+                    elif resp_type == "error":
+                        print(f"[PocketONNX] Worker error: {resp.get('error')}")
+                        return (False, bytes_produced, cumulative_time)
 
         return (True, bytes_produced, cumulative_time)
 
+    @_serialized_worker_io
     def warm_up(self, voice_name: Optional[str] = None):
         """Warm up worker process and optionally pre-cache a voice."""
         if not self.ensure_started():
@@ -1216,6 +1231,7 @@ class PocketONNXProcessManager:
             self._cleanup()
             print("[PocketONNX] Worker process shut down")
 
+    @_serialized_worker_io
     def clear_embedding(self, voice_path: str):
         """Clear cached embedding for a voice file in the worker process."""
         if not self.ensure_started():

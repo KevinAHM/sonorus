@@ -9,8 +9,57 @@ from constants import (
     STEALTH_EARSHOT_DISTANCE,
     FOLLOWING_COMPANION_EARSHOT_DISTANCE,
     BROOM_EARSHOT_DISTANCE,
+    VOICE_NAME_ALIASES,
 )
-from services.tts.voice_utils import has_voice_reference, get_game_language
+from services.tts.voice_utils import get_game_language, get_voice_reference_names, has_voice_reference
+
+
+def ellipsis_starts_new_sentence(text: str, following_pos: int):
+    """Return whether text after an ellipsis begins a new cased sentence.
+
+    ``None`` means there is not enough following text to decide yet. Formatting
+    markers used by dialogue and narration are ignored while finding the first
+    real letter.
+    """
+    index = following_pos
+    text_len = len(text)
+
+    while True:
+        while index < text_len and (text[index].isspace() or text[index] in "\"'*_"):
+            index += 1
+
+        if index >= text_len:
+            return None
+
+        if text[index] == '[':
+            tag_end = text.find(']', index + 1)
+            if tag_end < 0:
+                return None
+            index = tag_end + 1
+            continue
+
+        char = text[index]
+        if char.isalpha():
+            if char.isupper():
+                return True
+            if char.islower():
+                return False
+            return None
+
+        index += 1
+
+
+def _protect_nonterminal_ellipses(text: str, placeholder: str) -> str:
+    """Hide ellipsis dots unless lookahead identifies a new sentence."""
+    return re.sub(
+        r'\.{3,}',
+        lambda match: (
+            match.group(0)
+            if ellipsis_starts_new_sentence(text, match.end()) is True
+            else placeholder * len(match.group(0))
+        ),
+        text,
+    )
 
 
 def split_into_sentences(text):
@@ -20,12 +69,18 @@ def split_into_sentences(text):
     IMPORTANT: Call this AFTER expand_abbreviations() so "Dr." becomes "doctor"
     and won't cause false sentence breaks.
     """
-    # After abbreviation expansion, most problematic cases are gone
+    if not text or not text.strip():
+        return []
+
+    # After abbreviation expansion, most problematic cases are gone.
+    # Preserve an ellipsis followed by a lowercase continuation.
+    placeholder = '\x00'
+    protected = _protect_nonterminal_ellipses(text.strip(), placeholder)
     # Split on sentence-ending punctuation followed by space or end
     pattern = r'(?<=[.!?])\s+'
-    sentences = re.split(pattern, text.strip())
+    sentences = re.split(pattern, protected)
     # Filter empty strings and strip whitespace
-    return [s.strip() for s in sentences if s.strip()]
+    return [s.replace(placeholder, '.').strip() for s in sentences if s.strip()]
 
 
 # Common abbreviations that end with a period but aren't sentence endings.
@@ -68,7 +123,7 @@ def split_into_sentences_safe(text):
     # Step 1: Protect abbreviations by temporarily replacing their dots
     # Replace "Mr." → "Mr\x00" etc. so the split regex won't match
     PLACEHOLDER = '\x00'
-    protected = text
+    protected = _protect_nonterminal_ellipses(text, PLACEHOLDER)
     for abbr in _ABBREVIATIONS:
         # Case-insensitive: match "Mr." "mr." "MR." etc.
         pattern = r'\b' + re.escape(abbr) + r'\.'
@@ -310,21 +365,25 @@ def get_significant_npc_names() -> tuple:
         - voice_names: List like ["SebastianSallow", "NatsaiOnai", ...]
         - display_names: List like ["Sebastian Sallow", "Natsai Onai", ...]
     """
-    from services.tts.voice_utils import get_voice_reference_names
-    from constants import VOICE_NAME_ALIASES
     # Get voice references for current game language
     language = get_game_language()
-    voice_names = list(get_voice_reference_names(language))
-    display_names = [voice_name_to_display_name(v) for v in voice_names]
+    canonical_by_key = {}
+    for voice_name in get_voice_reference_names(language):
+        key = voice_name.casefold()
+        current = canonical_by_key.get(key)
+        if current is None or (current == current.lower() and voice_name != voice_name.lower()):
+            canonical_by_key[key] = voice_name
 
     # Add aliased names (e.g., HOG_Sanctum_Guardian1 -> Guardian1)
     # so Lua knows these game IDs are significant too
     for alias, ref_name in VOICE_NAME_ALIASES.items():
-        if ref_name.lower() in {v.lower() for v in voice_names}:
-            voice_names.append(alias)
-            display_names.append(voice_name_to_display_name(alias))
+        if ref_name.casefold() in canonical_by_key:
+            canonical_by_key.setdefault(alias.casefold(), alias)
 
-    voice_names = [v.lower() for v in voice_names]
+    # Preserve canonical casing for APIs such as GetScheduledEntityFromName.
+    # Lua builds its separate case-insensitive filter set when this is synced.
+    voice_names = sorted(canonical_by_key.values(), key=str.casefold)
+    display_names = [voice_name_to_display_name(v) for v in voice_names]
     return voice_names, display_names
 
 
@@ -693,7 +752,6 @@ _TAG_CANONICAL = {
         # OmniVoice only supports [laughter] — all laugh variants map to it,
         # everything else gets stripped by omnivoice_text.preprocess_text
         "laugh": "laughter", "laughs": "laughter", "laughing": "laughter",
-        "chuckle": "laughter", "chuckles": "laughter", "chuckling": "laughter",
     },
 }
 

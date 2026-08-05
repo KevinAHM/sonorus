@@ -139,7 +139,7 @@ if errorlevel 1 (
 )
 
 :: Check if dependencies are installed
-"%PYTHON%" -c "import sys; import importlib.util; sys.exit(0 if all(importlib.util.find_spec(m) is not None for m in ['kaldi_native_fbank', 'real_ladybug', 'json_repair', 'qdrant_client']) else 1)" >nul 2>&1
+"%PYTHON%" -c "import sys; import importlib.util; sys.exit(0 if all(importlib.util.find_spec(m) is not None for m in ['kaldi_native_fbank', 'real_ladybug', 'json_repair', 'qdrant_client', 'huggingface_hub']) else 1)" >nul 2>&1
 if errorlevel 1 (
     echo Installing Python dependencies...
     bin\sfw.exe "%PYTHON%" -m pip install setuptools wheel --no-warn-script-location -q
@@ -163,12 +163,9 @@ if not exist "python\Lib\site-packages\tkinter" (
 
 :: heartbeat.py exits when server.py creates server.heartbeat, or when we write server.lock.stop
 
-:: Pre-download ONNX models (turn detection)
-if not exist "models\smart-turn-v3.2-cpu.onnx" (
-    echo Downloading turn detection model...
-    if not exist "models" mkdir models
-    powershell -Command "Invoke-WebRequest -Uri 'https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-cpu.onnx' -OutFile 'models\smart-turn-v3.2-cpu.onnx'"
-)
+:: Validate/pre-download ONNX models (turn detection)
+"%PYTHON%" services\turn_detection.py
+if errorlevel 1 echo WARNING: Turn detection model download failed; the server will retry when needed.
 
 if "%DEBUG_MODE%"=="1" set SONORUS_DEBUG=1
 

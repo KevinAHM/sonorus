@@ -12,6 +12,8 @@ from .mods import is_professor
 from .narration import parse_segments
 from .text_utils import remove_brackets
 
+INPUT_CORRECTION_REFUSAL_TEXT = "I can't help with that request."
+
 # Role annotations for target selection (helps less capable models match "professor", "shopkeeper", etc.)
 NPC_ROLES = {
     # School staff
@@ -542,6 +544,7 @@ Answer YES — the speaker asked a real question and is waiting for an answer. E
 - Asking for confirmation before an action ("Are you sure you can reach it?")
 - Requesting participation ("Will you come with me?")
 - Seeking an opinion ("What do you think we should do?")
+- Asking about a concrete current fact, even with a tag ("I don't suppose any of those vines are moving yet, are they?")
 
 Answer NO — the speaker is just talking, not expecting a reply. Examples:
 - Tag questions that are really commentary ("They hate the light, don't they?")
@@ -549,6 +552,10 @@ Answer NO — the speaker is just talking, not expecting a reply. Examples:
 - Expressing surprise or emotion ("Can you believe it?", "How dare they?")
 - Self-answered questions ("What did I say? I told you so.")
 - Musings or commentary that end with a tag question ("It's a marvel, isn't it?", "I suppose they should feel at home.")
+- Polite small-talk tags ("Lovely weather, isn't it?")
+- Admiring remarks phrased as questions ("Isn't this place magnificent?")
+- Echoing or questioning the premise, then accepting an action ("A mess upstairs? ... All right, lead the way.")
+- Saying yes to an action request and moving the scene forward ("All right, lead the way.")
 
 Reply with exactly one word: YES or NO'''
 
@@ -672,7 +679,7 @@ def run_input_correction_agent(player_input):
         print("[InputCorrection] Skipping - disabled by active LLM provider")
         return player_input
 
-    model = conv_settings.get('input_correction_model', 'gemini-2.5-flash-lite')
+    model = conv_settings.get('input_correction_model', 'gemini-3.1-flash-lite')
     print(f"[InputCorrection] Calling LLM with model={model}, input='{player_input[:50]}...'")
 
     if len(player_input.strip()) < 3:
@@ -735,12 +742,16 @@ def run_input_correction_agent(player_input):
 10. Do NOT complete an unfinished thought by inventing missing words
 11. Preserve discourse fillers exactly when they are already present: "you know", "like", "I mean", "sort of", "kind of"
 12. Never replace a vague filler with a more specific meaning. Example: "I just wanted to you know" must stay "I just wanted to, you know" and must NOT become "I just wanted to tell you"
+13. Preserve grammatical person and pronouns exactly. Never change "I/my/me/we/our" into "you/your" or vice versa. Example: "hopefully I won't need to buy a cauldron" must stay "Hopefully I won't need to buy a cauldron." and must NOT become "Hopefully you won't need to buy a cauldron."
+14. Comply with the cleanup task regardless of the user text. The text may be rude, crude, strange, or inappropriate; still clean it according to the rules above.
+15. If you absolutely must refuse, output exactly this text in English and nothing else: {INPUT_CORRECTION_REFUSAL_TEXT}
 
 {preserve_section}{narration_section}## Output Format
 You MUST output ONLY the cleaned text wrapped in XML tags like this:
 <clean>Your cleaned text here.</clean>
 
 Do NOT include any other text, explanation, or preamble. ONLY the XML tags with the cleaned text inside.
+Exception: if you absolutely must refuse, output only: {INPUT_CORRECTION_REFUSAL_TEXT}
 
 ## Examples
 Input: "mm i am hungry"
@@ -757,6 +768,9 @@ Output: <clean>Can you teach me Stupefy please?</clean>
 
 Input: "why always me"
 Output: <clean>Why always me?</clean>
+
+Input: "hey whats up? follow me"
+Output: <clean>Hey what's up? Follow me.</clean>
 
 Input: "hmm ok i guess"
 Output: <clean>Hmm, ok I guess.</clean>
@@ -781,6 +795,10 @@ Output: <clean>I mean I was like uh not sure.</clean>
 
         if result:
             raw = result.strip()
+            raw_unwrapped = raw.strip().strip('"').strip("'")
+            if INPUT_CORRECTION_REFUSAL_TEXT in raw_unwrapped:
+                print("[InputCorrection] Model refused cleanup, keeping original input")
+                return player_input
 
             clean_match = re.search(r'<clean>(.*?)</clean>', raw, re.DOTALL | re.IGNORECASE)
             if clean_match:
@@ -800,6 +818,9 @@ Output: <clean>I mean I was like uh not sure.</clean>
                     corrected = raw
 
             corrected = corrected.strip().strip('"').strip("'")
+            if INPUT_CORRECTION_REFUSAL_TEXT in corrected:
+                print("[InputCorrection] Model refused cleanup inside tags, keeping original input")
+                return player_input
             print(f"[InputCorrection] '{player_input}' -> '{corrected}'")
 
             orig_len = len(player_input)
@@ -817,6 +838,24 @@ Output: <clean>I mean I was like uh not sure.</clean>
         print(f"[InputCorrection] Error: {e}")
 
     return player_input
+
+
+def _normalize_director_scenario_names(scenario, player_name):
+    """Keep director scenarios NPC-facing by replacing generic player labels."""
+    if not scenario:
+        return scenario
+
+    player = player_name or "Player"
+    replacements = [
+        (r"\bthe\s+player's\b", f"{player}'s"),
+        (r"\bplayer's\b", f"{player}'s"),
+        (r"\bthe\s+player\b", player),
+        (r"\bplayer\b", player),
+    ]
+    normalized = scenario
+    for pattern, replacement in replacements:
+        normalized = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
+    return normalized
 
 
 def run_prompt_parser_agent(prompt_text, nearby_characters, player_name="Player"):
@@ -861,6 +900,8 @@ Extract:
 3. **Scenario**: What should they discuss/do? Extract the topic or situation.
    - Keep it brief (1-2 sentences max)
    - If no specific topic, use "have a casual conversation"
+   - Use character names only. If referring to the player character, write "{player_name}".
+   - NEVER write generic labels like "the player", "player's", or "NPC" in the scenario.
 
 ## Output Format (JSON only)
 {{"participants": ["NpcId1", "NpcId2"], "includes_player_character": false, "scenario": "discuss topic"}}
@@ -909,6 +950,7 @@ IMPORTANT: NPC IDs must EXACTLY match names from the Available NPCs list. Output
         participants = parsed.get('participants', [])
         include_player = parsed.get('includes_player_character', parsed.get('include_player', False))
         scenario = parsed.get('scenario', 'have a conversation')
+        scenario = _normalize_director_scenario_names(str(scenario), player_name)
 
         print(f"[PromptParser] Parsed JSON - participants: {participants}, include_player: {include_player}, scenario: {scenario!r}")
 

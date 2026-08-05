@@ -26,6 +26,55 @@ _TEACHER_DISPLAY_SUBJECTS = {
 }
 
 
+def _normalize_participant_names(participants):
+    """Return participant names in order, dropping duplicate display names."""
+    normalized = []
+    seen = set()
+    for participant in participants or []:
+        if participant is None:
+            continue
+        name = str(participant).strip()
+        if not name:
+            continue
+        key = "".join(name.split()).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(name)
+    return normalized
+
+
+def _format_participant_list(participants):
+    names = _normalize_participant_names(participants)
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return f"{names[0]} and {names[1]}"
+    return ", ".join(names[:-1]) + f", and {names[-1]}"
+
+
+def _get_current_speaker_name(current_speaker):
+    """Return the prompted character's display name for explicit identity cues."""
+    if not current_speaker:
+        return ""
+    speaker_name = get_display_name(current_speaker)
+    return speaker_name if speaker_name and speaker_name != "Unknown" else str(current_speaker)
+
+
+def _format_vision_section(vision_section):
+    """Format vision context with grounding for commonly over-inferred wording."""
+    output = "**What you can see:**\n" + vision_section
+    if "cavernous" in vision_section.casefold():
+        output += (
+            '\n\n**Vision grounding:** "Cavernous" only means spacious or cave-like; '
+            "do not infer that the location is a cave. In the Hogwarts setting, it may simply "
+            "describe a large doorway or interior."
+        )
+    return output
+
+
 def _load_teacher_schedules():
     global _schedule_cache
     if _schedule_cache is not None:
@@ -637,6 +686,8 @@ def format_game_context(context, current_speaker=None, participants=None, observ
     player_name = context.get('playerName', 'Unknown')
     player_house = context.get('playerHouse', 'Unknown')
     in_stealth = context.get('inStealth', False)
+    current_speaker_name = _get_current_speaker_name(current_speaker)
+    speaker_subject = f"You, {current_speaker_name}," if current_speaker_name else "You"
 
     settings = load_settings()
     conv_settings = settings.get('conversation', {})
@@ -652,45 +703,36 @@ def format_game_context(context, current_speaker=None, participants=None, observ
     if observer_mode:
         # In observer mode (director prompt), NPCs are speaking to each other
         # Participants list contains the other conversation participants
-        if participants:
-            if len(participants) == 1:
-                speaking_with = participants[0]
-            elif len(participants) == 2:
-                speaking_with = f"{participants[0]} and {participants[1]}"
-            else:
-                speaking_with = ", ".join(participants[:-1]) + f", and {participants[-1]}"
-            header_parts.append(f"You are currently{location_clause}, in a conversation with {speaking_with}.")
+        speaking_with = _format_participant_list(participants)
+        if speaking_with:
+            header_parts.append(f"{speaker_subject} are currently{location_clause}, in a conversation with {speaking_with}.")
         # No player visibility/status info in observer mode
-    elif participants:
-        if len(participants) == 1:
-            speaking_with = participants[0]
-        elif len(participants) == 2:
-            speaking_with = f"{participants[0]} and {participants[1]}"
-        else:
-            speaking_with = ", ".join(participants[:-1]) + f", and {participants[-1]}"
-        header_parts.append(f"You are currently{location_clause}, speaking with {speaking_with}.")
-    elif player_name and player_name != "Unknown":
-        player_desc = f"You are currently{location_clause}, speaking with {player_name}, a {player_house} student"
-        status_parts = []
-        if context.get('inCombat'):
-            status_parts.append("currently in combat")
-        if context.get('isOnMount'):
-            mount_type = context.get('mountType', 'broom')
-            if mount_type == 'broom':
-                status_parts.append("flying on a broom")
-            elif mount_type == 'hippogriff':
-                status_parts.append("riding a hippogriff")
-            elif mount_type == 'graphorn':
-                status_parts.append("riding a graphorn")
-            else:
-                status_parts.append(f"riding a {mount_type}")
-        if context.get('isSwimming'):
-            status_parts.append("swimming")
-        if context.get('hoodUp'):
-            status_parts.append("with their hood up")
-        if status_parts:
-            player_desc += f" who is {' and '.join(status_parts)}"
-        header_parts.append(player_desc + ".")
+    else:
+        speaking_with = _format_participant_list(participants)
+        if speaking_with:
+            header_parts.append(f"{speaker_subject} are currently{location_clause}, speaking with {speaking_with}.")
+        elif player_name and player_name != "Unknown":
+            player_desc = f"{speaker_subject} are currently{location_clause}, speaking with {player_name}, a {player_house} student"
+            status_parts = []
+            if context.get('inCombat'):
+                status_parts.append("currently in combat")
+            if context.get('isOnMount'):
+                mount_type = context.get('mountType', 'broom')
+                if mount_type == 'broom':
+                    status_parts.append("flying on a broom")
+                elif mount_type == 'hippogriff':
+                    status_parts.append("riding a hippogriff")
+                elif mount_type == 'graphorn':
+                    status_parts.append("riding a graphorn")
+                else:
+                    status_parts.append(f"riding a {mount_type}")
+            if context.get('isSwimming'):
+                status_parts.append("swimming")
+            if context.get('hoodUp'):
+                status_parts.append("with their hood up")
+            if status_parts:
+                player_desc += f" who is {' and '.join(status_parts)}"
+            header_parts.append(player_desc + ".")
 
     # Visibility status (skip in observer mode)
     if not observer_mode:
@@ -781,9 +823,12 @@ def format_game_context(context, current_speaker=None, participants=None, observ
     nearby = context.get('nearbyNpcs', [])
     nearby_parts = []
 
-    # In observer mode, don't list player as "speaking with you"
+    if current_speaker_name:
+        nearby_parts.append(f"- {current_speaker_name} (You)")
+
+    # In observer mode, the player is not part of this exchange.
     if player_name and player_name != "Unknown" and not observer_mode:
-        nearby_parts.append(f"- {player_name} (speaking with you)")
+        nearby_parts.append(f"- {player_name} (you are responding to them)")
 
     companion_id = context.get('companionId', '')
     followers = [f.lower() for f in context.get('followers', [])]
@@ -961,7 +1006,7 @@ def format_game_context(context, current_speaker=None, participants=None, observ
 
     # Vision
     if vision_section:
-        output.append("\n\n**What you can see:**\n" + vision_section)
+        output.append("\n\n" + _format_vision_section(vision_section))
 
     # Landmarks
     if landmark_section:
@@ -1150,6 +1195,8 @@ def format_dynamic_context(context, current_speaker=None, participants=None,
     player_name = context.get('playerName', 'Unknown')
     player_house = context.get('playerHouse', 'Unknown')
     in_stealth = context.get('inStealth', False)
+    current_speaker_name = _get_current_speaker_name(current_speaker)
+    speaker_subject = f"You, {current_speaker_name}," if current_speaker_name else "You"
 
     settings = load_settings()
 
@@ -1164,44 +1211,35 @@ def format_dynamic_context(context, current_speaker=None, participants=None,
     # === HEADER: Speaking with ===
     header_parts = []
     if observer_mode:
-        if participants:
-            if len(participants) == 1:
-                speaking_with = participants[0]
-            elif len(participants) == 2:
-                speaking_with = f"{participants[0]} and {participants[1]}"
-            else:
-                speaking_with = ", ".join(participants[:-1]) + f", and {participants[-1]}"
-            header_parts.append(f"You are currently{location_clause}, in a conversation with {speaking_with}.")
-    elif participants:
-        if len(participants) == 1:
-            speaking_with = participants[0]
-        elif len(participants) == 2:
-            speaking_with = f"{participants[0]} and {participants[1]}"
-        else:
-            speaking_with = ", ".join(participants[:-1]) + f", and {participants[-1]}"
-        header_parts.append(f"You are currently{location_clause}, speaking with {speaking_with}.")
-    elif player_name and player_name != "Unknown":
-        player_desc = f"You are currently{location_clause}, speaking with {player_name}, a {player_house} student"
-        status_parts = []
-        if context.get('inCombat'):
-            status_parts.append("currently in combat")
-        if context.get('isOnMount'):
-            mount_type = context.get('mountType', 'broom')
-            if mount_type == 'broom':
-                status_parts.append("flying on a broom")
-            elif mount_type == 'hippogriff':
-                status_parts.append("riding a hippogriff")
-            elif mount_type == 'graphorn':
-                status_parts.append("riding a graphorn")
-            else:
-                status_parts.append(f"riding a {mount_type}")
-        if context.get('isSwimming'):
-            status_parts.append("swimming")
-        if context.get('hoodUp'):
-            status_parts.append("with their hood up")
-        if status_parts:
-            player_desc += f" who is {' and '.join(status_parts)}"
-        header_parts.append(player_desc + ".")
+        speaking_with = _format_participant_list(participants)
+        if speaking_with:
+            header_parts.append(f"{speaker_subject} are currently{location_clause}, in a conversation with {speaking_with}.")
+    else:
+        speaking_with = _format_participant_list(participants)
+        if speaking_with:
+            header_parts.append(f"{speaker_subject} are currently{location_clause}, speaking with {speaking_with}.")
+        elif player_name and player_name != "Unknown":
+            player_desc = f"{speaker_subject} are currently{location_clause}, speaking with {player_name}, a {player_house} student"
+            status_parts = []
+            if context.get('inCombat'):
+                status_parts.append("currently in combat")
+            if context.get('isOnMount'):
+                mount_type = context.get('mountType', 'broom')
+                if mount_type == 'broom':
+                    status_parts.append("flying on a broom")
+                elif mount_type == 'hippogriff':
+                    status_parts.append("riding a hippogriff")
+                elif mount_type == 'graphorn':
+                    status_parts.append("riding a graphorn")
+                else:
+                    status_parts.append(f"riding a {mount_type}")
+            if context.get('isSwimming'):
+                status_parts.append("swimming")
+            if context.get('hoodUp'):
+                status_parts.append("with their hood up")
+            if status_parts:
+                player_desc += f" who is {' and '.join(status_parts)}"
+            header_parts.append(player_desc + ".")
 
     # Visibility status (skip in observer mode)
     if not observer_mode:
@@ -1272,8 +1310,11 @@ def format_dynamic_context(context, current_speaker=None, participants=None,
     nearby = context.get('nearbyNpcs', [])
     nearby_parts = []
 
+    if current_speaker_name:
+        nearby_parts.append(f"- {current_speaker_name} (You)")
+
     if player_name and player_name != "Unknown" and not observer_mode:
-        nearby_parts.append(f"- {player_name} (speaking with you)")
+        nearby_parts.append(f"- {player_name} (you are responding to them)")
 
     companion_id = context.get('companionId', '')
     followers = [f.lower() for f in context.get('followers', [])]
@@ -1369,7 +1410,7 @@ def format_dynamic_context(context, current_speaker=None, participants=None,
         print(f"[Context] Vision context error: {e}")
 
     if vision_section:
-        output.append("**What you can see:**\n" + vision_section)
+        output.append(_format_vision_section(vision_section))
 
     # === LANDMARKS ===
     landmark_section = ""
@@ -1411,10 +1452,10 @@ def format_dynamic_context(context, current_speaker=None, participants=None,
         kept_structural = set(id(e) for e in structural[-30:])
         kept_ambient = set(id(e) for e in ambient[-4:])
         kept = kept_structural | kept_ambient
+        selected_events = [entry for entry in collapsed_events if id(entry) in kept]
+        selected_events = collapse_consecutive_events(selected_events)
         event_lines = []
-        for entry in collapsed_events:
-            if id(entry) not in kept:
-                continue
+        for entry in selected_events:
             line = format_dialogue_entry(entry, include_time=True, mark_player=False)
             if line and not narration_enabled:
                 line = _clean_history_line_for_prompt(line)

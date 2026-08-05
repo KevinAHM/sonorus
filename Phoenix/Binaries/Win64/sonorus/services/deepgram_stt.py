@@ -11,75 +11,17 @@ import wave
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.settings import load_settings
+from services.stt_terms import (
+    ALL_KEYTERMS,
+    CHARACTER_KEYTERMS,
+    LOCATION_KEYTERMS,
+    SPELL_KEYTERMS,
+)
 
 # Keyword boosting terms for Deepgram STT.
 # Keep categories separate so name/location additions are explicit and easy to maintain.
 _client = None
 _client_api_key = None
-
-
-CHARACTER_KEYTERMS = [
-    # Character names commonly mangled by STT
-    "Garlick",
-    "Professor Garlick",
-    "Mirabel Garlick",
-    "Ominis",
-    "Deek",
-    "Garreth",
-]
-
-
-SPELL_KEYTERMS = [
-    # Two-word spells (most likely to be misheard)
-    "Avada Kedavra",
-    "Wingardium Leviosa",
-    "Arresto Momentum",
-    "Petrificus Totalus",
-    "Expecto Patronum",
-    "Animagus Form",
-    "Bat Bogey",
-    "Fiend Fyre",
-    # Latin-derived spells
-    "Levioso",
-    "Accio",
-    "Depulso",
-    "Descendo",
-    "Flipendo",
-    "Glacius",
-    "Incendio",
-    "Confringo",
-    "Diffindo",
-    "Expelliarmus",
-    "Expulso",
-    "Crucio",
-    "Imperio",
-    "Stupefy",
-    "Lumos",
-    "Nox",
-    "Reparo",
-    "Revelio",
-    "Protego",
-    "Confundo",
-    "Oppugno",
-    "Obliviate",
-    "Episkey",
-    "Evanesco",
-    "Conjuration",
-    "Alohomora",
-    "Reducio",
-    "Reducto",
-    "Apparition",
-    "Bombarda",
-]
-
-
-LOCATION_KEYTERMS = [
-    # Location names
-    "Hogsmeade"
-]
-
-
-ALL_KEYTERMS = CHARACTER_KEYTERMS + SPELL_KEYTERMS + LOCATION_KEYTERMS
 
 
 def _get_client():

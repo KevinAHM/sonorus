@@ -1146,11 +1146,11 @@ def get_all_eval_states():
 # Activity Log
 # ============================================
 
-_OWL_LOG_MAX_ROWS = 50
+_OWL_LOG_MAX_ROWS = 200
 
 
 def log_owl_event(event: str, npc_id: str = None, detail: str = None):
-    """Append an entry to the owl post activity log (ring buffer, max 50 rows)."""
+    """Append an entry to the owl post activity log (ring buffer, max rows)."""
     import time
     _ensure_initialized()
     try:
@@ -1170,7 +1170,7 @@ def log_owl_event(event: str, npc_id: str = None, detail: str = None):
         print(f"[OwlPostDB] Error writing log: {e}")
 
 
-def get_owl_log(limit: int = 20) -> list:
+def get_owl_log(limit: int = _OWL_LOG_MAX_ROWS) -> list:
     """Return the most recent owl post log entries, newest first."""
     _ensure_initialized()
     try:

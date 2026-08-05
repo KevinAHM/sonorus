@@ -16,24 +16,42 @@
     "owlSummarize": "owl_post.summarize_model",
     "locationResolver": "commitment.location_resolver_model"
   },
+  "_provider_routes": {
+    "openrouter": {
+      "chat": ["google-ai-studio", "google-vertex"],
+      "vision": ["google-ai-studio", "google-vertex"],
+      "target": ["mistral", "deepinfra"],
+      "interjection": ["google-ai-studio", "google-vertex"],
+      "commentary": ["mistral", "deepinfra"],
+      "inputCorrection": ["wandb", "groq", "deepinfra", "novita"],
+      "chapter": ["google-ai-studio", "google-vertex"],
+      "prose": ["google-ai-studio", "google-vertex"],
+      "graphiti": ["google-ai-studio", "google-vertex"],
+      "graphitiSmall": ["google-ai-studio", "google-vertex"],
+      "reranker": ["wandb", "groq", "deepinfra", "novita"],
+      "owlSummarize": ["google-ai-studio", "google-vertex"],
+      "locationResolver": ["google-ai-studio", "google-vertex"]
+    }
+  },
   "gemini": {
     "chat": "gemini-3-flash-preview",
-    "vision": "gemini-2.5-flash-lite",
-    "target": "gemini-2.5-flash-lite",
-    "interjection": "gemini-2.5-flash-lite",
-    "commentary": "gemini-2.5-flash-lite",
-    "inputCorrection": "gemini-2.5-flash-lite",
-    "chapter": "gemini-2.5-flash-lite",
-    "prose": "gemini-2.5-flash-lite",
-    "graphiti": "gemini-2.5-flash-lite",
-    "graphitiSmall": "gemini-2.5-flash-lite",
-    "reranker": "gemini-2.5-flash-lite",
-    "owlSummarize": "gemini-2.5-flash-lite",
-    "locationResolver": "gemini-2.5-flash-lite"
+    "vision": "gemini-3.1-flash-lite",
+    "target": "gemini-3.1-flash-lite",
+    "interjection": "gemini-3.1-flash-lite",
+    "commentary": "gemini-3.1-flash-lite",
+    "inputCorrection": "gemini-3.1-flash-lite",
+    "embedding": "gemini-embedding-2",
+    "chapter": "gemini-3.1-flash-lite",
+    "prose": "gemini-3.1-flash-lite",
+    "graphiti": "gemini-3.1-flash-lite",
+    "graphitiSmall": "gemini-3.1-flash-lite",
+    "reranker": "gemini-3.1-flash-lite",
+    "owlSummarize": "gemini-3.1-flash-lite",
+    "locationResolver": "gemini-3.1-flash-lite"
   },
   "openrouter": {
     "chat": "google/gemini-3-flash-preview",
-    "vision": "google/gemini-2.5-flash-lite:nitro",
+    "vision": "google/gemini-3.1-flash-lite",
     "target": "mistralai/mistral-small-3.2-24b-instruct:nitro",
     "interjection": "google/gemini-3.1-flash-lite",
     "commentary": "mistralai/mistral-small-3.2-24b-instruct:nitro",
@@ -41,11 +59,11 @@
     "embedding": "openai/text-embedding-3-small",
     "chapter": "google/gemini-3.1-flash-lite",
     "prose": "google/gemini-3.1-flash-lite",
-    "graphiti": "openai/gpt-4.1-nano",
-    "graphitiSmall": "openai/gpt-4.1-nano",
+    "graphiti": "google/gemini-3.1-flash-lite",
+    "graphitiSmall": "google/gemini-3.1-flash-lite",
     "reranker": "meta-llama/llama-3.1-8b-instruct:nitro",
-    "owlSummarize": "google/gemini-2.5-flash-lite:nitro",
-    "locationResolver": "mistralai/mistral-small-3.2-24b-instruct:nitro"
+    "owlSummarize": "google/gemini-3.1-flash-lite",
+    "locationResolver": "google/gemini-3.1-flash-lite"
   },
   "openai": {
     "chat": "gpt-5-mini",

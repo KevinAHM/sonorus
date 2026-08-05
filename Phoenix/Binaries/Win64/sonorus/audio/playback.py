@@ -13,13 +13,14 @@ import re
 import sys
 import time
 import threading
-from typing import List, Dict, Optional, Callable
+from typing import List, Dict, Optional, Callable, Tuple
 
 # Add parent to path for utils imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from constants import EMOTE_TAGS, EMOTE_TAG_ALIASES
+from constants import EMOTE_TAGS, EMOTE_TAG_ALIASES, EMOTE_TAG_INTENSITY_MULTIPLIERS
 from utils.settings import load_settings
+from utils.emote_embeddings import resolve_freeform_emote_text
 from utils.profiler import Profiler
 from utils.viseme_utils import build_narration_ranges, get_boundary_time, neutralize_narration_visemes
 
@@ -50,19 +51,35 @@ def remove_unpaired_double_quotes(text: str) -> str:
 
 
 # Emotion tags the LLM may emit for facial animation
-_EMOTE_PARSE_TAGS = tuple(EMOTE_TAGS) + tuple(EMOTE_TAG_ALIASES.keys())
-_LEADING_EMOTE_RE = re.compile(r'^\s*(?:"?\s*)?\[(' + '|'.join(_EMOTE_PARSE_TAGS) + r')\]', re.IGNORECASE)
+_EMOTE_PARSE_TAGS = sorted(
+    (*EMOTE_TAGS, *EMOTE_TAG_ALIASES),
+    key=len,
+    reverse=True,
+)
+_LEADING_EMOTE_RE = re.compile(
+    r'^\s*(?:"?\s*)?\[(' + '|'.join(map(re.escape, _EMOTE_PARSE_TAGS)) + r')\]',
+    re.IGNORECASE,
+)
 
 
-def extract_emote_tag(text: str) -> Optional[str]:
-    """Extract a leading [emotion] tag from sentence text. Returns tag name or None."""
+def resolve_emote_tag(text: str) -> Optional[Tuple[str, float]]:
+    """Resolve a leading emotion tag to its preset name and intensity."""
     if not text:
         return None
     m = _LEADING_EMOTE_RE.search(text)
     if not m:
-        return None
+        return resolve_freeform_emote_text(text)
     tag = m.group(1).lower()
-    return EMOTE_TAG_ALIASES.get(tag, tag)
+    return (
+        EMOTE_TAG_ALIASES.get(tag, tag),
+        EMOTE_TAG_INTENSITY_MULTIPLIERS.get(tag, 1.0),
+    )
+
+
+def extract_emote_tag(text: str) -> Optional[str]:
+    """Extract a leading emotion tag and return its canonical preset name."""
+    resolved = resolve_emote_tag(text)
+    return resolved[0] if resolved else None
 
 
 def _fmt_seconds(value) -> str:
@@ -158,6 +175,8 @@ class TurnState:
         self.sentence_boundaries: List[Dict] = []
         self._last_subtitle_idx: int = -1
         self._sentence_subtitles: bool = True  # Per-sentence updates vs full-text-at-once
+        self._active_emote_tag: Optional[str] = None
+        self._active_emote_intensity: float = 1.0
         # Narration: high-water mark for viseme zeroing (avoids re-scanning)
         self._narr_zero_idx: int = 0
 
@@ -789,6 +808,14 @@ class PlaybackCoordinator:
         boundary = turn.sentence_boundaries[idx]
         is_narr = bool(boundary.get('is_narration', False))
         timing = self._subtitle_timing_payload(turn, idx, audio_pos)
+        explicit_emote = resolve_emote_tag(boundary.get('text', ''))
+        if explicit_emote:
+            turn._active_emote_tag, turn._active_emote_intensity = explicit_emote
+            emote_source = "explicit"
+        elif turn._active_emote_tag:
+            emote_source = "carried"
+        else:
+            emote_source = "none"
 
         print(
             f"[SubtitleDecision] turn={turn.turn_id} idx={idx}/{len(turn.sentence_boundaries)} "
@@ -821,8 +848,17 @@ class PlaybackCoordinator:
         msg.update(timing)
         self.lua_socket.send(msg)
 
-        emote = extract_emote_tag(boundary.get('text', ''))
-        self.lua_socket.send({"type": "emote", "name": emote, "turn_id": turn.turn_id})
+        emote = turn._active_emote_tag
+        emote_intensity = turn._active_emote_intensity
+        print(f"[Emote] turn={turn.turn_id} idx={idx}/{len(turn.sentence_boundaries)} "
+              f"source={emote_source} name={emote or 'none'} intensity={emote_intensity:.1f} "
+              f"text=\"{_one_line_text(boundary.get('text', ''))}\"")
+        self.lua_socket.send({
+            "type": "emote",
+            "name": emote,
+            "intensity": emote_intensity,
+            "turn_id": turn.turn_id,
+        })
 
     def play_turn(self, turn_id: str, audio_player, blocking: bool = True,
                   abort_check: Callable[[], bool] = None) -> bool:

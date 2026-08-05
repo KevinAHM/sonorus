@@ -470,10 +470,10 @@ def get_cost_breakdown(timeframe: str = "today") -> Dict[str, Any]:
         "SELECT id, timestamp, data_json, cost_total",
         "FROM system_events",
         "WHERE type = ?",
-        "AND status = ?",
+        "AND status IN (?, ?)",
         "AND COALESCE(cost_total, 0) > 0",
     ]
-    params: List[Any] = ["llm", "success"]
+    params: List[Any] = ["llm", "success", "warning"]
 
     if bounds["start_ts"] is not None:
         query.append("AND timestamp >= ?")
@@ -578,11 +578,15 @@ def log_llm_event(
     input_tokens: Optional[int] = None,
     output_tokens: Optional[int] = None,
     total_tokens: Optional[int] = None,
+    reasoning_tokens: Optional[int] = None,
     duration_ms: Optional[float] = None,
     cost_total: Optional[float] = None,
     cost_upstream_inference: Optional[float] = None,
+    provider_used: Optional[str] = None,
+    response_model: Optional[str] = None,
     status: str = "success",
-    error: Optional[str] = None
+    error: Optional[str] = None,
+    warning: Optional[str] = None,
 ) -> str:
     """
     Log an LLM call event.
@@ -596,7 +600,7 @@ def log_llm_event(
         duration_ms: Request latency in milliseconds
         cost_total: Total billed cost reported by the provider
         cost_upstream_inference: Upstream provider cost, when reported separately
-        status: "success" | "error"
+        status: "success" | "warning" | "error"
         error: Error message if failed
 
     Returns:
@@ -607,17 +611,21 @@ def log_llm_event(
         status=status,
         data={
             "model": model,
+            "response_model": response_model,
+            "provider_used": provider_used,
             "context": context,
             "tokens": {
                 "input": input_tokens,
                 "output": output_tokens,
-                "total": total_tokens
+                "total": total_tokens,
+                "reasoning": reasoning_tokens
             },
             "cost": {
                 "total": cost_total,
                 "upstream_inference_cost": cost_upstream_inference
             },
-            "duration_ms": duration_ms
+            "duration_ms": duration_ms,
+            "warning": warning
         },
         error=error
     )

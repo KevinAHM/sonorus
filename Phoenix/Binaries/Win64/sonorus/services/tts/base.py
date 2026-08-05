@@ -209,6 +209,10 @@ class BaseTTSProvider(ABC):
         """Get audio sample rate for this provider."""
         pass
 
+    def get_sample_rate_for_speaker(self, speaker_id: Optional[str] = None) -> int:
+        """Return the playback rate after applying any speaker/model override."""
+        return self.get_sample_rate()
+
     def get_buffer_seconds(self) -> float:
         """Seconds of audio to buffer before playback starts. Override per-provider."""
         return TTS_BUFFER_SECONDS
@@ -351,6 +355,31 @@ class BaseTTSProvider(ABC):
         """Whether the last synthesis failure means the provider-side voice is gone."""
         return False
 
+    def ensure_cached_voice_ready(
+        self,
+        voice: Dict,
+        character_name: str,
+        lang: str,
+        reference_path: Optional[str],
+    ) -> Optional[Dict]:
+        """Prepare provider-specific cached state or request a clean reclone."""
+        return voice
+
+    def prepare_reference_for_clone(
+        self, character_name: str, lang: str, reference_path: str
+    ) -> None:
+        """Prepare local artifacts required before the provider clone call."""
+
+    def finalize_cloned_voice(
+        self,
+        voice: Dict,
+        character_name: str,
+        lang: str,
+        reference_path: str,
+    ) -> Dict:
+        """Perform provider-specific work after a successful clone."""
+        return voice
+
     def invalidate_cached_voice(self, character_name: str, lang: Optional[str], voice_id: Optional[str]) -> None:
         """Drop a stale cached voice so get_or_create_voice can reclone it."""
         cache = self.get_voice_cache()
@@ -476,13 +505,23 @@ class BaseTTSProvider(ABC):
                         print(f"[{self.name}] Adopting voice {character_name} with hash {ref_hash}")
                         save_voice_hash(legacy_key, ref_hash)
                         voice["referenceHash"] = ref_hash
-                    print(f"[{self.name}] Voice found: {character_name}")
-                    return voice
+                    ready_voice = self.ensure_cached_voice_ready(
+                        voice, character_name, lang, ref_path
+                    )
+                    if ready_voice is not None:
+                        print(f"[{self.name}] Voice found: {character_name}")
+                        return ready_voice
+                    print(f"[{self.name}] Adopted voice needs provider-specific refresh: {character_name}")
 
                 if stored_hash == ref_hash:
                     # Hash matches - use existing voice
-                    print(f"[{self.name}] Voice found (hash valid): {character_name}")
-                    return voice
+                    ready_voice = self.ensure_cached_voice_ready(
+                        voice, character_name, lang, ref_path
+                    )
+                    if ready_voice is not None:
+                        print(f"[{self.name}] Voice found (hash valid): {character_name}")
+                        return ready_voice
+                    print(f"[{self.name}] Voice needs provider-specific refresh: {character_name}")
 
                 # Hash mismatch - reference file changed, need to reclone
                 print(f"[{self.name}] Reference changed for {character_name}: {stored_hash} -> {ref_hash}")
@@ -521,9 +560,13 @@ class BaseTTSProvider(ABC):
             if lua_socket:
                 lua_socket.send_notification("Cloning voice, please wait...")
 
+            self.prepare_reference_for_clone(character_name, lang, ref_path)
             cloned = self.clone_voice(clone_name, ref_path, lang)
             if not cloned:
                 raise Exception(f"Voice cloning failed for '{character_name}'. Check the server logs for details.")
+            cloned = self.finalize_cloned_voice(
+                cloned, character_name, lang, ref_path
+            )
 
             # Store hash in voice dict
             if ref_hash:
@@ -536,7 +579,7 @@ class BaseTTSProvider(ABC):
                 cache._by_id[cloned["voiceId"]] = cloned
 
             # Delete old voice after successful clone (best-effort, don't block on failure)
-            if old_voice_id:
+            if old_voice_id and old_voice_id != cloned.get("voiceId"):
                 try:
                     print(f"[{self.name}] Deleting old voice: {old_voice_id}")
                     deleted = self.delete_voice(old_voice_id)
@@ -624,7 +667,7 @@ class BaseTTSProvider(ABC):
         self.on_voice_used(voice)
 
         # Create TTS stream
-        sample_rate = self.get_sample_rate()
+        sample_rate = self.get_sample_rate_for_speaker(character_name)
         channels = 1
         bytes_per_second = sample_rate * 2 * channels  # 16-bit = 2 bytes per sample
         tts_stream = create_tts_stream(sample_rate=sample_rate, channels=channels)
@@ -896,6 +939,29 @@ class BaseTTSProvider(ABC):
         if not word_timing or not sentence_boundaries:
             return
 
+        # Universal capability-v3 returns authoritative logical unit IDs. Use
+        # those directly so pronunciation changes and bracketed audio tags never
+        # participate in boundary matching.
+        for unit in word_timing.get("unitTimings", []) or []:
+            unit_id = unit.get("id") if isinstance(unit, dict) else None
+            if not isinstance(unit_id, str) or not unit_id.startswith("s"):
+                continue
+            try:
+                boundary_index = int(unit_id[1:])
+                start = float(unit.get("startTimeSeconds"))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= boundary_index < len(sentence_boundaries):
+                boundary = sentence_boundaries[boundary_index]
+                boundary["start_time"] = start
+                boundary["start_time_source"] = str(unit.get("source") or "unit_timing")
+                boundary["start_time_confirmed"] = True
+                if unit.get("endTimeSeconds") is not None:
+                    try:
+                        boundary["end_time"] = float(unit["endTimeSeconds"])
+                    except (TypeError, ValueError):
+                        pass
+
         new_words = word_timing.get("words", [])
         new_starts = word_timing.get("wordStartTimeSeconds", [])
         new_ends = word_timing.get("wordEndTimeSeconds", [])
@@ -970,6 +1036,7 @@ class BaseTTSProvider(ABC):
         narrator_voice_id: Optional[str] = None,
         lang: Optional[str] = None,
         abort_check: Optional[Callable[[], bool]] = None,
+        playback_headroom: Optional[Callable[[], float]] = None,
         log_prefix: str = "[SpeakStream]",
     ) -> bool:
         """
@@ -1045,11 +1112,18 @@ class BaseTTSProvider(ABC):
                     print(f"{log_prefix} Voice switch at sentence {sentence_idx}: "
                           f"{byte_position} bytes = {byte_position / max(1, bytes_per_second):.2f}s")
 
+            stream_kwargs = {
+                "speaker_id": speaker_id,
+                "abort_check": abort_check,
+                "on_voice_switch": on_voice_switch,
+            }
+            import inspect
+            if "get_playback_headroom" in inspect.signature(
+                self.synthesize_stream_sentences
+            ).parameters:
+                stream_kwargs["get_playback_headroom"] = playback_headroom
             success = self.synthesize_stream_sentences(
-                tracking_gen(), current_voice_id, on_chunk,
-                speaker_id=speaker_id,
-                abort_check=abort_check,
-                on_voice_switch=on_voice_switch,
+                tracking_gen(), current_voice_id, on_chunk, **stream_kwargs
             )
             if (
                 not success
@@ -1068,6 +1142,13 @@ class BaseTTSProvider(ABC):
                         speaker_id=speaker_id,
                         abort_check=abort_check,
                         on_voice_switch=on_voice_switch,
+                        **(
+                            {"get_playback_headroom": playback_headroom}
+                            if "get_playback_headroom" in inspect.signature(
+                                self.synthesize_stream_sentences
+                            ).parameters
+                            else {}
+                        ),
                     )
             return success
 
@@ -1151,7 +1232,7 @@ class BaseTTSProvider(ABC):
         self.on_voice_used(voice)
 
         # Create TTS stream
-        sample_rate = self.get_sample_rate()
+        sample_rate = self.get_sample_rate_for_speaker(character_name)
         channels = 1
         bytes_per_second = sample_rate * 2 * channels
         tts_stream = create_tts_stream(sample_rate=sample_rate, channels=channels)
@@ -1242,6 +1323,9 @@ class BaseTTSProvider(ABC):
                     narrator_voice_id=narrator_voice_id,
                     lang=lang,
                     abort_check=abort_check,
+                    playback_headroom=getattr(
+                        tts_stream, "buffered_audio_seconds", lambda: 0.0
+                    ),
                     log_prefix="[SpeakStream]",
                 )
                 print(f"[SpeakStream] Sentence streaming complete: success={success}, "
@@ -1446,7 +1530,7 @@ class BaseTTSProvider(ABC):
             print(f"[PrepareTTS] audio3d not available: {e}")
             return None
 
-        sample_rate = self.get_sample_rate()
+        sample_rate = self.get_sample_rate_for_speaker(character_name)
         channels = 1
         bytes_per_second = sample_rate * 2 * channels
         tts_stream = create_tts_stream(sample_rate=sample_rate, channels=channels)

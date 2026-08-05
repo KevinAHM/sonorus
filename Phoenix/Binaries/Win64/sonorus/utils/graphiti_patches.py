@@ -72,10 +72,17 @@ def patch_graphiti_reasoning():
                 model = self.model or 'gpt-4.1-mini'
 
             requested_max_tokens = max_tokens or self.max_tokens
+            provider = llm_module._get_provider()
+            context = 'graphiti_small' if model_size == ModelSize.small else 'graphiti'
 
             # Build request with reasoning params
+            request_model = model
+            extra_body = {}
+            if provider == 'openrouter':
+                request_model, extra_body = llm_module._resolve_openrouter_model(model, context)
+
             request_kwargs: dict[str, Any] = {
-                'model': model,
+                'model': request_model,
                 'messages': openai_messages,
                 'temperature': self.temperature,
                 'max_tokens': requested_max_tokens,
@@ -83,9 +90,7 @@ def patch_graphiti_reasoning():
             }
 
             # Get reasoning params - use model_size to determine context
-            provider = llm_module._get_provider()
-            context = 'graphiti_small' if model_size == ModelSize.small else 'graphiti'
-            extra_body = llm_module.get_reasoning_params(provider, model, requested_max_tokens, context)
+            extra_body.update(llm_module.get_reasoning_params(provider, request_model, requested_max_tokens, context))
             if extra_body:
                 request_kwargs['extra_body'] = extra_body
 
@@ -123,11 +128,15 @@ def patch_graphiti_reasoning():
         try:
             # Get reasoning params for reranker (explicitly reranker context since this is the reranker client)
             provider = llm_module._get_provider()
-            extra_body = llm_module.get_reasoning_params(provider, self.config.model, 1024, 'reranker')
+            request_model = self.config.model or 'gpt-4.1-nano'
+            extra_body = {}
+            if provider == 'openrouter':
+                request_model, extra_body = llm_module._resolve_openrouter_model(request_model, 'reranker')
+            extra_body.update(llm_module.get_reasoning_params(provider, request_model, 1024, 'reranker'))
 
             async def create_completion(openai_messages):
                 request_kwargs: dict[str, Any] = {
-                    'model': self.config.model or 'gpt-4.1-nano',
+                    'model': request_model,
                     'messages': openai_messages,
                     'temperature': 0.1,
                     'max_tokens': 1,
@@ -221,6 +230,8 @@ def patch_openai_no_responses_api():
         self._sonorus_last_usage = None
         openai_messages = self._convert_messages_to_openai_format(messages)
         model = self._get_model_for_size(model_size)
+        provider = llm_module._get_provider()
+        context = 'graphiti_small' if model_size == ModelSize.small else 'graphiti'
 
         try:
             # Build response format
@@ -236,8 +247,13 @@ def patch_openai_no_responses_api():
                     },
                 }
 
+            request_model = model
+            extra_body = {}
+            if provider == 'openrouter':
+                request_model, extra_body = llm_module._resolve_openrouter_model(model, context)
+
             request_kwargs: dict[str, Any] = {
-                'model': model,
+                'model': request_model,
                 'messages': openai_messages,
                 'temperature': self.temperature,
                 'max_tokens': max_tokens or self.max_tokens,
@@ -245,9 +261,7 @@ def patch_openai_no_responses_api():
             }
 
             # Inject reasoning params via extra_body
-            provider = llm_module._get_provider()
-            context = 'graphiti_small' if model_size == ModelSize.small else 'graphiti'
-            extra_body = llm_module.get_reasoning_params(provider, model, self.max_tokens, context)
+            extra_body.update(llm_module.get_reasoning_params(provider, request_model, self.max_tokens, context))
             if extra_body:
                 request_kwargs['extra_body'] = extra_body
 

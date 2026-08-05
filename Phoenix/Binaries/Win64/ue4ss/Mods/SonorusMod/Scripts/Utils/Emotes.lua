@@ -225,8 +225,10 @@ Emotes.PRESETS = {
         eye_sqz_l = 0.16, eye_sqz_r = 0.16,
     },
 }
--- Alias: LLM prompt uses [fearful], map to afraid preset
+-- Aliases: map nearby fear tags to afraid preset
 Emotes.PRESETS.fearful = Emotes.PRESETS.afraid
+Emotes.PRESETS.horrified = Emotes.PRESETS.afraid
+Emotes.PRESETS.panicked = Emotes.PRESETS.afraid
 
 -- Collect all morph target names used across all presets (for reset)
 local _allEmoteMorphTargets = {}
@@ -285,9 +287,33 @@ function Emotes.Play(actor, presetName, intensity, fadeIn, fadeOut)
 
     Emotes.init()
     local es = _G.EmoteState
+    local actorFullName = nil
+    pcall(function() actorFullName = actor:GetFullName() end)
 
-    -- If already playing, reset current values for smooth transition
+    -- Re-sending the same carried emote should keep the face steady.
     -- (don't snap — the lerp will handle the transition)
+
+    if es.active and es.presetName == presetName
+        and es.actorFullName and actorFullName
+        and es.actorFullName == actorFullName then
+        es.intensity = intensity or es.intensity or 1.0
+        es.fadeOut = fadeOut or es.fadeOut or 0.5
+        es.stopTime = nil
+        -- UE4SS may return a fresh wrapper for the same actor. Keep the stable
+        -- full-name identity, but refresh the wrapper used by subsequent ticks.
+        es.actor = actor
+        es.actorFullName = actorFullName
+        _G.CurrentEmoteName = presetName
+        _G.CurrentEmoteActor = actor
+
+        es.targets = {}
+        for name, value in pairs(preset) do
+            es.targets[name] = value * es.intensity
+        end
+
+        print(string.format("[Emotes] Continuing '%s' (intensity=%.1f)", presetName, es.intensity))
+        return true
+    end
 
     es.active = true
     es.presetName = presetName
@@ -297,8 +323,7 @@ function Emotes.Play(actor, presetName, intensity, fadeIn, fadeOut)
     es.startTime = os.clock()
     es.stopTime = nil
     es.actor = actor
-    es.actorFullName = nil
-    pcall(function() es.actorFullName = actor:GetFullName() end)
+    es.actorFullName = actorFullName
     _G.CurrentEmoteName = presetName
     _G.CurrentEmoteActor = actor
     _G.CurrentEmoteGazeSide = (math.random(0, 1) == 0) and -1 or 1
@@ -433,6 +458,7 @@ function Emotes._Finish()
     es.current = {}
     es.stopTime = nil
     es.actor = nil
+    es.actorFullName = nil
     _G.CurrentEmoteName = nil
     _G.CurrentEmoteActor = nil
     _G.CurrentEmoteGazeSide = nil

@@ -8,6 +8,8 @@ Uses pure ONNX inference without PyTorch dependencies.
 """
 import os
 import sys
+import functools
+import threading
 from typing import Dict, List, Optional, Callable
 
 # Add parent directory to path for imports
@@ -19,6 +21,15 @@ from utils.settings import load_settings
 
 # Sample rate (Pocket TTS native)
 SAMPLE_RATE = 24_000
+_synthesis_sequence_lock = threading.Lock()
+
+
+def _serialized_synthesis(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        with _synthesis_sequence_lock:
+            return func(*args, **kwargs)
+    return wrapper
 
 
 # ============================================
@@ -253,6 +264,7 @@ class PocketOnnxProvider(BaseTTSProvider):
             print(f"[PocketONNX] Failed to clear embedding cache: {e}")
             return False
 
+    @_serialized_synthesis
     def synthesize_stream(self, text: str, voice_id: str,
                           on_chunk: Callable[[bytes, Optional[Dict]], None],
                           speaker_id: Optional[str] = None) -> bool:
@@ -277,6 +289,7 @@ class PocketOnnxProvider(BaseTTSProvider):
         synthesizer = get_synthesizer()
         return synthesizer.synthesize(text, voice_id, on_chunk, temperature=temperature)
 
+    @_serialized_synthesis
     def synthesize_stream_sentences(self, sentences, voice_id: str,
                                      on_chunk: Callable[[bytes, Optional[Dict]], None],
                                      speaker_id: Optional[str] = None,

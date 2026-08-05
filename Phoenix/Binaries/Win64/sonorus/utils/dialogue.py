@@ -189,16 +189,16 @@ def collapse_consecutive_spells(history):
             if (last.get('voiceName') == entry.get('voiceName') and
                 last.get('lineID') == entry.get('lineID')):
                 # Update count
-                last['count'] = last.get('count', 1) + 1
+                last['count'] = last.get('count', 1) + entry.get('count', 1)
                 _merge_source_entry_ids(last, entry)
                 # Track time range (keep first*, update last*)
                 if 'firstGameTime' not in last:
                     last['firstGameTime'] = last.get('gameTime')
                     last['firstGameDate'] = last.get('gameDate')
                     last['firstTimestamp'] = last.get('timestamp')
-                last['lastGameTime'] = entry.get('gameTime')
-                last['lastGameDate'] = entry.get('gameDate')
-                last['lastTimestamp'] = entry.get('timestamp')
+                last['lastGameTime'] = entry.get('lastGameTime') or entry.get('gameTime')
+                last['lastGameDate'] = entry.get('lastGameDate') or entry.get('gameDate')
+                last['lastTimestamp'] = entry.get('lastTimestamp') or entry.get('timestamp')
                 last['gameTime'] = entry.get('gameTime')  # Display shows latest
                 last['gameDate'] = entry.get('gameDate')
                 last['timestamp'] = entry.get('timestamp')
@@ -221,6 +221,11 @@ def _event_collapse_key(entry):
 
     if entry_type == 'spell':
         return None
+
+    rendered = format_dialogue_entry(entry, include_time=False, mark_player=False)
+    if rendered:
+        rendered = re.sub(r'\s+', ' ', rendered).strip().casefold()
+        return (entry_type, rendered)
 
     speaker = entry.get('speaker') or ''
     voice_name = entry.get('voiceName') or ''

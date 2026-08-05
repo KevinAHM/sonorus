@@ -10,6 +10,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="stylesheet" href="css/main.css">
     <link rel="stylesheet" href="css/reasoning-toggle.css">
+    <link rel="stylesheet" href="css/provider-routing.css">
     <link rel="stylesheet" href="css/flatpickr.min.css">
     <link rel="stylesheet" href="css/awesomplete.base.css">
     <link
@@ -18,6 +19,7 @@
     <script src="js/confetti.min.js"></script>
     <script src="js/graph.js"></script>
     <script src="js/reasoning-toggle.js"></script>
+    <script src="js/provider-routing.js"></script>
     <script src="js/lucide.min.js"></script>
     <script src="js/flatpickr.js"></script>
     <script src="js/awesomplete.min.js"></script>
@@ -331,6 +333,9 @@
                     <div class="setup-step-actions">
                         <button class="btn btn-primary" id="setupStep3Btn" onclick="startTtsTest()">
                             <span id="setupStep3BtnText">Test Voice</span>
+                        </button>
+                        <button type="button" class="btn btn-secondary" onclick="scrollToTtsSettings()">
+                            Configure
                         </button>
                     </div>
                     <div class="setup-error setup-step-error" id="setupStep3Error" style="display: none;">
@@ -688,6 +693,86 @@
                             <span class="vram-value">-- / -- GB</span>
                         </div>
                         <p class="field-hint"></p>
+                    </div>
+                </div>
+
+                <div class="tts-test-shortcut" id="ttsTestShortcut">
+                    <div class="tts-test-shortcut-copy">
+                        <span class="tts-test-shortcut-title">Test voice synthesis</span>
+                        <span class="field-hint">Open the setup voice test using your saved TTS configuration.</span>
+                    </div>
+                    <button type="button" class="btn btn-secondary" id="ttsSettingsTestBtn"
+                        onclick="scrollToTtsTest()">Test Voice</button>
+                </div>
+
+                <!-- OmniVoice (Vulkan) Setup Panel -->
+                <div id="omnivoiceCppSetup" style="display: none;">
+                    <div id="omnivoiceCppRuntimeHint" class="field-group" style="display: none;">
+                        <p class="field-hint" id="omnivoiceCppRuntimeHintText" style="color: var(--warning);"></p>
+                    </div>
+                    <div id="omnivoiceCppInstallSection" class="field-group" style="display: none;">
+                        <button class="btn btn-primary" id="omnivoiceCppInstallBtn" onclick="installOmniVoiceCpp()">
+                            Download OmniVoice Now
+                        </button>
+                        <p class="field-hint" id="omnivoiceCppInstallHint" style="margin-top: var(--space-xs);">Saving this provider starts the verified native runtime and model download automatically (approximately 1.5 GB total). Use this button only to download before saving or to retry; existing partial downloads are resumed.</p>
+                        <div id="omnivoiceCppInstallProgress" style="display: none; margin-top: var(--space-sm);">
+                            <div class="voice-progress-row">
+                                <div class="voice-progress-bar">
+                                    <div class="voice-progress-fill reference" id="omnivoiceCppInstallProgressFill" style="width: 0%"></div>
+                                </div>
+                                <span class="voice-progress-count" id="omnivoiceCppInstallProgressCount">0/4</span>
+                            </div>
+                            <p class="field-hint" id="omnivoiceCppInstallProgressStatus" style="margin-top: var(--space-xs);"></p>
+                        </div>
+                    </div>
+                    <div id="omnivoiceCppGpuPicker" class="field-group" style="display: none;">
+                        <label class="field-label">OmniVoice GPU</label>
+                        <p class="field-hint">Choose which Vulkan GPU runs the local voice model. Auto picks the best available device.</p>
+                        <select id="omnivoiceCppGpuSelect" onchange="updateOmniVoiceCppGpu(this.value)"></select>
+                        <p class="field-hint" id="omnivoiceCppRestartNotice" style="display: none; color: var(--warning); margin-top: var(--space-xs);">
+                            The TTS worker restarts to apply the GPU change.
+                        </p>
+                    </div>
+                    <div id="omnivoiceCppVramIndicator" class="vram-indicator" style="display: none;">
+                        <label class="field-label">GPU VRAM</label>
+                        <div class="vram-bar-container">
+                            <div class="vram-bar"><div class="vram-fill"></div></div>
+                            <span class="vram-value">-- / -- GB</span>
+                        </div>
+                        <p class="field-hint"></p>
+                    </div>
+                    <div id="omnivoiceCppRamIndicator" class="vram-indicator" style="display: none;">
+                        <label class="field-label">System RAM</label>
+                        <div class="vram-bar-container">
+                            <div class="vram-bar"><div class="vram-fill"></div></div>
+                            <span class="vram-value">-- / -- GB</span>
+                        </div>
+                        <p class="field-hint"></p>
+                    </div>
+                    <div id="omnivoiceCppRestartSection" class="field-group" style="display: none; margin-top: var(--space-md);">
+                        <button class="btn btn-primary" id="omnivoiceCppRestartBtn" onclick="restartOmniVoiceCppWorker()">
+                            Restart TTS Worker
+                        </button>
+                        <p class="field-hint" id="omnivoiceCppRestartStatus" style="margin-top: var(--space-xs);"></p>
+                    </div>
+                    <div id="omnivoiceCppVoiceSetup" class="field-group" style="display: none;">
+                        <label class="field-label">Prepare Voice References <span style="font-weight: normal; opacity: 0.7;">(Optional)</span></label>
+                        <p class="field-hint" id="omnivoiceCppVoiceCount" style="margin-bottom: var(--space-sm);"></p>
+                        <div id="omnivoiceCppVoiceProgress" style="display: none; margin-bottom: var(--space-sm);">
+                            <div class="voice-progress-row">
+                                <div class="voice-progress-bar">
+                                    <div class="voice-progress-fill reference" id="omnivoiceCppVoiceProgressFill" style="width: 0%"></div>
+                                </div>
+                                <span class="voice-progress-count" id="omnivoiceCppVoiceProgressCount">0/0</span>
+                            </div>
+                            <p class="field-hint" id="omnivoiceCppVoiceProgressStatus" style="margin-top: var(--space-xs);"></p>
+                        </div>
+                        <div id="omnivoiceCppSttWarning" style="color: var(--warning); margin-bottom: var(--space-sm); display: none;">
+                            Configure a Speech-to-Text service, then return here to transcribe and encode the remaining voice references. Voices still work without this optional step.
+                        </div>
+                        <button class="btn btn-primary" id="omnivoiceCppPrepareVoicesBtn" onclick="prepareOmniVoiceCppVoices()">
+                            Prepare Voice References
+                        </button>
                     </div>
                 </div>
 
@@ -1061,14 +1146,14 @@
                         <div class="field-group">
                             <label class="field-label">Target Selection Model</label>
                             <p class="field-hint">Determines which NPC you're addressing. Use a fast model.</p>
-                            <input type="text" id="conv_target_model" placeholder="gemini-2.5-flash-lite"
+                            <input type="text" id="conv_target_model" placeholder="gemini-3.1-flash-lite"
                                 onchange="updateSetting('conversation.target_selection_model', this.value)">
                         </div>
                         <div class="field-group">
                             <label class="field-label">Interjection Model</label>
                             <p class="field-hint">Decides if other NPCs should speak up. Can be a smarter model
                                 (non-blocking).</p>
-                            <input type="text" id="conv_interjection_model" placeholder="gemini-2.5-flash-lite"
+                            <input type="text" id="conv_interjection_model" placeholder="gemini-3.1-flash-lite"
                                 onchange="updateSetting('conversation.interjection_model', this.value)">
                         </div>
                         <div class="field-group" id="convSpeakerMaxTokensGroup">
@@ -1103,7 +1188,7 @@
                         <div class="field-group">
                             <label class="field-label">Input Correction Model</label>
                             <p class="field-hint">A tiny, fast model to clean up typos. Does not alter meaning.</p>
-                            <input type="text" id="conv_input_correction_model" placeholder="gemini-2.5-flash-lite"
+                            <input type="text" id="conv_input_correction_model" placeholder="gemini-3.1-flash-lite"
                                 onchange="updateSetting('conversation.input_correction_model', this.value)">
                         </div>
                     </div>
@@ -1126,7 +1211,7 @@
                             <label class="field-label">Companion Commentary Model</label>
                             <p class="field-hint">Used by the event-driven commentary selector to decide whether your
                                 companion should make an unprompted remark after a notable gameplay event.</p>
-                            <input type="text" id="background_commentary_model" placeholder="gemini-2.5-flash-lite"
+                            <input type="text" id="background_commentary_model" placeholder="gemini-3.1-flash-lite"
                                 onchange="updateSetting('conversation.commentary_model', this.value)">
                         </div>
                         <div class="field-group" id="backgroundCommentaryMaxTokensGroup">
@@ -1290,6 +1375,59 @@
                         <p class="field-hint">
                             Update subtitles sentence-by-sentence as the NPC speaks. When off, shows the full
                             response text at once.
+                        </p>
+
+                        <div class="toggle-wrapper">
+                            <span class="toggle-label">Inline Narration</span>
+                            <label class="toggle">
+                                <input type="checkbox" id="conv_narration_enabled"
+                                    onchange="updateSetting('conversation.narration_enabled', this.checked); updateNarrationToggleState()">
+                                <span class="toggle-track">
+                                    <span class="toggle-thumb"></span>
+                                </span>
+                            </label>
+                        </div>
+                        <p class="field-hint" style="margin-bottom: var(--space-md);">
+                            Allow NPCs to include <em>*narration*</em> alongside "dialogue." Narration is spoken by a
+                            separate narrator voice when the selected TTS provider supports it. Off by default.
+                        </p>
+                        <div id="conv_narration_children"
+                            style="border-left: 2px solid var(--gold-dark); margin-left: var(--space-sm); padding-left: var(--space-md);">
+                            <div class="toggle-wrapper" style="padding-top: 0;">
+                                <span class="toggle-label">Narrate Player Actions</span>
+                                <label class="toggle">
+                                    <input type="checkbox" id="conv_player_narration_enabled"
+                                        onchange="updateSetting('conversation.player_narration_enabled', this.checked)">
+                                    <span class="toggle-track">
+                                        <span class="toggle-thumb"></span>
+                                    </span>
+                                </label>
+                            </div>
+                            <p class="field-hint" style="margin-bottom: var(--space-md);">
+                                Speak <em>*narration*</em> included in your messages. When off, player actions remain
+                                visible to NPCs but are not spoken aloud.
+                            </p>
+
+                            <div class="toggle-wrapper">
+                                <span class="toggle-label">Spatial Grounding</span>
+                                <label class="toggle">
+                                    <input type="checkbox" id="conv_spatial_grounding_enabled"
+                                        onchange="updateSetting('conversation.spatial_grounding_enabled', this.checked)">
+                                    <span class="toggle-track">
+                                        <span class="toggle-thumb"></span>
+                                    </span>
+                                </label>
+                            </div>
+                            <p id="conv_spatial_grounding_hint" class="field-hint"
+                                style="margin-bottom: var(--space-xs);">
+                                Keep narrated character locations consistent with current visual context. Requires Inline Narration.
+                            </p>
+                            <p class="field-hint" style="color: var(--warning); margin-bottom: var(--space-md);">
+                                <strong>Warning:</strong> This can cause narrative discontinuities when narration first
+                                describes an action or placement that later vision context contradicts.
+                            </p>
+                        </div>
+                        <p class="field-hint" id="narratorVoiceReferenceHint" style="margin-bottom: var(--space-md);">
                         </p>
 
                         <div class="toggle-wrapper">
@@ -1564,7 +1702,7 @@
                             <span class="toggle-label">Facial Emotes</span>
                             <label class="toggle">
                                 <input type="checkbox" id="conv_emotes_enabled"
-                                    onchange="updateSetting('conversation.emotes_enabled', this.checked)">
+                                    onchange="updateSetting('conversation.emotes_enabled', this.checked); updateFreeformEmoteToggleState()">
                                 <span class="toggle-track">
                                     <span class="toggle-thumb"></span>
                                 </span>
@@ -1575,22 +1713,25 @@
                             tags like [happy], [sad], [angry] that drive facial expressions on the speaking character.
                         </p>
 
-                        <div class="toggle-wrapper">
-                            <span class="toggle-label">Inline Narration</span>
-                            <label class="toggle">
-                                <input type="checkbox" id="conv_narration_enabled"
-                                    onchange="updateSetting('conversation.narration_enabled', this.checked)">
-                                <span class="toggle-track">
-                                    <span class="toggle-thumb"></span>
-                                </span>
-                            </label>
+                        <div id="conv_freeform_emote_tags_wrapper"
+                            style="border-left: 2px solid var(--gold-dark); margin-left: var(--space-sm); padding-left: var(--space-md);">
+                            <div class="toggle-wrapper" style="padding-top: 0;">
+                                <span class="toggle-label">Freeform Emote Tags</span>
+                                <label class="toggle">
+                                    <input type="checkbox" id="conv_freeform_emote_tags"
+                                        onchange="updateSetting('conversation.freeform_emote_tags', this.checked)">
+                                    <span class="toggle-track">
+                                        <span class="toggle-thumb"></span>
+                                    </span>
+                                </label>
+                            </div>
+                            <p class="field-hint" style="margin-bottom: var(--space-md);">
+                                Let the AI improvise emotion tags beyond the built-in examples. Known aliases are
+                                matched automatically; enabling Long-Term Memory optionally boosts the match rate
+                                for unsupported tags using embeddings. Requires Facial Emotes.
+                            </p>
                         </div>
-                        <p class="field-hint" style="margin-bottom: var(--space-md);">
-                            Allow NPCs to include <em>*narration*</em> alongside "dialogue." Narration is spoken by a
-                            separate narrator voice. Off by default. Requires Pocket TTS or Inworld.
-                        </p>
-                        <p class="field-hint" id="narratorVoiceReferenceHint" style="margin-bottom: var(--space-md);">
-                        </p>
+
                     </div>
                 </div>
             </div>
@@ -2401,11 +2542,11 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                 <!-- Tab: Settings -->
                 <div class="tab-content" id="commitmentsSettings">
                     <div class="field-group">
-                        <label class="field-label">Location Resolver Model</label>
-                        <p class="field-hint">Resolves NPC location mentions to specific spots. Use a fast, cheap model.
+                        <label class="field-label">Commitment Validator Model</label>
+                        <p class="field-hint">Validates mutual meeting agreements and resolves their locations. Use a fast, capable model.
                         </p>
                         <input type="text" id="commitment_location_resolver_model"
-                            placeholder="mistralai/mistral-small-3.2-24b-instruct:nitro"
+                            placeholder="google/gemini-3.1-flash-lite"
                             onchange="updateSetting('commitment.location_resolver_model', this.value)">
                     </div>
                 </div>
@@ -2673,14 +2814,18 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                             <p class="field-hint">Delete all letters, threads, meeting proposals, cached read-aloud
                                 audio, and mail generation state. Notice boards, settings, and custom characters are
                                 preserved. Cannot be undone.</p>
-                            <button class="btn btn-danger" onclick="resetOwlMailWithConfirm()">Reset All
+                            <p id="owlMailDangerStatus" class="field-hint"
+                                style="margin-bottom: 8px; font-weight: 600;"></p>
+                            <button class="btn btn-danger" id="resetOwlMailBtn" onclick="resetOwlMailWithConfirm()" disabled>Reset All
                                 Mail</button>
                         </div>
                         <div class="field-group">
                             <label class="field-label">Reset Notice Boards</label>
                             <p class="field-hint">Delete all board posts and threads. Board definitions and
                                 unlocks are preserved. Cannot be undone.</p>
-                            <button class="btn btn-danger" onclick="resetOwlBoardsWithConfirm()">Reset All
+                            <p id="owlBoardsDangerStatus" class="field-hint"
+                                style="margin-bottom: 8px; font-weight: 600;"></p>
+                            <button class="btn btn-danger" id="resetOwlBoardsBtn" onclick="resetOwlBoardsWithConfirm()" disabled>Reset All
                                 Boards</button>
                         </div>
                     </div>
@@ -2702,7 +2847,9 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                             </div>
                         </div>
                         <div style="margin-top: var(--space-sm);">
-                            <button class="btn btn-secondary" onclick="clearOwlPostLog()">Clear Log</button>
+                            <p id="owlLogStatus" class="field-hint"
+                                style="margin-bottom: 8px; font-weight: 600;"></p>
+                            <button class="btn btn-secondary" id="clearOwlLogBtn" onclick="clearOwlPostLog()" disabled>Clear Log</button>
                         </div>
                     </div>
                 </div>
@@ -2860,7 +3007,7 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                             <label class="field-label">Embedding Model</label>
                             <p class="field-hint">Builds vector search indexes for memory recall.</p>
                             <input type="text" id="embeddingModel" placeholder="text-embedding-3-small"
-                                onchange="updateSetting('memory.embedding_model', this.value)">
+                                onchange="updateSetting('memory.embedding_model', this.value); setTimeout(loadVectorMigrationStatus, 300)">
                         </div>
 
                         <div class="field-group">
@@ -2880,14 +3027,14 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                         <div class="field-group">
                             <label class="field-label">Fact Extraction Model</label>
                             <p class="field-hint">Extracts durable facts from chapter summaries</p>
-                            <input type="text" id="graphitiModel" placeholder="gpt-4.1-nano"
+                            <input type="text" id="graphitiModel" placeholder="google/gemini-3.1-flash-lite"
                                 onchange="updateSetting('memory.graphiti_model', this.value)">
                         </div>
 
                         <div class="field-group">
                             <label class="field-label">Fact Deduplication Model</label>
                             <p class="field-hint">Lightweight model for fact merge and dedup decisions</p>
-                            <input type="text" id="graphitiSmallModel" placeholder="gpt-4.1-nano"
+                            <input type="text" id="graphitiSmallModel" placeholder="google/gemini-3.1-flash-lite"
                                 onchange="updateSetting('memory.graphiti_small_model', this.value)">
                         </div>
 
@@ -2981,17 +3128,30 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                             <p id="migratePendingCount" class="field-hint"
                                 style="margin-bottom: 8px; font-weight: 600;"></p>
                             <div class="btn-group">
-                                <button class="btn btn-primary" id="migrateBtn" onclick="migrateMemories()">Migrate All
+                                <button class="btn btn-primary" id="migrateBtn" onclick="migrateMemories()" disabled>Migrate All
                                     NPCs</button>
                             </div>
                             <p id="migrateStatus" class="field-hint" style="margin-top: 8px; display: none;"></p>
                         </div>
 
                         <div class="field-group">
+                            <label class="field-label">Rebuild Memory Vectors</label>
+                            <p class="field-hint">Regenerate vector search indexes for memories created with a different
+                                embedding model. This may use embedding API quota.</p>
+                            <p id="vectorMigratePendingCount" class="field-hint"
+                                style="margin-bottom: 8px; font-weight: 600;"></p>
+                            <div class="btn-group">
+                                <button class="btn btn-primary" id="vectorMigrateBtn" disabled
+                                    onclick="migrateMemoryVectors()">Rebuild Vectors</button>
+                            </div>
+                            <p id="vectorMigrateStatus" class="field-hint" style="margin-top: 8px; display: none;"></p>
+                        </div>
+
+                        <div class="field-group">
                             <label class="field-label">Clear All Memories</label>
                             <p class="field-hint">Delete all NPC long-term memory facts. Cannot be undone.
                             </p>
-                            <button class="btn btn-danger" onclick="clearAllMemories()">Clear All Memories</button>
+                            <button class="btn btn-danger" id="clearAllMemoriesBtn" onclick="clearAllMemories()" disabled>Clear All Memories</button>
                         </div>
 
                         <div class="field-group">
@@ -2999,7 +3159,7 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                             <p class="field-hint">Force-delete all memory database files. Use this when the
                                 database is corrupted and Clear/Restore fail. Does not create a backup first.
                                 Cannot be undone.</p>
-                            <button class="btn btn-danger" onclick="resetMemorySystem()">Reset Memory
+                            <button class="btn btn-danger" id="resetMemorySystemBtn" onclick="resetMemorySystem()" disabled>Reset Memory
                                 System</button>
                         </div>
 
@@ -3009,11 +3169,12 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                                 <code>data/graph_backups</code>. Only Cognis snapshots are shown; legacy Graphiti
                                 snapshots are ignored because they cannot be restored into the current memory backend.
                             </p>
-                            <div class="btn-group" style="margin-bottom: var(--space-sm);">
+                            <p id="graphBackupsStatus" class="field-hint"
+                                style="margin-bottom: 8px; font-weight: 600;"></p>
+                            <div class="btn-group">
                                 <button class="btn btn-secondary" id="refreshGraphBackupsBtn"
-                                    onclick="loadGraphBackups()">Refresh Backups</button>
+                                    onclick="loadGraphBackups()" disabled>Refresh Backups</button>
                             </div>
-                            <div id="graphBackupsStatus" class="field-hint" style="margin-bottom: 8px;"></div>
                             <div id="graphBackupsList"
                                 style="display: flex; flex-direction: column; gap: 8px; max-height: 280px; overflow-y: auto;">
                             </div>
@@ -3216,7 +3377,7 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
                 </label>
             </div>
             <button class="btn btn-secondary" onclick="resetToDefaults()">Reset Defaults</button>
-            <button class="btn btn-primary" onclick="saveSettings()">
+            <button class="btn btn-primary" id="saveConfigBtn" onclick="saveSettings()">
                 <span id="saveText">Save Configuration</span>
             </button>
         </div>
@@ -3242,7 +3403,7 @@ Voice Performance: You may use [square bracket tags] sparingly for AUDIBLE vocal
     <div class="toast-container" id="toastContainer"></div>
     <script src="js/disclaimer.js"></script>
     <script src="js/history-audio.js"></script>
-    <script src="js/config.js"></script>
+    <script src="js/config.js?v=universal-speech-v7-install-1"></script>
     <script src="js/mod-package-conflicts.js"></script>
     <script src="js/game-mods.js"></script>
     <script src="js/mic-meter.js"></script>

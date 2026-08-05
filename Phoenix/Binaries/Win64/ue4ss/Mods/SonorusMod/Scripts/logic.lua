@@ -9,6 +9,13 @@ print("[Sonorus] logic.lua starting...")
 -- the module only reloads code, not cached data
 -- NOTE: package.loaded clearing alone is NOT sufficient - UE4SS caches file
 -- contents at a lower level. Modules that need reliable hot reload use dofile().
+local LOAD_PRESENCE_LEDGER_MODULES = false
+
+_G.PresenceLedgerPhaseFlags = {
+    scheduleDump = false,
+    presenceWatcher = false,
+}
+
 package.loaded["Utils.Utils"] = nil
 package.loaded["Utils.Cache"] = nil
 package.loaded["Utils.Events"] = nil
@@ -52,6 +59,11 @@ local Cache = require "Utils.Cache"
 
 -- Shared main-loop scheduler (single UE4SS timer for recurring Lua tasks)
 local TickScheduler = require "Utils.TickScheduler"
+
+if LOAD_PRESENCE_LEDGER_MODULES then
+    _G.ScheduleDump = require "Utils.ScheduleDump"
+    _G.PresenceWatcher = require "Utils.PresenceWatcher"
+end
 
 -- Utils module
 local Utils = require "Utils.Utils"
@@ -1276,6 +1288,7 @@ Combat.init({
 function GetCurrentLocation()
     local location = "Hogwarts"
     local detailedLocation = nil
+    local detailedLocationId = nil
 
     -- Method 1: Try MapSubSystem.GetCurrentPlayerRegionInfo()
     local m1ok, m1err = pcall(function()
@@ -1320,12 +1333,12 @@ function GetCurrentLocation()
                         local displayName = GetLocationDisplayName(internalId) or GetLocationDisplayName(cleanId)
                         if displayName then
                             -- print("[Location] Method 1b (" .. label .. "): displayName='" .. displayName .. "' (internalId='" .. internalId .. "')\n")
-                            return displayName
+                            return displayName, cleanId
                         else
                             -- Fallback: clean up the ID as display name
                             local cleaned = cleanId:gsub("(%l)(%u)", "%1 %2"):gsub("_", " ")
                             -- print("[Location] Method 1b (" .. label .. "): fallback cleaned='" .. cleaned .. "' (internalId='" .. internalId .. "')\n")
-                            return cleaned
+                            return cleaned, cleanId
                         end
                     end
                     return nil
@@ -1337,17 +1350,17 @@ function GetCurrentLocation()
 
                     -- Try InnerLevelRegion (e.g., "Hogwarts Castle")
                     if not detailedLocation then
-                        detailedLocation = parseLocationFromActor(regionInfo.InnerLevelRegion, "InnerLevelRegion")
+                        detailedLocation, detailedLocationId = parseLocationFromActor(regionInfo.InnerLevelRegion, "InnerLevelRegion")
                     end
 
                     -- Try LevelRegion (e.g., "Hogwarts")
                     if not detailedLocation then
-                        detailedLocation = parseLocationFromActor(regionInfo.LevelRegion, "LevelRegion")
+                        detailedLocation, detailedLocationId = parseLocationFromActor(regionInfo.LevelRegion, "LevelRegion")
                     end
 
                     -- Fall back to Region (broadest)
                     if not detailedLocation then
-                        detailedLocation = parseLocationFromActor(regionInfo.Region, "Region")
+                        detailedLocation, detailedLocationId = parseLocationFromActor(regionInfo.Region, "Region")
                     end
                 end)
             else
@@ -1362,7 +1375,7 @@ function GetCurrentLocation()
     end
 
     -- print("[Location] FINAL result: '" .. location .. "'\n")
-    return location
+    return detailedLocation or location, detailedLocationId
 end
 
 -- Export for NPCLock snap rotation location check
@@ -2567,6 +2580,31 @@ end
 
 -- Export globally
 _G.IsSignificantNPC = IsSignificantNPC
+
+if _G.PresenceWatcher and _G.PresenceLedgerPhaseFlags.presenceWatcher then
+    _G.PresenceWatcher.Init({
+        getCachedNPCs = GetCachedNPCs,
+        getStaticData = GetStaticCache,
+        getVoiceId = Utils.GetActorVoiceId,
+        isSignificant = IsSignificantNPC,
+        safeIsValid = SafeIsValid,
+        getGameDateTime = function()
+            local gt = GetTimeOfDay()
+            return {
+                gameDate = gt.dateShort or gt.dateFormatted,
+                gameTime = gt.formatted,
+            }
+        end,
+        send = function(tbl)
+            if _G.SocketClient and _G.SocketClient.send then
+                _G.SocketClient.send(tbl)
+            end
+        end,
+    })
+elseif _G.PresenceWatcher then
+    _G.PresenceWatcher.Stop()
+    print("[PresenceWatcher] disabled by phase gate\n")
+end
 
 -- ============================================
 -- Get Nearby NPCs (single iteration, returns list + looked-at)
@@ -4234,28 +4272,31 @@ local function _NPCLockCheckWrapper()
         -- Check if any locked NPC needs to re-face their target (angle > 50 degrees)
         -- Collect NPCs that need re-facing first (can't modify table during iteration)
         -- Skip companions, static locks, and lingering NPCs (they're frozen in place)
-        -- Snap-locked NPCs re-face via direct rotation (no release/re-lock cycle)
+        -- Snap-locked NPCs re-face through Blueprint by stable IDs.
         local needsReface = {}
         local snapReface = {}
         for lockId, data in pairs(_G.LockedNPCs) do
             if data.locked and data.npc and data.targetActor
                and not data.isCompanionLock and not data.isStaticLock
                and not data.lingering and not data.isPreviewLock then
-                pcall(function()
-                    if not SafeIsValid(data.npc) or not SafeIsValid(data.targetActor) then return end
+                if data.isSnapLock then
+                    -- Do not dereference retained UObject wrappers for snap locks.
+                    -- Blueprint resolves fresh actors from these stable IDs.
+                    if data.npcName and data.targetId then
+                        table.insert(snapReface, { lockId = lockId, data = data })
+                    end
+                else
+                    pcall(function()
+                        if not SafeIsValid(data.npc) or not SafeIsValid(data.targetActor) then return end
 
-                    local npcPos = data.npc:K2_GetActorLocation()
-                    local npcRot = data.npc:K2_GetActorRotation()
-                    local targetPos = data.targetActor:K2_GetActorLocation()
+                        local npcPos = data.npc:K2_GetActorLocation()
+                        local npcRot = data.npc:K2_GetActorRotation()
+                        local targetPos = data.targetActor:K2_GetActorLocation()
 
-                    local angleDiff = GetAngleToTarget(npcPos, npcRot, targetPos)
+                        local angleDiff = GetAngleToTarget(npcPos, npcRot, targetPos)
 
-                    -- If angle > 50 degrees, mark for re-facing
-                    if angleDiff > 50 then
-                        if data.isSnapLock then
-                            -- Snap lock: direct rotation, no release/re-lock
-                            table.insert(snapReface, { lockId = lockId, data = data })
-                        else
+                        -- If angle > 50 degrees, mark for re-facing
+                        if angleDiff > 50 then
                             table.insert(needsReface, {
                                 lockId = lockId,
                                 npc = data.npc,
@@ -4263,15 +4304,14 @@ local function _NPCLockCheckWrapper()
                                 angle = math.floor(angleDiff)
                             })
                         end
-                    end
-                end)
+                    end)
+                end
             end
         end
 
-        -- Snap re-face: rotate in place instantly (no release/re-lock cycle)
+        -- Refresh snap locks by ID without touching retained actor wrappers.
         for _, item in ipairs(snapReface) do
             NPCLock.SnapRefaceNPC(item.data)
-            print("[NPCLock] Snap re-face (id=" .. item.lockId .. ")")
         end
 
         -- Normal re-face: release and re-lock (animated turn)

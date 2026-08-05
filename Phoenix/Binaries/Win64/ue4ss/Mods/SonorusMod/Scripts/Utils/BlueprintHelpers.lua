@@ -639,6 +639,37 @@ function BlueprintHelpers.StartNpcTurnLockById(npcId, targetId)
     }
 end
 
+function BlueprintHelpers.SnapNpcFaceTargetById(npcId, targetId)
+    if not npcId or npcId == "" or not targetId or targetId == "" then
+        return false
+    end
+
+    local mod = BlueprintHelpers.GetSonorusModActor()
+    if not mod then
+        return false
+    end
+
+    local method = mod.SnapNpcFaceTargetById
+    if not method then
+        return false
+    end
+
+    local successOut = {}
+    local ok = pcall(function()
+        method(mod, npcId, targetId, successOut)
+    end)
+    if not ok then
+        Log(string.format("SnapNpcFaceTargetById failed for %s -> %s", tostring(npcId), tostring(targetId)))
+        return false
+    end
+
+    local successValue = successOut.Success
+    if successValue == nil then
+        successValue = successOut.ReturnValue
+    end
+    return successValue == true
+end
+
 function BlueprintHelpers.StartCompanionTurnLockById(targetId)
     if not targetId or targetId == "" then
         return nil

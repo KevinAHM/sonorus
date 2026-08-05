@@ -31,8 +31,33 @@ UPSCALE_SAMPLE_RATE = 48_000  # AudioVAE output sample rate
 
 VOICE_DIR = Path(__file__).resolve().parent.parent / "voice_references"
 _AUDIO_EXTS = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".opus"}
-_reference_transcript_cache: Dict[str, Optional[str]] = {}
-_reference_transcript_lock = threading.Lock()
+
+
+def _serialized_worker_io(func):
+    def wrapper(self, *args, **kwargs):
+        with self._synthesis_lock:
+            return func(self, *args, **kwargs)
+    return wrapper
+
+
+def _build_generation_config_kwargs(
+    num_steps: int,
+    guidance_scale: float,
+    t_shift: float,
+    prefix_kv_cache_enabled: bool = True,
+) -> Dict[str, Any]:
+    """Build config values with the caller-selected step count authoritative."""
+    return {
+        "num_step": num_steps,
+        "guidance_scale": guidance_scale,
+        "t_shift": t_shift,
+        "blockwise": prefix_kv_cache_enabled,
+        "block_size": 9999,
+        # Blockwise generation uses first_block_steps whenever the target fits
+        # in one block. Our deliberately large block makes that every normal
+        # sentence, so it must match the per-sentence step count from Sonorus.
+        "first_block_steps": num_steps,
+    }
 
 
 # ============================================================================
@@ -63,85 +88,15 @@ def _resolve_voice(voice_id: str) -> Optional[str]:
     return None
 
 
-def _read_reference_transcript(voice_path: str) -> Optional[str]:
-    """Read a sidecar transcript for a voice reference, if one exists."""
-    txt_path = Path(voice_path).with_suffix(".txt")
-    try:
-        if txt_path.is_file():
-            text = txt_path.read_text(encoding="utf-8").strip()
-            if text:
-                return text
-    except Exception as exc:
-        print(f"[OmniVoice] Failed to read transcript {txt_path.name}: {exc}")
-    return None
-
-
 def ensure_voice_reference_transcript(voice_path: str) -> Optional[str]:
-    """
-    Ensure a voice reference has transcript text for OmniVoice cloning.
-
-    Setup-time pretokenization already does this in a batch. This helper covers
-    the lazy path where a voice is first used before the setup batch has created
-    a .txt or .tokens.pt with ref_text.
-    """
-    p = Path(voice_path)
-    cache_key = str(p.resolve())
-
-    existing = _read_reference_transcript(str(p))
-    if existing:
-        with _reference_transcript_lock:
-            _reference_transcript_cache[cache_key] = existing
-        return existing
-
-    with _reference_transcript_lock:
-        if cache_key in _reference_transcript_cache:
-            return _reference_transcript_cache[cache_key]
-
+    """Compatibility wrapper around the shared reference transcript service."""
     try:
-        from services import stt
-        if stt.get_provider() is None:
-            print(f"[OmniVoice] No STT provider configured; lazy voice prompt will use empty ref_text for {p.name}")
-            with _reference_transcript_lock:
-                _reference_transcript_cache[cache_key] = None
-            return None
+        from services.tts.reference_preparation import ensure_reference_transcript
 
-        import numpy as np
-        import soundfile as sf
-
-        data, sample_rate = sf.read(str(p), dtype="float32")
-        if data.ndim > 1:
-            data = data.mean(axis=1)
-
-        target_sr = 16000
-        if sample_rate != target_sr:
-            from math import gcd
-            from scipy.signal import resample_poly
-            g = gcd(sample_rate, target_sr)
-            data = resample_poly(data, target_sr // g, sample_rate // g).astype(np.float32)
-            sample_rate = target_sr
-
-        pcm_bytes = (data * 32767).clip(-32768, 32767).astype(np.int16).tobytes()
-        print(f"[OmniVoice] Transcribing lazy voice reference: {p.name}")
-        result = stt.transcribe(pcm_bytes, sample_rate)
-        if result.get("success") and result.get("text"):
-            ref_text = str(result["text"]).strip()
-            if ref_text:
-                try:
-                    p.with_suffix(".txt").write_text(ref_text, encoding="utf-8")
-                    print(f"[OmniVoice] Saved lazy transcript: {p.with_suffix('.txt').name} ({len(ref_text)} chars)")
-                except Exception as exc:
-                    print(f"[OmniVoice] Failed to save lazy transcript for {p.name}: {exc}")
-                with _reference_transcript_lock:
-                    _reference_transcript_cache[cache_key] = ref_text
-                return ref_text
-
-        print(f"[OmniVoice] Lazy transcription failed for {p.name}: {result.get('error', 'empty result')}")
+        return ensure_reference_transcript(voice_path)
     except Exception as exc:
-        print(f"[OmniVoice] Lazy transcription error for {p.name}: {exc}")
-
-    with _reference_transcript_lock:
-        _reference_transcript_cache[cache_key] = None
-    return None
+        print(f"[OmniVoice] Reference transcription failed: {exc}")
+        return None
 
 
 # ============================================================================
@@ -158,6 +113,7 @@ def _omnivoice_worker_main(
 
     *config* keys:
         model_repo, model_revision, device, dtype, num_steps,
+        prefix_kv_cache_enabled,
         guidance_scale, t_shift, upscale, voice_dir
     """
     # ------------------------------------------------------------------
@@ -203,6 +159,7 @@ def _omnivoice_worker_main(
     device: str          = "cuda"
     dtype_name: str      = config.get("dtype", "float16")
     default_num_steps    = int(config.get("num_steps", 32))
+    default_prefix_kv_cache = bool(config.get("prefix_kv_cache_enabled", True))
     default_guidance     = float(config.get("guidance_scale", 2.0))
     default_t_shift      = float(config.get("t_shift", 0.1))
     upscale_enabled: bool = config.get("upscale", True)
@@ -557,10 +514,12 @@ def _omnivoice_worker_main(
         if token_path.is_file():
             data = torch.load(token_path, map_location="cpu", weights_only=True)
             token_ref_text = data.get("ref_text")
-            if token_ref_text is not None and str(token_ref_text).strip():
+            if ref_text is not None and str(ref_text).strip():
+                # A current sidecar is authoritative; cached audio codes do not
+                # depend on transcript text and remain reusable.
+                effective_ref_text = str(ref_text).strip()
+            elif token_ref_text is not None and str(token_ref_text).strip():
                 effective_ref_text = str(token_ref_text).strip()
-            elif ref_text is not None:
-                effective_ref_text = ref_text
             else:
                 effective_ref_text = token_ref_text
 
@@ -679,16 +638,20 @@ def _omnivoice_worker_main(
 
                 voice_path: str = msg["voice_path"]
                 num_steps: int = msg.get("num_steps", default_num_steps)
+                prefix_kv_cache_enabled: bool = bool(
+                    msg.get("prefix_kv_cache_enabled", default_prefix_kv_cache)
+                )
                 guidance: float = msg.get("guidance_scale", default_guidance)
 
                 vcp = _get_voice_prompt(voice_path, ref_text=msg.get("ref_text"))
 
                 gen_config = OmniVoiceGenerationConfig(
-                    num_step=num_steps,
-                    guidance_scale=guidance,
-                    t_shift=default_t_shift,
-                    blockwise=True,
-                    block_size=9999,
+                    **_build_generation_config_kwargs(
+                        num_steps=num_steps,
+                        guidance_scale=guidance,
+                        t_shift=default_t_shift,
+                        prefix_kv_cache_enabled=prefix_kv_cache_enabled,
+                    )
                 )
 
                 t_start = time.time()
@@ -824,6 +787,7 @@ class OmniVoiceProcessManager:
         self._request_queue: Optional[mp.Queue] = None
         self._response_queue: Optional[mp.Queue] = None
         self._lock = threading.Lock()
+        self._synthesis_lock = threading.RLock()
         self._ready = False
 
     # ------------------------------------------------------------------
@@ -923,6 +887,7 @@ class OmniVoiceProcessManager:
     # Synthesis
     # ------------------------------------------------------------------
 
+    @_serialized_worker_io
     def synthesize_sentence(
         self,
         text: str,
@@ -930,6 +895,7 @@ class OmniVoiceProcessManager:
         on_chunk: Callable[[bytes, Optional[Dict]], None],
         num_steps: Optional[int] = None,
         guidance_scale: Optional[float] = None,
+        prefix_kv_cache_enabled: Optional[bool] = None,
     ) -> Tuple[bool, int]:
         """
         Synthesize a single sentence.
@@ -940,6 +906,7 @@ class OmniVoiceProcessManager:
             on_chunk: Callback(pcm_bytes, alignment_or_none) for audio delivery.
             num_steps: Override diffusion steps (default from settings).
             guidance_scale: Override CFG scale (default from settings).
+            prefix_kv_cache_enabled: Reuse the frozen conditioning-prefix KV cache.
 
         Returns:
             (success, bytes_produced)
@@ -954,42 +921,50 @@ class OmniVoiceProcessManager:
             "voice_path": voice_path,
         }
         ref_text = ensure_voice_reference_transcript(voice_path)
-        if ref_text:
-            request["ref_text"] = ref_text
+        if not ref_text:
+            print("[OmniVoice] A reference transcript is required for synthesis")
+            return (False, 0)
+        request["ref_text"] = ref_text
         if num_steps is not None:
             request["num_steps"] = num_steps
         if guidance_scale is not None:
             request["guidance_scale"] = guidance_scale
+        if prefix_kv_cache_enabled is not None:
+            request["prefix_kv_cache_enabled"] = prefix_kv_cache_enabled
 
-        self._request_queue.put(request)
+        with self._synthesis_lock:
+            # The worker has one shared response queue, so only one synthesis
+            # request can own the queue at a time.
+            self._request_queue.put(request)
 
-        try:
-            resp = self._response_queue.get(timeout=120.0)
-        except Exception:
-            print("[OmniVoice] Timeout waiting for synthesis response")
-            return (False, 0)
-
-        resp_type = resp.get("type")
-
-        if resp_type == "done":
-            pcm_bytes = resp["audio"]
-            if not pcm_bytes:
-                print("[OmniVoice] Synthesis returned empty audio")
+            try:
+                resp = self._response_queue.get(timeout=120.0)
+            except Exception:
+                print("[OmniVoice] Timeout waiting for synthesis response")
                 return (False, 0)
-            on_chunk(pcm_bytes, None)
-            return (True, len(pcm_bytes))
 
-        elif resp_type == "error":
-            print(f"[OmniVoice] Synthesis error: {resp.get('error')}")
+            resp_type = resp.get("type")
+
+            if resp_type == "done":
+                pcm_bytes = resp["audio"]
+                if not pcm_bytes:
+                    print("[OmniVoice] Synthesis returned empty audio")
+                    return (False, 0)
+                on_chunk(pcm_bytes, None)
+                return (True, len(pcm_bytes))
+
+            elif resp_type == "error":
+                print(f"[OmniVoice] Synthesis error: {resp.get('error')}")
+                return (False, 0)
+
+            print(f"[OmniVoice] Unexpected response type: {resp_type}")
             return (False, 0)
-
-        print(f"[OmniVoice] Unexpected response type: {resp_type}")
-        return (False, 0)
 
     # ------------------------------------------------------------------
     # Pretokenize
     # ------------------------------------------------------------------
 
+    @_serialized_worker_io
     def pretokenize_voice(self, voice_path: str, ref_text: Optional[str] = None) -> bool:
         """Pretokenize a voice reference (creates .tokens.pt). Returns True on success."""
         if not self.ensure_started():
@@ -1008,6 +983,7 @@ class OmniVoiceProcessManager:
             print("[OmniVoice] Timeout waiting for pretokenize response")
             return False
 
+    @_serialized_worker_io
     def pretokenize_batch(self, voices: list, on_progress: Callable = None,
                           transcribe_fn: Callable = None) -> list:
         """Batch pretokenize — encoder loaded once, transcribe+tokenize interleaved.
@@ -1045,8 +1021,8 @@ class OmniVoiceProcessManager:
             voice_path = entry["path"]
 
             # Transcribe in main process (has STT)
-            ref_text = None
-            if transcribe_fn:
+            ref_text = entry.get("ref_text")
+            if not ref_text and transcribe_fn:
                 stt_attempts += 1
                 ref_text = transcribe_fn(voice_path)
 
@@ -1074,9 +1050,16 @@ class OmniVoiceProcessManager:
                     return [{"path": voice_path, "success": False,
                              "error": f"Batch aborted: STT failing ({stt_failures}/{stt_attempts})"}]
 
-                # Isolated failure — tokenize without text (audio tokens still valid)
-                print(f"[OmniVoice] No transcript for {Path(voice_path).name}, tokenizing without text")
-                ref_text = ""
+                # An isolated STT failure is retained for a later retry.
+                print(f"[OmniVoice] Skipping {Path(voice_path).name}: no transcript")
+                results.append({
+                    "path": voice_path,
+                    "success": False,
+                    "error": "Reference transcript unavailable",
+                })
+                if on_progress:
+                    on_progress(i + 1, total)
+                continue
 
             # Send to worker for tokenization (encoder already loaded)
             self._request_queue.put({
@@ -1089,7 +1072,7 @@ class OmniVoiceProcessManager:
                 resp = self._response_queue.get(timeout=120.0)
                 success = resp.get("success", False)
                 results.append({"path": voice_path, "success": success})
-                if success:
+                if success and not resp.get("cached", False):
                     created_pts.append(str(Path(voice_path).with_suffix(".tokens.pt")))
             except Exception:
                 results.append({"path": voice_path, "success": False, "error": "Timeout"})
@@ -1110,6 +1093,7 @@ class OmniVoiceProcessManager:
     # Cache management
     # ------------------------------------------------------------------
 
+    @_serialized_worker_io
     def clear_voice_prompt(self, voice_path: str):
         """Clear cached voice prompt in the worker process."""
         if not self.ensure_started():
@@ -1128,6 +1112,7 @@ class OmniVoiceProcessManager:
     # Warmup
     # ------------------------------------------------------------------
 
+    @_serialized_worker_io
     def warm_up(self, voice_path: Optional[str] = None):
         """Warm up the worker and optionally pre-cache a voice prompt."""
         if not self.ensure_started():
@@ -1193,6 +1178,7 @@ def _get_omnivoice_config() -> Dict[str, Any]:
         "device": omni.get("device", "auto"),
         "dtype": omni.get("dtype", "float16"),
         "num_steps": int(omni.get("num_steps", 32)),
+        "prefix_kv_cache_enabled": bool(omni.get("prefix_kv_cache_enabled", True)),
         "guidance_scale": float(omni.get("guidance_scale", 2.0)),
         "apply_smoothing_eq": bool(omni.get("apply_smoothing_eq", True)),
         "t_shift": float(omni.get("t_shift", 0.1)),

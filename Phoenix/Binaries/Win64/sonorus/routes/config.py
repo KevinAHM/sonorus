@@ -4,10 +4,16 @@ Config API endpoints for Sonorus settings management.
 Handles settings CRUD, character import/export, system events.
 """
 
-import os
+import importlib.metadata
+import importlib.util
+import base64
 import json
+import os
 import shutil
 import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
 
 from flask import Blueprint, request, jsonify, send_file, Response
@@ -15,18 +21,38 @@ from flask import Blueprint, request, jsonify, send_file, Response
 from utils.settings import (
     SONORUS_DIR,
     DATA_DIR,
+    SETTINGS_FILE,
     CONFIG_HTML,
     DEFAULT_SETTINGS,
     load_settings,
     save_settings,
     deep_merge,
 )
+from utils import player_context, player_profile_db
 from utils.localization import get_display_name
+from utils.emote_embeddings import ensure_emote_index_async
 
 import llm
 import event_logger
 from constants import SONORUS_MOD_PACKAGE_ID, VR_BRIDGE_DLL_URL, VR_BRIDGE_DLL_SHA256
 from utils.package_id_check import read_package_id
+from services.tts.universal_client import (
+    UniversalAPIError,
+    UniversalSpeechClient,
+    language_code,
+    resolve_draft_key,
+)
+from services.tts.reference_preparation import (
+    ensure_reference_transcript,
+    is_preparable_reference,
+    read_reference_transcript,
+)
+from services.omnivoice_token_cache import load_omnivoice_token_cache
+from services.speech_server.catalog import enrich_asr_capabilities
+from services import omnivoice_cpp_engine
+from services import stt as stt_service
+from services import tts as tts_service
+from utils.vulkan_gpu_info import detect_vulkan_gpus
 
 config_bp = Blueprint('config', __name__)
 
@@ -38,6 +64,85 @@ def set_lua_socket(socket):
     """Set the lua socket instance for tracking settings sync."""
     global _lua_socket
     _lua_socket = socket
+
+
+def _load_saved_settings_file():
+    try:
+        if not os.path.exists(SETTINGS_FILE):
+            return {}
+        with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        print(f"[Config] Failed to read saved settings file: {exc}")
+        return {}
+
+
+def _preserve_ignored_player_bio_settings(settings, saved_settings):
+    """Keep legacy Player bio keys unchanged while ignoring them at runtime."""
+    prompts = settings.setdefault('prompts', {})
+    saved_prompts = saved_settings.get('prompts', {}) if isinstance(saved_settings, dict) else {}
+    if not isinstance(saved_prompts, dict):
+        saved_prompts = {}
+
+    static_bios = prompts.setdefault('static_bios', {})
+    saved_static_bios = saved_prompts.get('static_bios', {})
+    if not isinstance(saved_static_bios, dict):
+        saved_static_bios = {}
+    if isinstance(static_bios, dict):
+        if 'Player' in saved_static_bios:
+            static_bios['Player'] = saved_static_bios.get('Player')
+        else:
+            static_bios.pop('Player', None)
+
+    editor_guidance = prompts.setdefault('editor_guidance', {})
+    saved_editor_guidance = saved_prompts.get('editor_guidance', {})
+    if not isinstance(saved_editor_guidance, dict):
+        saved_editor_guidance = {}
+    if isinstance(editor_guidance, dict):
+        if 'Player' in saved_editor_guidance:
+            editor_guidance['Player'] = saved_editor_guidance.get('Player')
+        else:
+            editor_guidance.pop('Player', None)
+
+    if 'player_static_bios' in saved_prompts:
+        prompts['player_static_bios'] = saved_prompts.get('player_static_bios')
+    else:
+        prompts.pop('player_static_bios', None)
+
+
+def _preserve_saved_migrations(settings, saved_settings):
+    saved_migrations = saved_settings.get('migrations', {}) if isinstance(saved_settings, dict) else {}
+    if not isinstance(saved_migrations, dict) or not saved_migrations:
+        return
+    migrations = settings.setdefault('migrations', {})
+    if not isinstance(migrations, dict):
+        migrations = {}
+        settings['migrations'] = migrations
+    migrations.update(saved_migrations)
+
+
+def _hide_legacy_player_bio_settings(settings):
+    prompts = settings.setdefault('prompts', {})
+    prompts.pop('player_static_bios', None)
+    static_bios = prompts.setdefault('static_bios', {})
+    if isinstance(static_bios, dict):
+        static_bios.pop('Player', None)
+    editor_guidance = prompts.setdefault('editor_guidance', {})
+    if isinstance(editor_guidance, dict):
+        editor_guidance.pop('Player', None)
+
+
+def _set_player_bio_for_owner(player_owner, player_bio):
+    if not player_owner:
+        return False
+    player_owner = player_context.normalize_player_name(player_owner)
+    if not player_owner:
+        return False
+    current_player = player_context.get_context().current_player_name
+    if current_player and player_owner == current_player:
+        return player_profile_db.set_player_static_bio(player_bio)
+    return player_profile_db.set_player_static_bio_for_player(player_owner, player_bio)
 
 
 # ============================================
@@ -101,6 +206,21 @@ def get_config():
     """Get current settings with sensitive values masked."""
     settings = load_settings(raw=True)
     masked = json.loads(json.dumps(settings))
+    try:
+        ctx = player_context.get_context()
+        current_player = ctx.current_player_name
+        current_player_display = ctx.current_player_display_name
+        player_ready = ctx.is_ready()
+    except Exception:
+        current_player = None
+        current_player_display = None
+        player_ready = False
+
+    _hide_legacy_player_bio_settings(masked)
+    prompts = masked.setdefault('prompts', {})
+    static_bios = prompts.setdefault('static_bios', {})
+    if isinstance(static_bios, dict) and player_ready and current_player:
+        static_bios['Player'] = player_profile_db.get_player_static_bio()
     if masked.get('llm', {}).get('api_key'):
         masked['llm']['api_key'] = '********'
     llm_providers_with_keys = ['gemini', 'openrouter', 'openai', 'ollama', 'llamacpp']
@@ -111,7 +231,795 @@ def get_config():
     for provider in tts_providers_with_keys:
         if masked.get('tts', {}).get(provider, {}).get('api_key'):
             masked['tts'][provider]['api_key'] = '********'
+    if masked.get('speech_server', {}).get('api_key'):
+        masked['speech_server']['api_key'] = '********'
+    masked['player_context'] = {
+        "ready": player_ready,
+        "player_name": current_player_display or current_player or "",
+        "normalized_name": current_player or "",
+    }
     return jsonify(masked)
+
+
+def _universal_client_from_draft(payload):
+    payload = payload if isinstance(payload, dict) else {}
+    saved = load_settings(raw=True).get('speech_server', {})
+    saved = saved if isinstance(saved, dict) else {}
+    api_url = payload.get('api_url', saved.get('api_url', 'http://127.0.0.1:8100'))
+    api_key = resolve_draft_key(payload.get('api_key', ''), saved.get('api_key', ''))
+    return UniversalSpeechClient(api_url, api_key)
+
+
+def _universal_error(exc):
+    return jsonify({"ok": False, "error": exc.as_dict()}), exc.status
+
+
+def _universal_draft_payload():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        raise UniversalAPIError(
+            'invalid_request',
+            'The Universal speech request body must be a JSON object.',
+            status=400,
+        )
+    return payload
+
+
+def _universal_draft_bool(payload, field, default=False):
+    value = payload.get(field, default)
+    if not isinstance(value, bool):
+        raise UniversalAPIError(
+            'invalid_request', f'{field} must be a boolean.', status=400
+        )
+    return value
+
+
+def _universal_game_language(payload):
+    value = payload.get('game_language', 'EN_US')
+    if not isinstance(value, str) or not value.strip() or len(value) > 32:
+        raise UniversalAPIError(
+            'invalid_request', 'game_language must be a language identifier.', status=400
+        )
+    return value.strip()
+
+
+def _universal_optional_model_id(payload, field):
+    value = payload.get(field)
+    if value is None or value == '':
+        return None
+    if not isinstance(value, str) or not value.strip() or len(value.strip()) > 128:
+        raise UniversalAPIError(
+            'invalid_load_plan', f'{field} must be a model identifier.', status=400
+        )
+    return value.strip()
+
+
+def _speech_install_target(client, payload):
+    component = payload.get('component')
+    if component not in {'model', 'upscaler', 'aligner'}:
+        raise UniversalAPIError(
+            'invalid_install_target', 'component must be model, upscaler, or aligner.', status=400
+        )
+    game_language = _universal_game_language(payload)
+    capabilities = client.enriched_capabilities(game_language)
+    capabilities.update(enrich_asr_capabilities(client.capabilities(), game_language))
+    if capabilities.get('capabilitiesVersion', 1) < 7:
+        raise UniversalAPIError(
+            'installation_unavailable',
+            'Model installation requires speech-server capabilities version 7.',
+            status=409,
+        )
+    model_id = None
+    if component == 'model':
+        model_id = _universal_optional_model_id(payload, 'model')
+        if model_id is None:
+            raise UniversalAPIError(
+                'invalid_install_target', 'model is required for model installation.', status=400
+            )
+        candidates = (
+            capabilities.get('compatibleModels', [])
+            + capabilities.get('compatibleASRModels', [])
+        )
+        target = next((item for item in candidates if item.get('id') == model_id), None)
+    else:
+        target = capabilities.get('upscaler' if component == 'upscaler' else 'alignment')
+        if component == 'aligner' and target:
+            supported = {
+                value.lower().replace('_', '-').split('-', 1)[0]
+                for value in target.get('languages', [])
+            }
+            if language_code(game_language) not in supported and '*' not in supported:
+                target = None
+    if not target:
+        raise UniversalAPIError(
+            'invalid_install_target',
+            'The selected component is not compatible with the game language.',
+            status=409,
+        )
+    if target.get('installed'):
+        raise UniversalAPIError(
+            'component_already_installed', 'The selected component is already installed.', status=409
+        )
+    if not target.get('installable'):
+        raise UniversalAPIError(
+            'component_not_installable', 'The selected component cannot be installed automatically.', status=409
+        )
+    return component, model_id, target.get('registryBundle')
+
+
+def _speech_install_job_id(payload):
+    value = payload.get('job_id')
+    if not isinstance(value, str) or not value.strip() or len(value.strip()) > 128:
+        raise UniversalAPIError(
+            'invalid_install_job', 'job_id must be an installation job identifier.', status=400
+        )
+    return value.strip()
+
+
+@config_bp.route('/api/tts/universal/connect', methods=['POST'])
+def connect_universal_speech_server():
+    return _connect_universal_speech_server(require_tts=True)
+
+
+@config_bp.route('/api/speech-server/connect', methods=['POST'])
+def connect_shared_speech_server():
+    return _connect_universal_speech_server(require_tts=False)
+
+
+def _connect_universal_speech_server(*, require_tts):
+    try:
+        payload = _universal_draft_payload()
+        client = _universal_client_from_draft(payload)
+        resources = None
+        resource_error = None
+        try:
+            resources = client.resources()
+        except UniversalAPIError as exc:
+            resource_error = exc.as_dict()
+        game_language = _universal_game_language(payload)
+        capabilities = client.enriched_capabilities(
+            game_language,
+            resources=resources,
+            force=_universal_draft_bool(payload, 'refresh'),
+        )
+        capabilities.update(
+            enrich_asr_capabilities(
+                client.capabilities(),
+                game_language,
+                resources,
+            )
+        )
+        capabilities['activeInstallations'] = client.active_installations()
+        response = {
+            "ok": True,
+            "connected": True,
+            "apiUrl": client.api_url,
+            "capabilities": capabilities,
+            "resources": resources,
+            "resourceError": resource_error,
+        }
+        if require_tts and not capabilities.get('compatibleModels'):
+            error = UniversalAPIError(
+                'no_compatible_models',
+                'Connected, but the server has no voice-cloning model for the game language.',
+                status=409,
+                details=response,
+            )
+            return _universal_error(error)
+        return jsonify(response)
+    except UniversalAPIError as exc:
+        return _universal_error(exc)
+
+
+@config_bp.route('/api/tts/universal/resources', methods=['POST'])
+@config_bp.route('/api/speech-server/resources', methods=['POST'])
+def get_universal_resources():
+    try:
+        payload = _universal_draft_payload()
+        client = _universal_client_from_draft(payload)
+        return jsonify({"ok": True, "resources": client.resources()})
+    except UniversalAPIError as exc:
+        return _universal_error(exc)
+
+
+@config_bp.route('/api/speech-server/install/plan', methods=['POST'])
+def plan_speech_component_install():
+    try:
+        payload = _universal_draft_payload()
+        client = _universal_client_from_draft(payload)
+        component, model_id, registry_bundle = _speech_install_target(client, payload)
+        plan = client.install_plan(component, model_id)
+        if plan.get('registryBundle') != registry_bundle:
+            raise UniversalAPIError(
+                'registry_changed',
+                'The component registry changed during installation planning; refresh and try again.',
+                status=409,
+            )
+        return jsonify({'ok': True, 'plan': plan})
+    except UniversalAPIError as exc:
+        return _universal_error(exc)
+
+
+@config_bp.route('/api/speech-server/install/start', methods=['POST'])
+def start_speech_component_install():
+    try:
+        payload = _universal_draft_payload()
+        client = _universal_client_from_draft(payload)
+        component, model_id, registry_bundle = _speech_install_target(client, payload)
+        job = client.start_install(
+            component, model_id,
+            accept_license=_universal_draft_bool(payload, 'accept_license'),
+        )
+        if job.get('registryBundle') != registry_bundle:
+            try:
+                client.cancel_installation(job['jobId'])
+            except UniversalAPIError:
+                pass
+            raise UniversalAPIError(
+                'registry_changed',
+                'The component registry changed before installation started.',
+                status=409,
+            )
+        return jsonify({'ok': True, 'job': job}), 202
+    except UniversalAPIError as exc:
+        return _universal_error(exc)
+
+
+@config_bp.route('/api/speech-server/install/status', methods=['POST'])
+def get_speech_component_install():
+    try:
+        payload = _universal_draft_payload()
+        client = _universal_client_from_draft(payload)
+        if client.capabilities().get('capabilitiesVersion', 1) < 7:
+            raise UniversalAPIError(
+                'installation_unavailable',
+                'Model installation requires speech-server capabilities version 7.',
+                status=409,
+            )
+        job = client.installation(_speech_install_job_id(payload))
+        response = {'ok': True, 'job': job}
+        if job['state'] == 'completed':
+            resources = None
+            try:
+                resources = client.resources()
+            except UniversalAPIError:
+                pass
+            game_language = _universal_game_language(payload)
+            capabilities = client.enriched_capabilities(
+                game_language, resources=resources, force=True
+            )
+            capabilities.update(
+                enrich_asr_capabilities(client.capabilities(), game_language, resources)
+            )
+            capabilities['activeInstallations'] = client.active_installations()
+            response.update({'capabilities': capabilities, 'resources': resources})
+        return jsonify(response)
+    except UniversalAPIError as exc:
+        return _universal_error(exc)
+
+
+@config_bp.route('/api/speech-server/install/cancel', methods=['POST'])
+def cancel_speech_component_install():
+    try:
+        payload = _universal_draft_payload()
+        client = _universal_client_from_draft(payload)
+        return jsonify({
+            'ok': True,
+            'job': client.cancel_installation(_speech_install_job_id(payload)),
+        })
+    except UniversalAPIError as exc:
+        return _universal_error(exc)
+
+
+def _stack_payload(payload):
+    result = {
+        'tts_model': _universal_optional_model_id(payload, 'tts_model'),
+        'asr_model': _universal_optional_model_id(payload, 'asr_model'),
+        'upscale': _universal_draft_bool(payload, 'upscale'),
+        'alignment': _universal_draft_bool(payload, 'alignment'),
+    }
+    if not result['tts_model'] and not result['asr_model']:
+        raise UniversalAPIError(
+            'invalid_load_plan', 'At least one remote speech model is required.', status=400
+        )
+    return result
+
+
+@config_bp.route('/api/speech-server/plan', methods=['POST'])
+def plan_universal_speech_stack():
+    try:
+        payload = _universal_draft_payload()
+        client = _universal_client_from_draft(payload)
+        capabilities = client.capabilities()
+        if capabilities.get('capabilitiesVersion', 1) < 6:
+            raise UniversalAPIError(
+                'load_planning_unavailable',
+                'Combined speech-stack planning requires capabilities version 6.',
+                status=409,
+            )
+        plan = client.stack_plan(**_stack_payload(payload))
+        return jsonify({'ok': True, 'plan': plan})
+    except UniversalAPIError as exc:
+        return _universal_error(exc)
+
+
+@config_bp.route('/api/speech-server/warmup', methods=['POST'])
+def warmup_universal_speech_stack():
+    try:
+        payload = _universal_draft_payload()
+        client = _universal_client_from_draft(payload)
+        if client.capabilities().get('capabilitiesVersion', 1) < 6:
+            raise UniversalAPIError(
+                'load_planning_unavailable',
+                'Combined speech-stack warmup requires capabilities version 6.',
+                status=409,
+            )
+        result = client.stack_warmup(**_stack_payload(payload))
+        return jsonify({
+            'ok': result.get('success') is True,
+            'warmup': result,
+            'resources': result.get('resources'),
+        })
+    except UniversalAPIError as exc:
+        return _universal_error(exc)
+
+
+@config_bp.route('/api/tts/universal/plan', methods=['POST'])
+def plan_universal_model_load():
+    try:
+        payload = _universal_draft_payload()
+        client = _universal_client_from_draft(payload)
+        capabilities, model = _universal_selected_model(client, payload)
+        if not capabilities.get('loadPlanning'):
+            raise UniversalAPIError(
+                'load_planning_unavailable',
+                'This speech server does not expose component load planning.',
+                status=409,
+            )
+        upscale = _universal_draft_bool(payload, 'upscale')
+        adaptive_batching = _universal_draft_bool(payload, 'adaptive_batching')
+        if upscale and not model.get('upscaleEligible'):
+            raise UniversalAPIError(
+                'upscaler_unavailable',
+                'Upscaling is not available for the selected model.',
+                status=409,
+            )
+        if adaptive_batching and not (
+            model.get('segmentation') and model.get('alignmentCompatible')
+        ):
+            raise UniversalAPIError(
+                'alignment_unavailable',
+                'Adaptive batching is not available for the selected model.',
+                status=409,
+            )
+        plan = client.load_plan(
+            model['id'],
+            upscale=upscale,
+            adaptive_batching=adaptive_batching,
+        )
+        return jsonify({"ok": True, "plan": plan})
+    except UniversalAPIError as exc:
+        return _universal_error(exc)
+
+
+@config_bp.route('/api/tts/universal/warmup', methods=['POST'])
+def warmup_universal_model():
+    try:
+        payload = _universal_draft_payload()
+        client = _universal_client_from_draft(payload)
+        model_id = str(payload.get('model') or '')
+        capabilities = client.enriched_capabilities(_universal_game_language(payload))
+        compatible_ids = {model['id'] for model in capabilities.get('compatibleModels', [])}
+        if model_id not in compatible_ids:
+            raise UniversalAPIError(
+                'no_compatible_models',
+                'The selected model is not compatible with the game language.',
+                status=409,
+            )
+        selected = next(
+            model
+            for model in capabilities.get('compatibleModels', [])
+            if model['id'] == model_id
+        )
+        upscale = _universal_draft_bool(payload, 'upscale')
+        if upscale and not selected.get('upscaleEligible', False):
+            raise UniversalAPIError(
+                'upscaler_unavailable',
+                'Upscaling is not available for the selected model.',
+                status=409,
+            )
+        adaptive_batching = _universal_draft_bool(payload, 'adaptive_batching')
+        alignment = bool(
+            adaptive_batching
+            and selected.get('segmentation')
+            and selected.get('alignmentCompatible')
+        )
+        if adaptive_batching and not alignment:
+            raise UniversalAPIError(
+                'alignment_unavailable',
+                'Adaptive batching is not available for the selected model.',
+                status=409,
+            )
+        result = client.warmup(
+            model_id, upscale=upscale, alignment=alignment
+        )
+        resources = None
+        try:
+            resources = client.resources()
+        except UniversalAPIError:
+            pass
+        return jsonify({"ok": True, "warmup": result, "resources": resources})
+    except UniversalAPIError as exc:
+        return _universal_error(exc)
+
+
+_universal_voice_setup_lock = threading.RLock()
+_universal_voice_setup_cancel = threading.Event()
+_universal_voice_setup_progress = {
+    "status": "idle",
+    "model": None,
+    "language": None,
+    "total": 0,
+    "completed": 0,
+    "current": "",
+    "phase": "",
+    "reused": 0,
+    "transcribed": 0,
+    "uploaded": 0,
+    "prepared": 0,
+    "failures": [],
+}
+
+
+def _universal_selected_model(client, payload):
+    capabilities = client.enriched_capabilities(_universal_game_language(payload))
+    model_id = str(payload.get('model') or '')
+    model = next(
+        (item for item in capabilities.get('compatibleModels', []) if item['id'] == model_id),
+        None,
+    )
+    if model is None:
+        raise UniversalAPIError(
+            'no_compatible_models',
+            'The selected model is not compatible with the game language.',
+            status=409,
+        )
+    return capabilities, model
+
+
+def _remote_voice_for_item(remote_by_name, item, reference_hash):
+    from services.tts.voice_utils import build_hashed_voice_name
+    display_name = build_hashed_voice_name(
+        item.character_name, item.language, reference_hash
+    )
+    return display_name, remote_by_name.get(display_name)
+
+
+def _preparation_current(voice, model):
+    policy = model.get('voiceReference') or {}
+    preparation = policy.get('preparation') or {}
+    if preparation.get('mode') != 'persistent':
+        return True
+    prepared_models = voice.get('preparedModels')
+    if not isinstance(prepared_models, dict):
+        return False
+    marker = prepared_models.get(model['id'])
+    if not isinstance(marker, dict) or marker.get('revision') != preparation.get('revision'):
+        return False
+    hashes = marker.get('inputHashes')
+    if not isinstance(hashes, dict):
+        return False
+    if 'audio' in preparation.get('inputs', []) and hashes.get('audio') != voice.get('audioHash'):
+        return False
+    if 'transcript' in preparation.get('inputs', []) and hashes.get('transcript') != voice.get('transcriptHash'):
+        return False
+    return True
+
+
+def _universal_voice_needs_upload(
+    voice, reference_hash, transcript_policy, transcript_hash
+):
+    if not voice or voice.get('referenceHash') != reference_hash:
+        return True
+    if transcript_policy not in {'required', 'optional'} or not transcript_hash:
+        return transcript_policy == 'required' and not voice.get('hasTranscript')
+    if not voice.get('hasTranscript'):
+        return True
+    # Capability-v4 servers return transcriptHash.  A missing hash is tolerated
+    # for legacy servers that can only report transcript presence.
+    remote_hash = voice.get('transcriptHash')
+    return remote_hash is not None and remote_hash != transcript_hash
+
+
+def _universal_voice_setup_status(client, model, game_language):
+    from services.tts.reference_preparation import (
+        discover_voice_references,
+        read_reference_transcript,
+        reference_transcript_hash,
+    )
+    from services.tts.voice_utils import compute_reference_hash
+
+    items = discover_voice_references(game_language)
+    remote = client.voices().get('voices', [])
+    remote_by_name = {
+        str(voice.get('displayName') or voice.get('voiceId', '').split('__', 1)[-1]): voice
+        for voice in remote
+    }
+    transcript_policy = (model.get('voiceReference') or {}).get('transcript', 'unused')
+    transcripts_missing = uploads_missing = preparations_missing = 0
+    for item in items:
+        transcript = read_reference_transcript(item.path)
+        if transcript_policy == 'required' and not transcript:
+            transcripts_missing += 1
+        reference_hash = compute_reference_hash(str(item.path))
+        if not reference_hash:
+            uploads_missing += 1
+            continue
+        _, voice = _remote_voice_for_item(remote_by_name, item, reference_hash)
+        local_transcript_hash = reference_transcript_hash(transcript)
+        needs_upload = _universal_voice_needs_upload(
+            voice, reference_hash, transcript_policy, local_transcript_hash
+        )
+        if needs_upload:
+            uploads_missing += 1
+        if (
+            (model.get('voiceReference') or {}).get('preparation', {}).get('mode')
+            == 'persistent'
+            and (needs_upload or not _preparation_current(voice, model))
+        ):
+            preparations_missing += 1
+    settings = load_settings(raw=True)
+    stt_configured = settings.get('stt', {}).get('provider', 'none') != 'none'
+    return {
+        'model': model['id'],
+        'language': game_language,
+        'total': len(items),
+        'transcriptPolicy': transcript_policy,
+        'preparationMode': (model.get('voiceReference') or {}).get('preparation', {}).get('mode', 'lazy'),
+        'transcriptsMissing': transcripts_missing,
+        'uploadsMissing': uploads_missing,
+        'preparationsMissing': preparations_missing,
+        'sttConfigured': stt_configured,
+        'complete': not (transcripts_missing or uploads_missing or preparations_missing),
+    }
+
+
+def _run_universal_voice_setup(client, model, game_language):
+    global _universal_voice_setup_progress
+    from services.tts.reference_preparation import (
+        discover_voice_references,
+        ensure_reference_transcript,
+        read_reference_transcript,
+        reference_transcript_hash,
+    )
+    from services.tts.voice_utils import build_hashed_voice_name, compute_reference_hash
+
+    items = discover_voice_references(game_language)
+    policy = model.get('voiceReference') or {}
+    transcript_policy = policy.get('transcript', 'unused')
+    preparation_mode = (policy.get('preparation') or {}).get('mode', 'lazy')
+    remote = client.voices().get('voices', [])
+    remote_by_name = {
+        str(voice.get('displayName') or voice.get('voiceId', '').split('__', 1)[-1]): voice
+        for voice in remote
+    }
+    with _universal_voice_setup_lock:
+        _universal_voice_setup_progress.update(total=len(items), status='processing')
+    stt_attempts = stt_failures = 0
+    for index, item in enumerate(items):
+        if _universal_voice_setup_cancel.is_set():
+            with _universal_voice_setup_lock:
+                _universal_voice_setup_progress['status'] = 'cancelled'
+            return
+        with _universal_voice_setup_lock:
+            _universal_voice_setup_progress.update(
+                current=item.path.name, completed=index, phase='checking'
+            )
+        try:
+            existing_transcript = read_reference_transcript(item.path)
+            transcript = existing_transcript
+            if transcript:
+                with _universal_voice_setup_lock:
+                    _universal_voice_setup_progress['reused'] += 1
+            if transcript_policy == 'required' and not transcript:
+                stt_attempts += 1
+                with _universal_voice_setup_lock:
+                    _universal_voice_setup_progress['phase'] = 'transcribing'
+                try:
+                    transcript = ensure_reference_transcript(item.path)
+                    with _universal_voice_setup_lock:
+                        _universal_voice_setup_progress['transcribed'] += 1
+                except Exception:
+                    stt_failures += 1
+                    raise
+            reference_hash = compute_reference_hash(str(item.path))
+            if not reference_hash:
+                raise RuntimeError('Could not hash the reference audio')
+            display_name = build_hashed_voice_name(
+                item.character_name, item.language, reference_hash
+            )
+            voice = remote_by_name.get(display_name)
+            transcript_hash = reference_transcript_hash(transcript)
+            needs_upload = _universal_voice_needs_upload(
+                voice, reference_hash, transcript_policy, transcript_hash
+            )
+            if needs_upload:
+                with _universal_voice_setup_lock:
+                    _universal_voice_setup_progress['phase'] = 'uploading'
+                audio_data = base64.b64encode(item.path.read_bytes()).decode()
+                voice = client.clone_voice({
+                    'displayName': display_name,
+                    'langCode': item.language,
+                    'audioData': audio_data,
+                    'refText': transcript,
+                    'referenceHash': reference_hash,
+                    'tags': ['hogwarts-legacy', 'setup'],
+                })
+                remote_by_name[display_name] = voice
+                with _universal_voice_setup_lock:
+                    _universal_voice_setup_progress['uploaded'] += 1
+            if preparation_mode == 'persistent' and not _preparation_current(voice, model):
+                with _universal_voice_setup_lock:
+                    _universal_voice_setup_progress['phase'] = 'preparing'
+                result = client.prepare_voice(model['id'], voice['voiceId'])
+                existing_prepared = voice.get('preparedModels')
+                prepared_models = (
+                    dict(existing_prepared)
+                    if isinstance(existing_prepared, dict)
+                    else {}
+                )
+                prepared_models[model['id']] = result.get('preparation', {})
+                voice['preparedModels'] = prepared_models
+                with _universal_voice_setup_lock:
+                    _universal_voice_setup_progress['prepared'] += 1
+        except Exception as exc:
+            with _universal_voice_setup_lock:
+                _universal_voice_setup_progress['failures'].append({
+                    'voice': item.path.name, 'error': str(exc)
+                })
+            if stt_attempts >= 5 and stt_failures / stt_attempts > 0.5:
+                with _universal_voice_setup_lock:
+                    _universal_voice_setup_progress.update(
+                        status='error',
+                        phase='failed',
+                        current='STT is failing for most reference voices.',
+                    )
+                return
+        finally:
+            with _universal_voice_setup_lock:
+                _universal_voice_setup_progress['completed'] = index + 1
+    with _universal_voice_setup_lock:
+        _universal_voice_setup_progress.update(phase='refreshing', current='')
+    try:
+        # Bulk setup uses its own client, so an already-loaded provider would
+        # otherwise keep an empty/stale voice list and upload the same voices
+        # again on first speech.
+        from services import tts
+        tts.refresh_voices('universal')
+    except Exception as exc:
+        # The remote setup itself is complete.  A later cache miss can safely
+        # reload or re-upload, so do not misreport the whole setup as failed.
+        print(f"[Voice Setup] Could not refresh Universal voice cache: {exc}")
+    with _universal_voice_setup_lock:
+        _universal_voice_setup_progress.update(
+            status='done', phase='complete', current=''
+        )
+
+
+def _run_universal_voice_setup_safe(client, model, game_language):
+    try:
+        _run_universal_voice_setup(client, model, game_language)
+    except Exception as exc:
+        with _universal_voice_setup_lock:
+            _universal_voice_setup_progress.update(
+                status='error', phase='failed', current=str(exc)
+            )
+
+
+@config_bp.route('/api/tts/universal/voice-setup/status', methods=['POST'])
+def universal_voice_setup_status():
+    try:
+        payload = _universal_draft_payload()
+        client = _universal_client_from_draft(payload)
+        _, model = _universal_selected_model(client, payload)
+        status = _universal_voice_setup_status(
+            client, model, _universal_game_language(payload)
+        )
+        with _universal_voice_setup_lock:
+            progress = dict(_universal_voice_setup_progress)
+            progress['failures'] = list(progress.get('failures', []))
+        return jsonify({'ok': True, 'setup': status, 'progress': progress})
+    except UniversalAPIError as exc:
+        return _universal_error(exc)
+    except Exception as exc:
+        return _universal_error(UniversalAPIError(
+            'voice_setup_failed', str(exc), status=500
+        ))
+
+
+@config_bp.route('/api/tts/universal/voice-setup/start', methods=['POST'])
+def start_universal_voice_setup():
+    global _universal_voice_setup_progress
+    try:
+        payload = _universal_draft_payload()
+        client = _universal_client_from_draft(payload)
+        _, model = _universal_selected_model(client, payload)
+        language = _universal_game_language(payload)
+        with _universal_voice_setup_lock:
+            if _universal_voice_setup_progress.get('status') == 'processing':
+                raise UniversalAPIError(
+                    'setup_in_progress', 'Voice reference setup is already running.', status=409
+                )
+            _universal_voice_setup_cancel.clear()
+            _universal_voice_setup_progress = {
+                'status': 'processing', 'model': model['id'], 'language': language,
+                'total': 0, 'completed': 0, 'current': '', 'phase': 'starting',
+                'reused': 0, 'transcribed': 0, 'uploaded': 0, 'prepared': 0,
+                'failures': [],
+            }
+        threading.Thread(
+            target=_run_universal_voice_setup_safe,
+            args=(client, model, language),
+            name='UniversalVoiceSetup',
+            daemon=True,
+        ).start()
+        return jsonify({'ok': True, 'status': 'processing'}), 202
+    except UniversalAPIError as exc:
+        return _universal_error(exc)
+
+
+@config_bp.route('/api/tts/universal/voice-setup/progress', methods=['GET'])
+def universal_voice_setup_progress():
+    with _universal_voice_setup_lock:
+        progress = dict(_universal_voice_setup_progress)
+        progress['failures'] = list(progress.get('failures', []))
+    return jsonify({'ok': True, 'progress': progress})
+
+
+@config_bp.route('/api/tts/universal/voice-setup/cancel', methods=['POST'])
+def cancel_universal_voice_setup():
+    _universal_voice_setup_cancel.set()
+    return jsonify({'ok': True})
+
+
+@config_bp.route('/api/player-context', methods=['GET'])
+def get_player_context():
+    """Return the active player scope used for per-player data."""
+    try:
+        ctx = player_context.get_context()
+        normalized_name = ctx.current_player_name or ""
+        player_name = ctx.current_player_display_name or normalized_name
+        player_data_dir = ctx.player_data_dir or ""
+        ready = ctx.is_ready()
+    except Exception as exc:
+        print(f"[Config] Failed to read player context: {exc}")
+        normalized_name = ""
+        player_name = ""
+        player_data_dir = ""
+        ready = False
+
+    game_player_name = ""
+    game_normalized_name = ""
+    mismatch = False
+    if _lua_socket:
+        try:
+            game_context = _lua_socket.get_game_context() or {}
+            game_player_name = str(game_context.get('playerName') or '').strip()
+            if game_player_name:
+                game_normalized_name = player_context.normalize_player_name(game_player_name)
+                mismatch = bool(normalized_name and game_normalized_name and normalized_name != game_normalized_name)
+        except Exception as exc:
+            print(f"[Config] Failed to compare game player context: {exc}")
+
+    return jsonify({
+        "ready": ready,
+        "player_name": player_name,
+        "normalized_name": normalized_name,
+        "player_data_dir": player_data_dir,
+        "game_player_name": game_player_name,
+        "game_normalized_name": game_normalized_name,
+        "mismatch": mismatch,
+    })
 
 
 @config_bp.route('/api/character-display-names', methods=['GET'])
@@ -155,6 +1063,22 @@ def get_openrouter_embedding_models():
     return jsonify(llm.get_openrouter_embedding_model_ids_for_frontend())
 
 
+@config_bp.route('/api/openrouter-vision-models', methods=['GET'])
+def get_openrouter_vision_models():
+    """Return cached OpenRouter vision-capable model IDs for frontend autocomplete."""
+    return jsonify(llm.get_openrouter_vision_model_ids_for_frontend())
+
+
+@config_bp.route('/api/openrouter-model-providers', methods=['GET'])
+def get_openrouter_model_providers():
+    """Return OpenRouter provider endpoint metadata for one model."""
+    model = (request.args.get('model') or '').strip()
+    force_refresh = request.args.get('refresh') in ('1', 'true', 'yes')
+    if not model:
+        return jsonify([])
+    return jsonify(llm.get_openrouter_model_providers_for_frontend(model, force_refresh=force_refresh))
+
+
 def _iter_mod_utoc_paths():
     """Yield installed cooked mod containers from known mod install locations."""
     seen = set()
@@ -189,6 +1113,7 @@ def get_mod_package_conflicts():
     try:
         game_root = Path(SONORUS_DIR).parent.parent.parent
         paks_root = game_root / "Content" / "Paks"
+        sonorus_utoc_path = (paks_root / "LogicMods" / "SonorusMod.utoc").resolve()
         scan_roots = [
             paks_root / "mods",
             paks_root / "~mods",
@@ -217,7 +1142,7 @@ def get_mod_package_conflicts():
 
         conflicts = []
         for package_id, group in sorted(grouped.items(), key=lambda item: item[0]):
-            if len(group) < 2:
+            if len(group) < 2 or package_id == SONORUS_MOD_PACKAGE_ID:
                 continue
             conflicts.append({
                 "package_id": package_id,
@@ -235,7 +1160,11 @@ def get_mod_package_conflicts():
 
         sonorus_conflicts = []
         if SONORUS_MOD_PACKAGE_ID is not None:
-            sonorus_group = grouped.get(SONORUS_MOD_PACKAGE_ID, [])
+            sonorus_group = [
+                entry
+                for entry in grouped.get(SONORUS_MOD_PACKAGE_ID, [])
+                if Path(entry.utoc_path) != sonorus_utoc_path
+            ]
             if sonorus_group:
                 sonorus_conflicts = [
                     {
@@ -266,7 +1195,33 @@ def save_config():
     """Save settings with hot-reload for certain changes."""
     new_settings = request.get_json() or {}
     new_settings.pop('character_display_names', None)
+    submitted_player_context = new_settings.pop('player_context', {}) or {}
+    submitted_player = submitted_player_context.get('normalized_name') if isinstance(submitted_player_context, dict) else None
+    submitted_player = player_context.normalize_player_name(submitted_player) if submitted_player else None
     existing = load_settings(raw=True)
+    saved_settings = _load_saved_settings_file()
+    try:
+        current_player = player_context.get_context().current_player_name
+    except Exception:
+        current_player = None
+
+    prompts = new_settings.setdefault('prompts', {})
+    static_bios = prompts.setdefault('static_bios', {})
+    player_card_bio = ""
+    player_card_present = False
+    if isinstance(static_bios, dict):
+        if 'Player' in static_bios:
+            player_card_bio = static_bios.pop('Player', '') or ""
+            player_card_present = True
+    editor_guidance = prompts.get('editor_guidance', {})
+    if isinstance(editor_guidance, dict):
+        editor_guidance.pop('Player', None)
+    prompts.pop('player_static_bios', None)
+
+    player_bio_owner = submitted_player or current_player
+    if player_card_present and player_bio_owner:
+        if not _set_player_bio_for_owner(player_bio_owner, player_card_bio):
+            return jsonify({"error": "Failed to save player bio"}), 500
 
     if new_settings.get('llm', {}).get('api_key') == '********':
         if 'llm' not in new_settings:
@@ -294,10 +1249,29 @@ def save_config():
     language_changed = new_language != existing_language
 
     # Track which TTS providers had API key or workspace changes
+    existing_connection = existing.get('speech_server', {})
+    if not isinstance(existing_connection, dict):
+        existing_connection = {}
+    if 'speech_server' not in new_settings:
+        # Older/cached settings pages do not know about the new root field.
+        # Preserve credentials instead of treating omission as an explicit reset.
+        new_settings['speech_server'] = dict(existing_connection)
+    submitted_connection = new_settings['speech_server']
+    if not isinstance(submitted_connection, dict):
+        return jsonify({"error": "speech_server settings must be an object"}), 400
+    if submitted_connection.get('api_key') == '********':
+        submitted_connection['api_key'] = existing_connection.get('api_key', '')
+    speech_server_changed = (
+        submitted_connection.get('api_url', '') != existing_connection.get('api_url', '')
+        or submitted_connection.get('api_key', '') != existing_connection.get('api_key', '')
+    )
+
     tts_providers_changed = []
     tts_providers_with_keys = ['inworld', 'elevenlabs', 'openai']
+    submitted_tts = new_settings.get('tts', {})
     for provider in tts_providers_with_keys:
-        new_key = new_settings.get('tts', {}).get(provider, {}).get('api_key', '')
+        provider_submitted = isinstance(submitted_tts, dict) and provider in submitted_tts
+        new_key = submitted_tts.get(provider, {}).get('api_key', '') if provider_submitted else ''
         existing_key = existing.get('tts', {}).get(provider, {}).get('api_key', '')
 
         if new_key == '********':
@@ -307,10 +1281,22 @@ def save_config():
             if provider not in new_settings['tts']:
                 new_settings['tts'][provider] = {}
             new_settings['tts'][provider]['api_key'] = existing_key
-        elif new_key and new_key != existing_key:
+        elif provider_submitted and new_key != existing_key:
             # API key changed - mark for cache refresh
             tts_providers_changed.append(provider)
             print(f"[Settings] API key changed for TTS provider: {provider}")
+
+    new_universal_settings = new_settings.get('tts', {}).get('universal', {})
+    existing_universal_settings = existing.get('tts', {}).get('universal', {})
+    universal_settings_changed = new_universal_settings != existing_universal_settings
+    if (
+        (speech_server_changed or universal_settings_changed)
+        and 'universal' in {new_tts_provider, existing_tts_provider}
+    ):
+        tts_providers_changed.append('universal')
+        print("[Settings] Universal Speech Server TTS configuration changed")
+    if speech_server_changed:
+        UniversalSpeechClient.invalidate_cache()
 
     # Inworld derives the workspace from the API key. Drop legacy workspace_id
     # values so a stale "default" entry cannot affect future config saves.
@@ -350,10 +1336,17 @@ def save_config():
         active_tts_provider == 'omnivoice'
         and new_omnivoice_device != existing_omnivoice_device
     )
+    new_omnivoice_cpp_device = new_settings.get('tts', {}).get('omnivoice_cpp', {}).get('device', 'auto')
+    existing_omnivoice_cpp_device = existing.get('tts', {}).get('omnivoice_cpp', {}).get('device', 'auto')
+    omnivoice_cpp_device_changed = (
+        active_tts_provider == 'omnivoice_cpp'
+        and new_omnivoice_cpp_device != existing_omnivoice_cpp_device
+    )
     active_tts_changed = (
         tts_provider_switched or
         active_tts_provider in tts_providers_changed or
-        omnivoice_device_changed
+        omnivoice_device_changed or
+        omnivoice_cpp_device_changed
     )
 
     if active_tts_changed:
@@ -369,6 +1362,8 @@ def save_config():
 
     merged = deep_merge(DEFAULT_SETTINGS.copy(), new_settings)
     merged.get('tts', {}).get('inworld', {}).pop('workspace_id', None)
+    _preserve_ignored_player_bio_settings(merged, saved_settings)
+    _preserve_saved_migrations(merged, saved_settings)
 
     # Strip prompt values that match defaults so code updates take effect.
     # Only persist prompts users have actually customized.
@@ -405,6 +1400,13 @@ def save_config():
                     except Exception as e:
                         print(f"[Settings] Error unloading OmniVoice: {e}")
 
+                if existing_tts_provider == 'omnivoice_cpp':
+                    try:
+                        omnivoice_cpp_engine.unload()
+                        print("[Settings] Unloaded OmniVoice (Vulkan) worker")
+                    except Exception as e:
+                        print(f"[Settings] Error unloading OmniVoice (Vulkan): {e}")
+
                 # Disconnect Inworld WebSocket before clearing its cache
                 if existing_tts_provider == 'inworld':
                     try:
@@ -429,7 +1431,6 @@ def save_config():
                 if new_tts_provider == 'pocket':
                     try:
                         from services.pocket_tts_onnx import warm_up as warmup_pocket
-                        import threading
                         def preload_pocket():
                             try:
                                 warmup_pocket()
@@ -440,10 +1441,9 @@ def save_config():
                     except Exception as e:
                         print(f"[Settings] Error starting Pocket TTS preload: {e}")
 
-                elif new_tts_provider == 'omnivoice' and _is_torch_installed() and _count_untokenized_voices() == 0:
+                elif new_tts_provider == 'omnivoice' and _are_omnivoice_deps_installed() and _count_untokenized_voices() == 0:
                     try:
                         from services.omnivoice_engine import warm_up as warmup_omnivoice
-                        import threading
                         def preload_omnivoice():
                             try:
                                 warmup_omnivoice()
@@ -453,6 +1453,21 @@ def save_config():
                         threading.Thread(target=preload_omnivoice, daemon=True).start()
                     except Exception as e:
                         print(f"[Settings] Error starting OmniVoice preload: {e}")
+
+                elif new_tts_provider == 'omnivoice_cpp':
+                    try:
+                        if omnivoice_cpp_engine.is_available():
+                            def preload_omnivoice_cpp():
+                                try:
+                                    if omnivoice_cpp_engine.warm_up():
+                                        print("[Settings] OmniVoice (Vulkan) worker preloaded")
+                                    else:
+                                        print("[Settings] OmniVoice (Vulkan) preload did not complete")
+                                except Exception as e:
+                                    print(f"[Settings] OmniVoice (Vulkan) preload failed: {e}")
+                            threading.Thread(target=preload_omnivoice_cpp, daemon=True).start()
+                    except Exception as e:
+                        print(f"[Settings] Error activating OmniVoice (Vulkan): {e}")
 
                 # Connect Inworld WebSocket (if switching to Inworld)
                 elif new_tts_provider == 'inworld':
@@ -488,8 +1503,7 @@ def save_config():
                 tts.clear_provider_cache('omnivoice')
                 print("[Settings] Unloaded OmniVoice models for GPU change")
 
-                if _is_torch_installed() and _count_untokenized_voices() == 0:
-                    import threading
+                if _are_omnivoice_deps_installed() and _count_untokenized_voices() == 0:
                     from services.omnivoice_engine import warm_up as warmup_omnivoice
                     def preload_omnivoice_after_gpu_change():
                         try:
@@ -500,6 +1514,38 @@ def save_config():
                     threading.Thread(target=preload_omnivoice_after_gpu_change, daemon=True).start()
             except Exception as e:
                 print(f"[Settings] Error reloading OmniVoice after GPU change: {e}")
+
+        if omnivoice_cpp_device_changed and not tts_provider_switched:
+            print(f"[Settings] OmniVoice (Vulkan) GPU changed: {existing_omnivoice_cpp_device} -> {new_omnivoice_cpp_device}")
+            try:
+                omnivoice_cpp_engine.unload()
+                tts_service.clear_provider_cache('omnivoice_cpp')
+                print("[Settings] Unloaded OmniVoice (Vulkan) worker for GPU change")
+
+                if omnivoice_cpp_engine.is_available():
+                    def preload_omnivoice_cpp_after_gpu_change():
+                        try:
+                            if omnivoice_cpp_engine.warm_up():
+                                print("[Settings] OmniVoice (Vulkan) worker restarted after GPU change")
+                            else:
+                                print("[Settings] OmniVoice (Vulkan) restart after GPU change failed")
+                        except Exception as e:
+                            print(f"[Settings] OmniVoice (Vulkan) restart after GPU change failed: {e}")
+                    threading.Thread(target=preload_omnivoice_cpp_after_gpu_change, daemon=True).start()
+            except Exception as e:
+                print(f"[Settings] Error restarting OmniVoice (Vulkan) after GPU change: {e}")
+
+        # Keep an activated native provider self-healing when a saved config is
+        # retried after an interrupted download. Start this after device-change
+        # handling so install and worker teardown cannot race each other.
+        if new_tts_provider == 'omnivoice_cpp':
+            try:
+                if not omnivoice_cpp_engine.is_available():
+                    started = _start_omnivoice_cpp_install()
+                    if started:
+                        print("[Settings] OmniVoice (Vulkan) dependency install started")
+            except Exception as e:
+                print(f"[Settings] Error resuming OmniVoice (Vulkan) installation: {e}")
 
         # Handle language change - clear ALL provider caches
         if language_changed:
@@ -519,7 +1565,9 @@ def save_config():
         stt_hotkey_changed = new_stt.get('hotkey') != existing_stt.get('hotkey')
         stt_api_key_changed = (
             new_stt.get('deepgram', {}).get('api_key') != existing_stt.get('deepgram', {}).get('api_key') or
-            new_stt.get('whisper', {}).get('api_key') != existing_stt.get('whisper', {}).get('api_key')
+            new_stt.get('whisper', {}).get('api_key') != existing_stt.get('whisper', {}).get('api_key') or
+            new_stt.get('universal', {}).get('model') != existing_stt.get('universal', {}).get('model') or
+            (speech_server_changed and (new_stt.get('provider') or existing_stt.get('provider')) == 'universal')
         )
 
         if stt_provider_changed or stt_api_key_changed:
@@ -560,7 +1608,6 @@ def save_config():
                 elif new_stt_provider == 'parakeet':
                     try:
                         from services.parakeet_stt import warm_up as warmup_fn
-                        import threading
                         def preload_parakeet():
                             try:
                                 warmup_fn()
@@ -573,7 +1620,6 @@ def save_config():
                 elif new_stt_provider == 'canary':
                     try:
                         from services.canary_stt import warm_up as warmup_fn
-                        import threading
                         def preload_canary():
                             try:
                                 warmup_fn()
@@ -586,7 +1632,6 @@ def save_config():
                 elif new_stt_provider == 'moonshine':
                     try:
                         from services.moonshine_stt import warm_up as warmup_fn
-                        import threading
                         def preload_moonshine():
                             try:
                                 warmup_fn()
@@ -626,7 +1671,6 @@ def save_config():
                     set_capture_mode('open_mic')
                 except Exception as e:
                     print(f"[Settings] Failed to set open_mic mode: {e}")
-                import threading
                 def preload_speech_models():
                     try:
                         from services.vad import VADProcessor
@@ -669,7 +1713,6 @@ def save_config():
         if voice_spells_changed:
             if new_stt.get('voice_spells', True):
                 # Voice spells enabled - preload spell detection models
-                import threading
                 def preload_spell_models():
                     try:
                         from services.spell_detector import warm_up as warmup_spells
@@ -755,6 +1798,11 @@ def save_config():
             new_llm.get('openai', {}).get('api_key') != existing_llm.get('openai', {}).get('api_key') or
             new_llm.get('ollama', {}).get('api_key') != existing_llm.get('ollama', {}).get('api_key') or
             new_llm.get('llamacpp', {}).get('api_key') != existing_llm.get('llamacpp', {}).get('api_key') or
+            new_llm.get('gemini', {}).get('disable_memory') != existing_llm.get('gemini', {}).get('disable_memory') or
+            new_llm.get('openrouter', {}).get('disable_memory') != existing_llm.get('openrouter', {}).get('disable_memory') or
+            new_llm.get('openai', {}).get('disable_memory') != existing_llm.get('openai', {}).get('disable_memory') or
+            new_llm.get('ollama', {}).get('disable_memory') != existing_llm.get('ollama', {}).get('disable_memory') or
+            new_llm.get('llamacpp', {}).get('disable_memory') != existing_llm.get('llamacpp', {}).get('disable_memory') or
             # Reasoning toggles changed (affects thinking_config in memory LLM client)
             new_llm.get('gemini', {}).get('reasoning_enabled') != existing_llm.get('gemini', {}).get('reasoning_enabled') or
             new_llm.get('openrouter', {}).get('reasoning_enabled') != existing_llm.get('openrouter', {}).get('reasoning_enabled') or
@@ -779,6 +1827,9 @@ def save_config():
                 pass
             except Exception as e:
                 print(f"[Settings] Error reinitializing memory: {e}")
+
+        # Validate or generate the freeform emote index after any relevant save.
+        ensure_emote_index_async()
 
         # Hot-reload LLM client cache (connection pooling)
         if llm_client_changed:
@@ -877,9 +1928,19 @@ def get_default_owl_prompt(key):
 def export_characters():
     """Export character settings (static bios + editor guidance + viseme scales)."""
     settings = load_settings(raw=True)
+    prompts = settings.get('prompts', {})
+    static_bios = dict(prompts.get('static_bios', {})) if isinstance(prompts.get('static_bios', {}), dict) else {}
+    editor_guidance = dict(prompts.get('editor_guidance', {})) if isinstance(prompts.get('editor_guidance', {}), dict) else {}
+    static_bios.pop('Player', None)
+    editor_guidance.pop('Player', None)
+    try:
+        if player_context.get_context().is_ready():
+            static_bios['Player'] = player_profile_db.get_player_static_bio()
+    except Exception as exc:
+        print(f"[Settings] Failed to include player profile bio in export: {exc}")
     char_data = {
-        "static_bios": settings.get('prompts', {}).get('static_bios', {}),
-        "editor_guidance": settings.get('prompts', {}).get('editor_guidance', {}),
+        "static_bios": static_bios,
+        "editor_guidance": editor_guidance,
         "viseme_scales": settings.get('lipsync', {}).get('npc_scales', {})
     }
     response = Response(
@@ -899,8 +1960,10 @@ def import_characters():
             return jsonify({"error": "Invalid format - expected object"}), 400
 
         settings = load_settings(raw=True)
+        saved_settings = _load_saved_settings_file()
 
         static_bio_data = data.get('static_bios') or {}
+        player_static_bio_data = data.get('player_static_bios') or {}
         guidance_data = data.get('editor_guidance') or {}
         legacy_bio_data = data.get('bios') or {}
 
@@ -918,6 +1981,46 @@ def import_characters():
                     split_static[npc_id] = cleaned
             static_bio_data = split_static
             guidance_data = {}
+
+        try:
+            current_player = player_context.get_context().current_player_name
+        except Exception:
+            current_player = None
+
+        player_profile_bio = ""
+        player_profile_bio_present = False
+        if isinstance(static_bio_data, dict):
+            static_bio_data = dict(static_bio_data)
+            if 'Player' in static_bio_data:
+                player_profile_bio = str(static_bio_data.pop('Player') or "").strip()
+                player_profile_bio_present = True
+        else:
+            static_bio_data = {}
+
+        if isinstance(guidance_data, dict):
+            guidance_data = dict(guidance_data)
+            if 'Player' in guidance_data:
+                if not player_profile_bio_present:
+                    player_profile_bio = str(guidance_data.get('Player') or "").strip()
+                    player_profile_bio_present = True
+                guidance_data.pop('Player', None)
+        else:
+            guidance_data = {}
+
+        if (
+            not player_profile_bio_present
+            and current_player
+            and isinstance(player_static_bio_data, dict)
+            and current_player in player_static_bio_data
+        ):
+            player_profile_bio = str(player_static_bio_data.get(current_player) or "").strip()
+            player_profile_bio_present = True
+
+        player_bio_count = 0
+        if player_profile_bio_present and current_player:
+            if not player_profile_db.set_player_static_bio(player_profile_bio):
+                return jsonify({"error": "Failed to import player bio"}), 500
+            player_bio_count = 1
 
         if static_bio_data and isinstance(static_bio_data, dict):
             if 'prompts' not in settings:
@@ -942,8 +2045,11 @@ def import_characters():
                 settings['lipsync']['npc_scales'] = {}
             settings['lipsync']['npc_scales'].update(data['viseme_scales'])
 
+        _preserve_ignored_player_bio_settings(settings, saved_settings)
+        _preserve_saved_migrations(settings, saved_settings)
+
         if save_settings(settings):
-            static_bio_count = len(static_bio_data)
+            static_bio_count = len(static_bio_data) + player_bio_count
             guidance_count = len(guidance_data)
             scale_count = len(data.get('viseme_scales', {}))
             print(f"[Settings] Imported {static_bio_count} static bios, {guidance_count} character guidance, {scale_count} viseme scales")
@@ -951,6 +2057,7 @@ def import_characters():
                 "status": "ok",
                 "static_bios": static_bio_count,
                 "editor_guidance": guidance_count,
+                "player_static_bio": player_bio_count,
                 "viseme_scales": scale_count
             })
         return jsonify({"error": "Failed to save"}), 500
@@ -1123,6 +2230,324 @@ def get_client_logs():
         return jsonify({"error": str(e), "content": ""}), 500
 
 
+_omnivoice_cpp_installer_thread = None
+_omnivoice_cpp_install_lock = threading.Lock()
+_omnivoice_cpp_install_progress = {
+    "status": "idle",
+    "total": 4,
+    "completed": 0,
+    "current": "",
+    "message": "",
+}
+_omnivoice_cpp_voice_lock = threading.Lock()
+_omnivoice_cpp_voice_progress = {
+    "status": "idle",
+    "phase": "",
+    "total": 0,
+    "completed": 0,
+    "succeeded": 0,
+    "failed": 0,
+    "current": "",
+    "error": "",
+}
+
+
+def _update_omnivoice_cpp_voice_progress(**updates):
+    with _omnivoice_cpp_voice_lock:
+        _omnivoice_cpp_voice_progress.update(updates)
+
+
+def _omnivoice_cpp_voice_progress_snapshot():
+    with _omnivoice_cpp_voice_lock:
+        return dict(_omnivoice_cpp_voice_progress)
+
+
+def _get_omnivoice_cpp_gpu_status(settings, requested_device=None):
+    """GPU status for the omnivoice_cpp (ggml/Vulkan) provider.
+
+    ggml supplies Vulkan device identity/capacity and Windows supplies
+    system-wide dedicated-memory usage across the game and other processes.
+    Includes dll_present/models_present so the UI can show install state.
+    """
+    configured_device = settings.get('tts', {}).get('omnivoice_cpp', {}).get('device', 'auto')
+    server_device = requested_device or configured_device or 'auto'
+
+    result = {
+        "cuda_available": False,
+        "vram_free_gb": None,
+        "vram_total_gb": None,
+        "vram_used_gb": None,
+        "model_loaded": False,
+        "model_on_gpu": False,
+        "server_device": server_device,
+        "selected_device": configured_device or 'auto',
+        "selected_gpu_index": None,
+        "gpu_name": None,
+        "gpus": [],
+        "dll_present": False,
+        "runtime_present": False,
+        "missing_runtime_files": [],
+        "models_present": False,
+    }
+
+    try:
+        gpus = detect_vulkan_gpus(force_refresh=True, log=False)
+        result["gpus"] = [dict(gpu) for gpu in gpus]
+
+        selected_gpu = next((gpu for gpu in gpus if gpu["device"] == server_device), None)
+        if selected_gpu is None and gpus:
+            selected_gpu = gpus[0]
+        if selected_gpu is not None:
+            result["selected_gpu_index"] = selected_gpu["index"]
+            result["gpu_name"] = selected_gpu["name"]
+            for field in ("vram_total_gb", "vram_free_gb", "vram_used_gb"):
+                result[field] = selected_gpu.get(field)
+    except Exception as e:
+        print(f"[Config] Error enumerating Vulkan GPUs: {e}")
+
+    try:
+        result["dll_present"] = bool(omnivoice_cpp_engine.dll_present())
+        result["runtime_present"] = bool(omnivoice_cpp_engine.runtime_present())
+        result["missing_runtime_files"] = omnivoice_cpp_engine.missing_runtime_files()
+        result["models_present"] = bool(omnivoice_cpp_engine.models_present())
+        result["model_loaded"] = bool(omnivoice_cpp_engine.is_loaded())
+        result["model_on_gpu"] = bool(
+            result["model_loaded"]
+            and result["gpus"]
+            and str(server_device).strip().lower() != "cpu"
+        )
+    except Exception as e:
+        print(f"[Config] Error reading omnivoice_cpp engine status: {e}")
+
+    return jsonify(result)
+
+
+def _run_omnivoice_cpp_install():
+    """Background dependency installation started by activation or the retry button."""
+    def update_progress(completed, total, message):
+        with _omnivoice_cpp_install_lock:
+            _omnivoice_cpp_install_progress.update({
+                "status": "installing",
+                "total": total,
+                "completed": completed,
+                "current": message,
+                "message": message,
+            })
+
+    try:
+        omnivoice_cpp_engine.install_dependencies(update_progress)
+    except Exception as exc:
+        print(f"[OmniVoiceCpp Setup] Dependency install failed: {exc}")
+        with _omnivoice_cpp_install_lock:
+            _omnivoice_cpp_install_progress.update({
+                "status": "error",
+                "current": "",
+                "message": str(exc),
+            })
+        return
+
+    try:
+        detect_vulkan_gpus(force_refresh=True, log=True)
+    except Exception as exc:
+        print(f"[OmniVoiceCpp Setup] Post-install GPU refresh failed (non-fatal): {exc}")
+
+    with _omnivoice_cpp_install_lock:
+        _omnivoice_cpp_install_progress.update({
+            "status": "complete",
+            "total": 4,
+            "completed": 4,
+            "current": "",
+            "message": "OmniVoice (Vulkan) is ready.",
+        })
+
+    try:
+        settings = load_settings()
+        if settings.get('tts', {}).get('provider') == 'omnivoice_cpp':
+            tts_service.clear_provider_cache('omnivoice_cpp')
+            warmed_up = omnivoice_cpp_engine.warm_up()
+            provider_still_active = (
+                load_settings().get('tts', {}).get('provider') == 'omnivoice_cpp'
+            )
+            if not provider_still_active:
+                omnivoice_cpp_engine.unload()
+                print("[OmniVoiceCpp Setup] Provider changed during warm-up; worker unloaded")
+            elif warmed_up:
+                print("[OmniVoiceCpp Setup] Dependencies installed and worker preloaded")
+            else:
+                print("[OmniVoiceCpp Setup] Dependencies installed, but worker preload failed")
+    except Exception as exc:
+        print(f"[OmniVoiceCpp Setup] Post-install warm-up failed (non-fatal): {exc}")
+
+
+def _start_omnivoice_cpp_install():
+    """Start one installer thread. Returns True only when a new job was started."""
+    global _omnivoice_cpp_installer_thread
+
+    with _omnivoice_cpp_install_lock:
+        if _omnivoice_cpp_installer_thread is not None and _omnivoice_cpp_installer_thread.is_alive():
+            return False
+        _omnivoice_cpp_install_progress.update({
+            "status": "installing",
+            "total": 4,
+            "completed": 0,
+            "current": "Starting OmniVoice installation...",
+            "message": "Starting OmniVoice installation...",
+        })
+        _omnivoice_cpp_installer_thread = threading.Thread(
+            target=_run_omnivoice_cpp_install,
+            name="omnivoice-cpp-installer",
+            daemon=True,
+        )
+        _omnivoice_cpp_installer_thread.start()
+        return True
+
+
+# Cached counts for the status poll; a full voice_references scan (including
+# sidecar inspection) is too heavy to run on every poll tick.
+_omnivoice_cpp_voice_counts_cache = {
+    "at": 0.0,
+    "setup": 0,
+    "transcripts": 0,
+    "tokens": 0,
+}
+
+
+def _omnivoice_cpp_stt_available():
+    """Check STT configuration without importing/loading the selected model."""
+    try:
+        return bool(stt_service.is_available())
+    except Exception as exc:
+        print(f"[OmniVoiceCpp Setup] STT availability check failed: {exc}")
+        return False
+
+
+@config_bp.route('/api/tts/omnivoice-cpp/status', methods=['GET'])
+def get_omnivoice_cpp_status():
+    """Return runtime, model-install, and voice-preparation status."""
+    model_files = [
+        omnivoice_cpp_engine.MODEL_FILENAME,
+        omnivoice_cpp_engine.TOKENIZER_FILENAME,
+        omnivoice_cpp_engine.UPSCALER_FILENAME,
+    ]
+    completed_models = [
+        name for name in model_files
+        if omnivoice_cpp_engine.model_file_ready(name)
+    ]
+    runtime_present = omnivoice_cpp_engine.runtime_present()
+    models_present = omnivoice_cpp_engine.models_present()
+    with _omnivoice_cpp_install_lock:
+        install_progress = dict(_omnivoice_cpp_install_progress)
+        install_running = bool(
+            _omnivoice_cpp_installer_thread is not None
+            and _omnivoice_cpp_installer_thread.is_alive()
+        )
+
+    completed_dependencies = int(runtime_present) + len(completed_models)
+    if runtime_present and models_present:
+        install_progress.update({
+            "status": "complete",
+            "completed": 4,
+            "total": 4,
+            "current": "",
+            "message": "OmniVoice (Vulkan) is ready.",
+        })
+    elif install_running:
+        install_progress["status"] = "installing"
+        install_progress["completed"] = max(
+            completed_dependencies,
+            int(install_progress.get("completed", 0)),
+        )
+    elif install_progress.get("status") == "error":
+        install_progress["completed"] = completed_dependencies
+    else:
+        next_item = (
+            f"OmniVoice runtime {omnivoice_cpp_engine.RUNTIME_VERSION}"
+            if not runtime_present
+            else next((name for name in model_files if name not in completed_models), "")
+        )
+        install_progress.update({
+            "status": "idle",
+            "completed": completed_dependencies,
+            "total": 4,
+            "current": next_item,
+            "message": "Required runtime and model files will download automatically when this provider is activated.",
+        })
+
+    stt_configured = _omnivoice_cpp_stt_available()
+
+    now = time.monotonic()
+    if now - _omnivoice_cpp_voice_counts_cache["at"] > 10.0:
+        missing_voices = _collect_untokenized_voices()
+        _omnivoice_cpp_voice_counts_cache["setup"] = len(missing_voices)
+        _omnivoice_cpp_voice_counts_cache["transcripts"] = sum(
+            1 for path in missing_voices if not _has_reference_transcript(path)
+        )
+        _omnivoice_cpp_voice_counts_cache["tokens"] = sum(
+            1 for path in missing_voices if not _has_omnivoice_audio_codes(path)
+        )
+        _omnivoice_cpp_voice_counts_cache["at"] = now
+
+    return jsonify({
+        "dll_present": omnivoice_cpp_engine.dll_present(),
+        "runtime_present": runtime_present,
+        "runtime_version": omnivoice_cpp_engine.RUNTIME_VERSION,
+        "missing_runtime_files": omnivoice_cpp_engine.missing_runtime_files(),
+        "models_present": models_present,
+        "install_progress": install_progress,
+        "voices_needing_setup": _omnivoice_cpp_voice_counts_cache["setup"],
+        "transcripts_needing_setup": _omnivoice_cpp_voice_counts_cache["transcripts"],
+        "tokens_needing_setup": _omnivoice_cpp_voice_counts_cache["tokens"],
+        # Kept for older config pages that only understood transcript setup.
+        "voices_needing_transcripts": _omnivoice_cpp_voice_counts_cache["transcripts"],
+        "stt_configured": stt_configured,
+        "voice_progress": _omnivoice_cpp_voice_progress_snapshot(),
+    })
+
+
+@config_bp.route('/api/tts/omnivoice-cpp/install', methods=['POST'])
+@config_bp.route('/api/tts/omnivoice-cpp/install-models', methods=['POST'])
+def install_omnivoice_cpp_dependencies():
+    """Install the pinned runtime and models in the background."""
+    if omnivoice_cpp_engine.is_available():
+        return jsonify({"status": "already_installed"}), 200
+    _start_omnivoice_cpp_install()
+    return jsonify({"status": "installing"}), 202
+
+
+@config_bp.route('/api/tts/omnivoice-cpp/restart-worker', methods=['POST'])
+def restart_omnivoice_cpp_worker():
+    """Restart the OmniVoice (Vulkan) worker so device changes take effect.
+
+    GGML_BACKEND is read at worker start, so a GPU change requires a full
+    worker restart: unload, clear the cached provider, then warm up again.
+    """
+    try:
+        omnivoice_cpp_engine.unload()
+        tts_service.clear_provider_cache('omnivoice_cpp')
+        print("[Config] OmniVoice (Vulkan) worker unloaded for manual restart")
+    except Exception as e:
+        print(f"[Config] Error unloading OmniVoice (Vulkan) worker: {e}")
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+    warming_up = False
+    try:
+        if omnivoice_cpp_engine.is_available():
+            def warmup_omnivoice_cpp_after_restart():
+                try:
+                    if omnivoice_cpp_engine.warm_up():
+                        print("[Config] OmniVoice (Vulkan) worker restarted")
+                    else:
+                        print("[Config] OmniVoice (Vulkan) worker restart failed")
+                except Exception as e:
+                    print(f"[Config] OmniVoice (Vulkan) warm-up after restart failed: {e}")
+            threading.Thread(target=warmup_omnivoice_cpp_after_restart, daemon=True).start()
+            warming_up = True
+    except Exception as e:
+        print(f"[Config] Error starting OmniVoice (Vulkan) warm-up: {e}")
+
+    return jsonify({"status": "ok", "warming_up": warming_up})
+
+
 @config_bp.route('/api/tts/vram-status', methods=['GET'])
 def get_vram_status():
     """
@@ -1153,6 +2578,8 @@ def get_vram_status():
     settings = load_settings(raw=True)
     provider = settings.get('tts', {}).get('provider', 'inworld')
     requested_device = request.args.get('device')
+    if provider == 'omnivoice_cpp' or request.args.get('provider') == 'omnivoice_cpp':
+        return _get_omnivoice_cpp_gpu_status(settings, requested_device)
     if provider == 'omnivoice':
         configured_device = settings.get('tts', {}).get('omnivoice', {}).get('device', 'auto')
         server_device = requested_device or configured_device or 'auto'
@@ -1236,64 +2663,68 @@ _omnivoice_setup_progress = {
 
 
 def _is_tokenizable_voice(path) -> bool:
-    """Check if an audio file should be tokenized for OmniVoice.
+    """Use the provider-neutral voice-reference selection rule."""
+    return is_preparable_reference(path)
 
-    Only process:
-    - *_reference_15s.wav (standard 15s references)
-    - Files with no _reference_Xs pattern (e.g. narrator.wav)
 
-    Skip _reference_5s, _reference_60s, etc.
-    """
-    import re
-    stem = path.stem
-    # Check for _reference_Ns pattern
-    match = re.search(r'_reference_(\d+)s$', stem)
-    if match:
-        # Only keep 15s references
-        return match.group(1) == '15'
-    # Also keep plain _reference (no duration suffix)
-    # And files with no _reference pattern at all (e.g. narrator.wav)
-    return True
+def _has_reference_transcript(path) -> bool:
+    try:
+        return bool(read_reference_transcript(path))
+    except Exception:
+        return False
+
+
+def _has_omnivoice_audio_codes(path) -> bool:
+    """Return whether a reference has a readable, structurally valid token cache."""
+    token_path = Path(path).with_suffix(".tokens.pt")
+    if not token_path.is_file():
+        return False
+    try:
+        load_omnivoice_token_cache(token_path)
+        return True
+    except Exception:
+        return False
 
 
 def _count_untokenized_voices() -> int:
-    """Count voice reference files missing .tokens.pt across all subdirs."""
-    from pathlib import Path
-    voice_dir = Path(__file__).resolve().parent.parent / "voice_references"
-    if not voice_dir.exists():
-        return 0
-    audio_exts = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".opus"}
-    count = 0
-    dirs_to_check = [voice_dir] + [d for d in voice_dir.iterdir() if d.is_dir()]
-    for check_dir in dirs_to_check:
-        for path in check_dir.iterdir():
-            if not path.is_file():
-                continue
-            if path.suffix.lower() not in audio_exts:
-                continue
-            if not _is_tokenizable_voice(path):
-                continue
-            if not path.with_suffix(".tokens.pt").exists():
-                count += 1
-    return count
+    """Count local OmniVoice references missing transcript or audio codes."""
+    return len(_collect_untokenized_voices())
 
 
-def _is_torch_installed() -> bool:
-    """Check if torch is fully installed — not just mid-install.
+def _are_omnivoice_deps_installed() -> bool:
+    """Check if all separately installed OmniVoice dependencies are complete.
 
     find_spec('torch') returns True as soon as pip creates the package
     directory, long before the install completes. We verify a late-written
-    DLL exists to confirm the install actually finished.
+    DLL exists to confirm the install actually finished, then check every
+    additional module installed by install_omnivoice.bat.
     """
-    import importlib.util
     spec = importlib.util.find_spec("torch")
     if spec is None:
         return False
     try:
         torch_dir = os.path.dirname(spec.origin)
-        # torch_cpu.dll is one of the last files written during install
-        return os.path.exists(os.path.join(torch_dir, "lib", "torch_cpu.dll"))
+        # torch_cpu.dll is one of the last files written during install.
+        if not os.path.exists(os.path.join(torch_dir, "lib", "torch_cpu.dll")):
+            return False
     except Exception:
+        return False
+
+    required_distributions = (
+        "torch",
+        "torchaudio",
+        "transformers",
+        "accelerate",
+        "safetensors",
+        "soundfile",
+    )
+    try:
+        return all(
+            importlib.util.find_spec(distribution_name) is not None
+            and bool(importlib.metadata.version(distribution_name))
+            for distribution_name in required_distributions
+        )
+    except importlib.metadata.PackageNotFoundError:
         return False
 
 
@@ -1302,7 +2733,7 @@ def get_omnivoice_status():
     """OmniVoice provider status: GPU, deps, model, voices, STT."""
     from utils.gpu_info import get_gpu_info_dict
 
-    deps_installed = _is_torch_installed()
+    deps_installed = _are_omnivoice_deps_installed()
 
     model_loaded = False
     if deps_installed:
@@ -1312,7 +2743,11 @@ def get_omnivoice_status():
         except Exception:
             pass
 
-    voices_needing_setup = _count_untokenized_voices()
+    missing_voices = _collect_untokenized_voices()
+    voices_needing_setup = len(missing_voices)
+    transcripts_needing_setup = sum(
+        1 for path in missing_voices if not _has_reference_transcript(path)
+    )
 
     settings = load_settings(raw=True)
     stt_provider = settings.get('stt', {}).get('provider', 'none')
@@ -1333,6 +2768,7 @@ def get_omnivoice_status():
         "deps_installed": deps_installed,
         "model_loaded": model_loaded,
         "voices_needing_setup": voices_needing_setup,
+        "transcripts_needing_setup": transcripts_needing_setup,
         "stt_configured": stt_configured,
         "setup_progress": _omnivoice_setup_progress,
     })
@@ -1343,7 +2779,7 @@ def install_omnivoice_deps():
     """Launch OmniVoice dependency installer in a visible console window."""
     from utils.gpu_info import is_cuda_compatible
 
-    if _is_torch_installed():
+    if _are_omnivoice_deps_installed():
         return jsonify({"status": "already_installed"}), 200
 
     if not is_cuda_compatible():
@@ -1372,7 +2808,7 @@ def install_omnivoice_deps():
 @config_bp.route('/api/tts/omnivoice/install-status', methods=['GET'])
 def get_omnivoice_install_status():
     """Check if background OmniVoice install has completed."""
-    deps_installed = _is_torch_installed()
+    deps_installed = _are_omnivoice_deps_installed()
     flag_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", ".omnivoice_deps_installed")
     flag_exists = os.path.exists(flag_path)
     return jsonify({
@@ -1383,8 +2819,7 @@ def get_omnivoice_install_status():
 
 
 def _collect_untokenized_voices():
-    """Return list of audio file paths missing .tokens.pt across voice_references/ and subdirs."""
-    from pathlib import Path
+    """Return local OmniVoice references missing transcript or audio codes."""
     voice_dir = Path(__file__).resolve().parent.parent / "voice_references"
     if not voice_dir.exists():
         return []
@@ -1399,59 +2834,191 @@ def _collect_untokenized_voices():
                 continue
             if not _is_tokenizable_voice(path):
                 continue
-            if not path.with_suffix(".tokens.pt").exists():
+            if not _has_omnivoice_audio_codes(path) or not _has_reference_transcript(path):
                 missing.append(path)
     return missing
 
 
 def _transcribe_audio_file(audio_path):
-    """Transcribe an audio file via the configured STT provider. Returns transcript text or None."""
-    import soundfile as sf
-    import numpy as np
-    from pathlib import Path
-    audio_path = Path(audio_path)
-
+    """Read or generate a sidecar through the shared reference pipeline."""
     try:
-        # Read audio file to PCM (soundfile handles wav, flac, ogg, etc.)
-        data, sample_rate = sf.read(str(audio_path), dtype='float32')
-
-        # Convert stereo to mono if needed
-        if data.ndim > 1:
-            data = data.mean(axis=1)
-
-        # Resample to 16kHz (universally supported by all STT providers)
-        target_sr = 16000
-        if sample_rate != target_sr:
-            from scipy.signal import resample_poly
-            from math import gcd
-            g = gcd(sample_rate, target_sr)
-            data = resample_poly(data, target_sr // g, sample_rate // g).astype(np.float32)
-            sample_rate = target_sr
-
-        # Convert to int16 PCM bytes
-        data = (data * 32767).clip(-32768, 32767).astype(np.int16)
-        pcm_bytes = data.tobytes()
-
-        # Use the unified STT service
-        from services import stt
-        provider = stt.get_provider()
-        if provider is None:
-            print(f"[OmniVoice Setup] No STT provider available")
-            return None
-
-        result = provider.transcribe(pcm_bytes, sample_rate)
-        if result.get("success") and result.get("text"):
-            return result["text"]
-        else:
-            print(f"[OmniVoice Setup] STT failed for {audio_path.name}: {result.get('error', 'empty result')}")
-            return None
+        return ensure_reference_transcript(audio_path)
     except Exception as e:
-        print(f"[OmniVoice Setup] Error reading/transcribing {audio_path.name}: {e}")
+        print(f"[OmniVoice Setup] Reference transcription failed for {Path(audio_path).name}: {e}")
         return None
 
 
+def _prepare_omnivoice_cpp_voices(voices):
+    """Create missing transcripts and native-compatible token sidecars."""
+    total = len(voices)
+    succeeded = 0
+    failed = 0
+    transcription_attempts = 0
+    transcription_failures = 0
+    manager = None
+    worker_was_loaded = omnivoice_cpp_engine.is_loaded()
+    try:
+        for index, voice_path in enumerate(voices):
+            needs_transcript = not _has_reference_transcript(voice_path)
+            _update_omnivoice_cpp_voice_progress(
+                status="processing",
+                phase="transcribing" if needs_transcript else "encoding",
+                current=voice_path.stem,
+                completed=index,
+                succeeded=succeeded,
+                failed=failed,
+            )
+
+            transcript = _transcribe_audio_file(voice_path)
+            if not transcript or not str(transcript).strip():
+                failed += 1
+                if needs_transcript:
+                    transcription_failures += 1
+            elif _has_omnivoice_audio_codes(voice_path):
+                succeeded += 1
+            else:
+                _update_omnivoice_cpp_voice_progress(
+                    phase="loading" if manager is None else "encoding",
+                    current=voice_path.stem,
+                )
+                if manager is None:
+                    manager = omnivoice_cpp_engine._get_manager()
+                encoded = manager.pretokenize_voice(
+                    str(voice_path),
+                    ref_text=transcript,
+                )
+                if encoded and _has_omnivoice_audio_codes(voice_path):
+                    succeeded += 1
+                else:
+                    failed += 1
+                    if not omnivoice_cpp_engine.is_loaded():
+                        message = "The OmniVoice worker stopped while encoding voice references."
+                        _update_omnivoice_cpp_voice_progress(
+                            status="error",
+                            phase="",
+                            current="",
+                            completed=index + 1,
+                            failed=failed,
+                            error=message,
+                        )
+                        print(f"[OmniVoiceCpp Setup] {message}")
+                        return
+
+            _update_omnivoice_cpp_voice_progress(
+                completed=index + 1,
+                succeeded=succeeded,
+                failed=failed,
+            )
+
+            if needs_transcript:
+                transcription_attempts += 1
+            if (
+                transcription_attempts >= 5
+                and transcription_failures / transcription_attempts > 0.5
+            ):
+                message = (
+                    f"Stopped after {transcription_failures} of "
+                    f"{transcription_attempts} transcriptions failed. "
+                    "Check the STT configuration."
+                )
+                _update_omnivoice_cpp_voice_progress(
+                    status="error",
+                    phase="",
+                    current="",
+                    error=message,
+                )
+                print(f"[OmniVoiceCpp Setup] {message}")
+                return
+
+        _update_omnivoice_cpp_voice_progress(
+            status="done",
+            phase="",
+            total=total,
+            completed=total,
+            succeeded=succeeded,
+            failed=failed,
+            current="",
+            error="" if failed == 0 else f"{failed} voice reference(s) could not be prepared.",
+        )
+        print(f"[OmniVoiceCpp Setup] Done. Prepared: {succeeded}, Failed: {failed}")
+    except Exception as exc:
+        _update_omnivoice_cpp_voice_progress(
+            status="error",
+            phase="",
+            current="",
+            error=str(exc),
+        )
+        print(f"[OmniVoiceCpp Setup] Preparation failed: {exc}")
+    finally:
+        _omnivoice_cpp_voice_counts_cache["at"] = 0.0
+        if manager is not None and not worker_was_loaded:
+            try:
+                provider_is_active = (
+                    load_settings(raw=True).get("tts", {}).get("provider")
+                    == "omnivoice_cpp"
+                )
+            except Exception:
+                provider_is_active = False
+            try:
+                if not provider_is_active:
+                    omnivoice_cpp_engine.unload()
+            except Exception as exc:
+                print(f"[OmniVoiceCpp Setup] Worker cleanup failed (non-fatal): {exc}")
+
+
+@config_bp.route('/api/tts/omnivoice-cpp/prepare-voices', methods=['POST'])
+def prepare_omnivoice_cpp_voices():
+    """Create missing transcript and token sidecars for native OmniVoice."""
+    global _omnivoice_cpp_voice_progress
+
+    with _omnivoice_cpp_voice_lock:
+        if _omnivoice_cpp_voice_progress.get("status") == "processing":
+            return jsonify({"status": "processing"}), 202
+
+        voices = _collect_untokenized_voices()
+        if not voices:
+            _omnivoice_cpp_voice_progress = {
+                "status": "done",
+                "phase": "",
+                "total": 0,
+                "completed": 0,
+                "succeeded": 0,
+                "failed": 0,
+                "current": "",
+                "error": "",
+            }
+            return jsonify({"status": "already_prepared"}), 200
+
+        needs_transcription = any(
+            not _has_reference_transcript(path) for path in voices
+        )
+        if needs_transcription and not _omnivoice_cpp_stt_available():
+            return jsonify({
+                "status": "error",
+                "error": "The selected STT service is not available or fully configured",
+            }), 400
+
+        _omnivoice_cpp_voice_progress = {
+            "status": "processing",
+            "phase": "transcribing" if needs_transcription else "loading",
+            "total": len(voices),
+            "completed": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "current": "",
+            "error": "",
+        }
+        threading.Thread(
+            target=_prepare_omnivoice_cpp_voices,
+            args=(voices,),
+            daemon=True,
+        ).start()
+
+    return jsonify({"status": "processing", "total": len(voices)}), 202
+
+
 def _pretokenize_all_voices():
-    """Background task: transcribe + tokenize each voice reference in one pass."""
+    """Background task: shared transcript pass, then local audio-code pass."""
     global _omnivoice_setup_progress
 
     missing = _collect_untokenized_voices()
@@ -1461,8 +3028,46 @@ def _pretokenize_all_voices():
         return
 
     total = len(missing)
-    _omnivoice_setup_progress = {"status": "loading", "total": total, "completed": 0, "current": "Loading OmniVoice model..."}
+    needs_transcription = any(not _has_reference_transcript(path) for path in missing)
+    _omnivoice_setup_progress = {
+        "status": "transcribing" if needs_transcription else "processing",
+        "total": total,
+        "completed": 0,
+        "current": "",
+    }
     print(f"[OmniVoice Setup] Processing {total} voice reference(s)...")
+
+    prepared = []
+    failures = 0
+    for index, path in enumerate(missing):
+        _omnivoice_setup_progress["current"] = path.stem
+        transcript = _transcribe_audio_file(path)
+        if transcript:
+            prepared.append({"path": str(path), "ref_text": transcript})
+        else:
+            failures += 1
+        _omnivoice_setup_progress["completed"] = index + 1
+        if index + 1 >= 5 and failures / (index + 1) > 0.5:
+            _omnivoice_setup_progress = {
+                "status": "error", "total": total, "completed": index + 1,
+                "current": "STT is failing for most reference voices.",
+            }
+            return
+
+    voices = [
+        entry for entry in prepared
+        if not _has_omnivoice_audio_codes(entry["path"])
+    ]
+    if not voices:
+        _omnivoice_setup_progress = {
+            "status": "done", "total": total, "completed": total, "current": ""
+        }
+        return
+
+    _omnivoice_setup_progress = {
+        "status": "loading", "total": len(voices), "completed": 0,
+        "current": "Loading OmniVoice model...",
+    }
 
     from services.omnivoice_engine import _get_manager
 
@@ -1473,12 +3078,9 @@ def _pretokenize_all_voices():
         print("[OmniVoice Setup] Failed to start worker")
         return
 
-    # Send all voices to the worker in one batch.
-    # Worker loads encoder once, then for each file: transcribe via STT + tokenize.
-    # Encoder unloaded after the entire batch.
-    _omnivoice_setup_progress = {"status": "processing", "total": total, "completed": 0, "current": ""}
-
-    voices = [{"path": str(p)} for p in missing if not p.with_suffix(".tokens.pt").exists()]
+    # Send transcript-ready voices to the worker in one batch. The worker loads
+    # the audio encoder once and unloads it after the entire batch.
+    _omnivoice_setup_progress = {"status": "processing", "total": len(voices), "completed": 0, "current": ""}
 
     if voices:
         def on_progress(completed, batch_total):
@@ -1488,8 +3090,7 @@ def _pretokenize_all_voices():
                 _omnivoice_setup_progress["current"] = os.path.splitext(os.path.basename(voices[completed]["path"]))[0]
 
         try:
-            results = manager.pretokenize_batch(voices, on_progress=on_progress,
-                                                 transcribe_fn=_transcribe_audio_file)
+            results = manager.pretokenize_batch(voices, on_progress=on_progress)
             succeeded = sum(1 for r in results if r.get("success"))
             failed = len(results) - succeeded
             print(f"[OmniVoice Setup] Done. Tokenized: {succeeded}, Failed: {failed}")
@@ -1504,15 +3105,18 @@ def _pretokenize_all_voices():
 @config_bp.route('/api/tts/omnivoice/pretokenize', methods=['POST'])
 def pretokenize_omnivoice_voices():
     """Process voice references: transcribe via STT, then tokenize via OmniVoice encoder."""
-    if not _is_torch_installed():
+    if not _are_omnivoice_deps_installed():
         return jsonify({"status": "error", "error": "Dependencies not installed"}), 400
 
+    missing_voices = _collect_untokenized_voices()
+    needs_transcription = any(
+        not _has_reference_transcript(path) for path in missing_voices
+    )
     settings = load_settings(raw=True)
     stt_provider = settings.get('stt', {}).get('provider', 'none')
-    if stt_provider == 'none':
+    if needs_transcription and stt_provider == 'none':
         return jsonify({"status": "error", "error": "No STT service configured"}), 400
 
-    import threading
     threading.Thread(target=_pretokenize_all_voices, daemon=True).start()
     return jsonify({"status": "processing"}), 202
 
@@ -1520,10 +3124,6 @@ def pretokenize_omnivoice_voices():
 @config_bp.route('/api/server/restart', methods=['POST'])
 def restart_server():
     """Restart the server. Writes restart flag and exits; start_server.bat re-launches."""
-    import sys
-    import threading
-    import time
-
     print("[Server] Restart requested...")
     # Write restart flag
     restart_flag = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", ".server_restart")
