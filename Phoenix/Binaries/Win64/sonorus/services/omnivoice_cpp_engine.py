@@ -7,9 +7,9 @@ process-manager pattern as omnivoice_engine.py / pocket_tts_onnx.py, but with
 no torch anywhere: the worker talks to omnivoice.dll via ctypes, so it runs
 on any Vulkan GPU (or CPU) without CUDA.
 
-The ctypes structs below mirror omnivoice.h (OV_ABI_VERSION 4) field for
-field.  Defaults are always populated via ov_init_default_params_v4 /
-ov_tts_default_params_v4 rather than hand-filled.
+The ctypes structs below mirror omnivoice.h (OV_ABI_VERSION 5) field for
+field.  Defaults are always populated via ov_init_default_params_v5 /
+ov_tts_default_params_v5 rather than hand-filled.
 """
 import ctypes as C
 import gc
@@ -76,7 +76,16 @@ UPSCALER_URL = os.environ.get(
 )
 SAMPLE_RATE = 24_000  # OmniVoice native sample rate (codec output)
 OUTPUT_SAMPLE_RATE = 48_000  # VoxCPM2 AudioVAE upscaled output
-OV_ABI_VERSION = 4
+OV_ABI_VERSION = 5
+
+# enum ov_encoder_mode. The voice encoder (HuBERT + semantic/DAC encoders) is
+# ~470 MB of VRAM and is only needed to turn a reference WAV into RVQ codes.
+# Every voice is pre-processed once and its codes cached as a .tokens.pt
+# sidecar, so ON_DEMAND keeps it out of VRAM for the whole gameplay session
+# and reloads it only when a new voice needs encoding.
+OV_ENCODER_EAGER = 0
+OV_ENCODER_LAZY = 1
+OV_ENCODER_ON_DEMAND = 2
 
 _SONORUS_ROOT = Path(__file__).resolve().parent.parent
 RUNTIME_ROOT = _SONORUS_ROOT / "omnivoice_cpp"
@@ -84,7 +93,7 @@ BIN_DIR = RUNTIME_ROOT / "bin"
 LICENSE_DIR = RUNTIME_ROOT / "licenses"
 MODEL_DIR = RUNTIME_ROOT / "models"
 
-RUNTIME_VERSION = "1.0.0"
+RUNTIME_VERSION = "1.1.0"
 RUNTIME_RELEASE_TAG = f"sonorus-runtime-v{RUNTIME_VERSION}"
 RUNTIME_ARCHIVE_FILENAME = (
     f"omnivoice-runtime-windows-x64-avx2-vulkan-v{RUNTIME_VERSION}.zip"
@@ -93,14 +102,14 @@ RUNTIME_URL = (
     "https://github.com/Jrjy3/omnivoice.cpp/releases/download/"
     f"{RUNTIME_RELEASE_TAG}/{RUNTIME_ARCHIVE_FILENAME}"
 )
-RUNTIME_ARCHIVE_EXPECTED_BYTES = 16_479_008
-RUNTIME_ARCHIVE_SHA256 = "a1fd71977e424c110a0ff86e70a37b87022128668709d3c6fb9ed0f9275dbbe9"
+RUNTIME_ARCHIVE_EXPECTED_BYTES = 16_389_466
+RUNTIME_ARCHIVE_SHA256 = "e8ed705fc441fe8276f50c42adf701f7f86d874be83d6681efe530582cd3773c"
 RUNTIME_FILE_METADATA = {
-    "bin/omnivoice.dll": (396_800, "48e56bf3e79a4bab49d6af70a9f8844d087e7dc8b64ca01f9a650dba6f459b6b"),
-    "bin/ggml.dll": (68_608, "4dfc4bb24b86bc3d7703e35b7f08bf677c0bf2e2bfe0690921747d5224ff9e2d"),
-    "bin/ggml-base.dll": (666_112, "d3d1efc20917361aa8eec9cd569bc6b81d5b96a72f4e47d3a063443156bb3df1"),
-    "bin/ggml-cpu.dll": (812_032, "cfec1bf4e9fbe7d0ced6702150498e4205c57de7a8e2ed37f344f601d88743a3"),
-    "bin/ggml-vulkan.dll": (50_652_160, "b210b54aea01ba7079e38fc0e44edb64d49c236c12db6449e42b26d124b2185e"),
+    "bin/omnivoice.dll": (401_408, "7de3ca56fc60f6d40b6843c23205ff0f21c19efae090fbf05fe79fb1461035c5"),
+    "bin/ggml.dll": (68_608, "d792fc740e16ade5c9486df2a3f6eb4d33f50442bb820773d4a651353d55308c"),
+    "bin/ggml-base.dll": (666_112, "d11206789750a5dbb3a1342c5d8b42fa68a36c23386b7e8d6847b800e5a0b441"),
+    "bin/ggml-cpu.dll": (812_032, "91446374398d2d86c3440a5d4c9089bbf239568317faa1b57edd098db074d97a"),
+    "bin/ggml-vulkan.dll": (50_652_160, "a3b6d5da334555c9e6d4a3fd9a8d2770a81586eb0e6216a60a58c4cbb1032079"),
     "licenses/ggml.LICENSE": (1_099, "bcd8ec749126d45cb06737d0690295d73df4b6e7e194205bcf91190368f27285"),
     "licenses/omnivoice.cpp.LICENSE": (1_087, "cddbecd5db98ec5bd44af3e7221b6d44c3e9fed1c92940a3be5b0080c9b86475"),
 }
@@ -149,8 +158,8 @@ try:
     lib = ctypes.CDLL(dll_path)
     values = {}
     for symbol, key in (
-        ("ov_init_default_params_v4", "init_abi"),
-        ("ov_tts_default_params_v4", "tts_abi"),
+        ("ov_init_default_params_v5", "init_abi"),
+        ("ov_tts_default_params_v5", "tts_abi"),
     ):
         try:
             fn = getattr(lib, symbol)
@@ -341,7 +350,7 @@ def _run_runtime_abi_probe(dll_path: Path, bin_dir: Path) -> tuple[Optional[str]
 
 
 def _probe_runtime_abi(dll_path: Path, bin_dir: Optional[Path] = None) -> Optional[str]:
-    """Return None for an ABI-v4 runtime, otherwise a user-facing error."""
+    """Return None for an ABI-v5 runtime, otherwise a user-facing error."""
     bin_dir = bin_dir or BIN_DIR
     if bin_dir.resolve() != BIN_DIR.resolve():
         return _run_runtime_abi_probe(dll_path, bin_dir)[0]
@@ -799,6 +808,7 @@ class OvInitParams(C.Structure):
         ("use_fa", C.c_bool),
         ("clamp_fp16", C.c_bool),
         ("upscaler_path", C.c_char_p),
+        ("encoder_mode", C.c_int),
     ]
 
 
@@ -857,23 +867,23 @@ def _bind_dll(lib):
     lib.ov_last_error.restype = C.c_char_p
     lib.ov_last_error.argtypes = []
     try:
-        init_defaults_v4 = lib.ov_init_default_params_v4
+        init_defaults_v5 = lib.ov_init_default_params_v5
     except AttributeError as exc:
         raise RuntimeError(
-            "The installed omnivoice.dll does not expose ov_init_default_params_v4; "
-            "install the ABI v4 runtime required for 48 kHz upscaling"
+            "The installed omnivoice.dll does not expose ov_init_default_params_v5; "
+            "install the ABI v5 runtime with the 'Download OmniVoice Now' button"
         ) from exc
-    init_defaults_v4.restype = None
-    init_defaults_v4.argtypes = [C.POINTER(OvInitParams)]
+    init_defaults_v5.restype = None
+    init_defaults_v5.argtypes = [C.POINTER(OvInitParams)]
     try:
-        tts_defaults_v4 = lib.ov_tts_default_params_v4
+        tts_defaults_v5 = lib.ov_tts_default_params_v5
     except AttributeError as exc:
         raise RuntimeError(
-            "The installed omnivoice.dll does not expose ov_tts_default_params_v4; "
-            "install the ABI v4 runtime required for 48 kHz upscaling"
+            "The installed omnivoice.dll does not expose ov_tts_default_params_v5; "
+            "install the ABI v5 runtime with the 'Download OmniVoice Now' button"
         ) from exc
-    tts_defaults_v4.restype = None
-    tts_defaults_v4.argtypes = [C.POINTER(OvTtsParams)]
+    tts_defaults_v5.restype = None
+    tts_defaults_v5.argtypes = [C.POINTER(OvTtsParams)]
     lib.ov_init.restype = C.c_void_p          # opaque struct ov_context *
     lib.ov_init.argtypes = [C.POINTER(OvInitParams)]
     lib.ov_free.restype = None
@@ -886,6 +896,10 @@ def _bind_dll(lib):
     lib.ov_extract_voice_ref.argtypes = [C.c_void_p, C.POINTER(C.c_float), C.c_int, C.POINTER(OvVoiceRef)]
     lib.ov_voice_ref_free.restype = None
     lib.ov_voice_ref_free.argtypes = [C.POINTER(OvVoiceRef)]
+    lib.ov_release_voice_encoder.restype = None
+    lib.ov_release_voice_encoder.argtypes = [C.c_void_p]
+    lib.ov_voice_encoder_bytes.restype = C.c_uint64
+    lib.ov_voice_encoder_bytes.argtypes = [C.c_void_p]
     return lib
 
 
@@ -954,22 +968,27 @@ def _omnivoice_cpp_worker_main(
         upscaler_path = str(config["upscaler_path"]).encode("utf-8")
 
         init_params = OvInitParams()
-        lib.ov_init_default_params_v4(C.byref(init_params))
+        lib.ov_init_default_params_v5(C.byref(init_params))
         if init_params.abi_version != OV_ABI_VERSION:
             raise RuntimeError(
                 "Incompatible omnivoice.dll ABI "
-                f"({init_params.abi_version}; Sonorus requires {OV_ABI_VERSION} for 48 kHz upscaling)"
+                f"({init_params.abi_version}; Sonorus requires {OV_ABI_VERSION})"
             )
         init_params.model_path = model_path
         init_params.codec_path = codec_path
         init_params.upscaler_path = upscaler_path
+        # Voices are pre-processed once into cached RVQ codes, so the ~470 MB
+        # voice encoder is dead weight in VRAM for the rest of the session.
+        # ON_DEMAND reloads it only for a voice that has no cached codes yet.
+        init_params.encoder_mode = OV_ENCODER_ON_DEMAND
 
         print(f"[OmniVoiceCpp] Loading models from {config['model_path']}...")
         response_queue.put({"type": "loading", "message": "Loading OmniVoice and 48 kHz upscaler GGUF models..."})
         ctx = lib.ov_init(C.byref(init_params))
         if not ctx:
             raise RuntimeError(f"ov_init failed: {_last_error()}")
-        print("[OmniVoiceCpp] Model loaded.")
+        encoder_mb = int(lib.ov_voice_encoder_bytes(ctx)) / (1024 * 1024)
+        print(f"[OmniVoiceCpp] Model loaded. Voice encoder resident: {encoder_mb:.0f} MB")
     except Exception as exc:
         traceback.print_exc()
         response_queue.put({"type": "error", "error": str(exc)})
@@ -1191,7 +1210,7 @@ def _omnivoice_cpp_worker_main(
                 ref = _get_voice_ref(voice_path, ref_text=ref_text)
 
                 params = OvTtsParams()
-                lib.ov_tts_default_params_v4(C.byref(params))
+                lib.ov_tts_default_params_v5(C.byref(params))
                 if params.abi_version != OV_ABI_VERSION:
                     raise RuntimeError(
                         "Incompatible omnivoice.dll TTS ABI "
@@ -1265,6 +1284,10 @@ def _omnivoice_cpp_worker_main(
                     ref_text=msg.get("ref_text"),
                     require_persist=True,
                 )
+                # Belt and braces: ON_DEMAND already released the encoder when
+                # the encode returned, but an explicit release keeps this
+                # correct if the mode is ever changed to LAZY.
+                lib.ov_release_voice_encoder(ctx)
                 response_queue.put({"type": "pretokenize_done", "success": True})
             except Exception as exc:
                 traceback.print_exc()
