@@ -3,7 +3,7 @@ Shared constants for Sonorus modules.
 """
 
 # Version
-VERSION = "1.0.8-p6"
+VERSION = "1.0.8-p7"
 
 # Cooked package/container ID for the Sonorus Blueprint mod package.
 SONORUS_MOD_PACKAGE_ID = 0xA9158FE5FDBBC70D

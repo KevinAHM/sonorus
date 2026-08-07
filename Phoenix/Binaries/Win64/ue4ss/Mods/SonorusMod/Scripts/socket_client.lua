@@ -26,7 +26,6 @@ local SocketClient = {}
 local client = nil
 local buffer = ""
 local SOCKET_PORT_FILE = "sonorus\\lua_socket.port"
-local SOCKET_PORT_MAX_AGE = 3
 
 -- Send queue to prevent interleaving (Lua callbacks can interleave)
 local sendQueue = {}
@@ -303,14 +302,7 @@ local function ReadLiveServerPort()
     if not ok or type(discovery) ~= "table" then return nil end
 
     local port = tonumber(discovery.port)
-    local updatedAt = tonumber(discovery.updated_at)
     if not port or port < 1 or port > 65535 or port ~= math.floor(port) then
-        return nil
-    end
-    if not updatedAt then return nil end
-
-    local age = os.time() - updatedAt
-    if age < -2 or age > SOCKET_PORT_MAX_AGE then
         return nil
     end
     return port

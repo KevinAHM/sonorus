@@ -77,12 +77,6 @@ UPSCALER_URL = os.environ.get(
 SAMPLE_RATE = 24_000  # OmniVoice native sample rate (codec output)
 OUTPUT_SAMPLE_RATE = 48_000  # VoxCPM2 AudioVAE upscaled output
 OV_ABI_VERSION = 5
-
-# enum ov_encoder_mode. The voice encoder (HuBERT + semantic/DAC encoders) is
-# ~470 MB of VRAM and is only needed to turn a reference WAV into RVQ codes.
-# Every voice is pre-processed once and its codes cached as a .tokens.pt
-# sidecar, so ON_DEMAND keeps it out of VRAM for the whole gameplay session
-# and reloads it only when a new voice needs encoding.
 OV_ENCODER_EAGER = 0
 OV_ENCODER_LAZY = 1
 OV_ENCODER_ON_DEMAND = 2
@@ -777,7 +771,7 @@ def _download_upscaler_url(url: str, destination: Path) -> None:
 
 
 # ============================================================================
-# ctypes ABI (mirrors omnivoice.h, OV_ABI_VERSION 4)
+# ctypes ABI (mirrors omnivoice.h, OV_ABI_VERSION 5)
 # ============================================================================
 
 # enum ov_status
@@ -871,7 +865,7 @@ def _bind_dll(lib):
     except AttributeError as exc:
         raise RuntimeError(
             "The installed omnivoice.dll does not expose ov_init_default_params_v5; "
-            "install the ABI v5 runtime with the 'Download OmniVoice Now' button"
+            "install the ABI v5 runtime required for encoder unloading"
         ) from exc
     init_defaults_v5.restype = None
     init_defaults_v5.argtypes = [C.POINTER(OvInitParams)]
@@ -880,7 +874,7 @@ def _bind_dll(lib):
     except AttributeError as exc:
         raise RuntimeError(
             "The installed omnivoice.dll does not expose ov_tts_default_params_v5; "
-            "install the ABI v5 runtime with the 'Download OmniVoice Now' button"
+            "install the ABI v5 runtime required for encoder unloading"
         ) from exc
     tts_defaults_v5.restype = None
     tts_defaults_v5.argtypes = [C.POINTER(OvTtsParams)]
@@ -972,23 +966,24 @@ def _omnivoice_cpp_worker_main(
         if init_params.abi_version != OV_ABI_VERSION:
             raise RuntimeError(
                 "Incompatible omnivoice.dll ABI "
-                f"({init_params.abi_version}; Sonorus requires {OV_ABI_VERSION})"
+                f"({init_params.abi_version}; Sonorus requires {OV_ABI_VERSION} for 48 kHz upscaling)"
             )
         init_params.model_path = model_path
         init_params.codec_path = codec_path
         init_params.upscaler_path = upscaler_path
-        # Voices are pre-processed once into cached RVQ codes, so the ~470 MB
-        # voice encoder is dead weight in VRAM for the rest of the session.
-        # ON_DEMAND reloads it only for a voice that has no cached codes yet.
-        init_params.encoder_mode = OV_ENCODER_ON_DEMAND
+        # Keep the encoder out of VRAM until a reference actually needs
+        # encoding. Batch preprocessing explicitly retains it across voices.
+        init_params.encoder_mode = OV_ENCODER_LAZY
 
         print(f"[OmniVoiceCpp] Loading models from {config['model_path']}...")
         response_queue.put({"type": "loading", "message": "Loading OmniVoice and 48 kHz upscaler GGUF models..."})
         ctx = lib.ov_init(C.byref(init_params))
         if not ctx:
             raise RuntimeError(f"ov_init failed: {_last_error()}")
-        encoder_mb = int(lib.ov_voice_encoder_bytes(ctx)) / (1024 * 1024)
-        print(f"[OmniVoiceCpp] Model loaded. Voice encoder resident: {encoder_mb:.0f} MB")
+        print(
+            "[OmniVoiceCpp] Model loaded "
+            f"(voice encoder resident: {int(lib.ov_voice_encoder_bytes(ctx)):,} bytes)."
+        )
     except Exception as exc:
         traceback.print_exc()
         response_queue.put({"type": "error", "error": str(exc)})
@@ -1182,6 +1177,7 @@ def _omnivoice_cpp_worker_main(
     # Startup complete
     # ------------------------------------------------------------------
     response_queue.put({"type": "ready"})
+    voice_encoder_batch_active = False
 
     # ------------------------------------------------------------------
     # Main loop
@@ -1275,6 +1271,9 @@ def _omnivoice_cpp_worker_main(
             except Exception as exc:
                 traceback.print_exc()
                 response_queue.put({"type": "error", "error": str(exc)})
+            finally:
+                if not voice_encoder_batch_active:
+                    lib.ov_release_voice_encoder(ctx)
 
         # ---- pretokenize (warm the RVQ code cache for a voice) ---------
         elif msg_type == "pretokenize":
@@ -1284,14 +1283,26 @@ def _omnivoice_cpp_worker_main(
                     ref_text=msg.get("ref_text"),
                     require_persist=True,
                 )
-                # Belt and braces: ON_DEMAND already released the encoder when
-                # the encode returned, but an explicit release keeps this
-                # correct if the mode is ever changed to LAZY.
-                lib.ov_release_voice_encoder(ctx)
                 response_queue.put({"type": "pretokenize_done", "success": True})
             except Exception as exc:
                 traceback.print_exc()
                 response_queue.put({"type": "pretokenize_done", "success": False, "error": str(exc)})
+            finally:
+                if not voice_encoder_batch_active:
+                    lib.ov_release_voice_encoder(ctx)
+
+        # ---- voice encoder batch lifecycle ---------------------------
+        elif msg_type == "voice_encoder_batch_start":
+            voice_encoder_batch_active = True
+            response_queue.put({"type": "voice_encoder_batch_started"})
+
+        elif msg_type == "voice_encoder_batch_end":
+            voice_encoder_batch_active = False
+            lib.ov_release_voice_encoder(ctx)
+            response_queue.put({
+                "type": "voice_encoder_batch_ended",
+                "encoder_bytes": int(lib.ov_voice_encoder_bytes(ctx)),
+            })
 
         # ---- clear_voice_prompt ----------------------------------------
         elif msg_type == "clear_voice_prompt":
@@ -1312,6 +1323,9 @@ def _omnivoice_cpp_worker_main(
                 response_queue.put({"type": "warmup_done"})
             except Exception as exc:
                 response_queue.put({"type": "warmup_done", "error": str(exc)})
+            finally:
+                if not voice_encoder_batch_active:
+                    lib.ov_release_voice_encoder(ctx)
 
         else:
             print(f"[OmniVoiceCpp] Unknown message type: {msg_type}")
@@ -1651,6 +1665,39 @@ class OmniVoiceCppProcessManager:
     # ------------------------------------------------------------------
     # Pretokenize / cache management
     # ------------------------------------------------------------------
+
+    @_serialized_worker_io
+    def begin_voice_encoder_batch(self) -> bool:
+        """Keep the lazily loaded encoder resident across preprocessing calls."""
+        if not self.ensure_started():
+            return False
+        handles = self._submit_request({"type": "voice_encoder_batch_start"})
+        if handles is None:
+            return False
+        response = self._await_response(*handles, timeout=10.0)
+        return bool(
+            response
+            and response.get("type") == "voice_encoder_batch_started"
+        )
+
+    @_serialized_worker_io
+    def end_voice_encoder_batch(self) -> bool:
+        """Release encoder memory without starting a worker that has stopped."""
+        if not self.is_ready():
+            return False
+        handles = self._submit_request({"type": "voice_encoder_batch_end"})
+        if handles is None:
+            return False
+        response = self._await_response(*handles, timeout=10.0)
+        if not response or response.get("type") != "voice_encoder_batch_ended":
+            return False
+        encoder_bytes = int(response.get("encoder_bytes", 0))
+        if encoder_bytes:
+            print(
+                "[OmniVoiceCpp] Voice encoder release left "
+                f"{encoder_bytes:,} bytes resident"
+            )
+        return encoder_bytes == 0
 
     @_serialized_worker_io
     def pretokenize_voice(self, voice_path: str, ref_text: Optional[str] = None) -> bool:

@@ -2856,6 +2856,7 @@ def _prepare_omnivoice_cpp_voices(voices):
     transcription_attempts = 0
     transcription_failures = 0
     manager = None
+    encoder_batch_started = False
     worker_was_loaded = omnivoice_cpp_engine.is_loaded()
     try:
         for index, voice_path in enumerate(voices):
@@ -2883,6 +2884,19 @@ def _prepare_omnivoice_cpp_voices(voices):
                 )
                 if manager is None:
                     manager = omnivoice_cpp_engine._get_manager()
+                    encoder_batch_started = manager.begin_voice_encoder_batch()
+                    if not encoder_batch_started:
+                        message = "The OmniVoice worker could not enter voice preprocessing mode."
+                        _update_omnivoice_cpp_voice_progress(
+                            status="error",
+                            phase="",
+                            current="",
+                            completed=index,
+                            failed=failed,
+                            error=message,
+                        )
+                        print(f"[OmniVoiceCpp Setup] {message}")
+                        return
                 encoded = manager.pretokenize_voice(
                     str(voice_path),
                     ref_text=transcript,
@@ -2951,6 +2965,16 @@ def _prepare_omnivoice_cpp_voices(voices):
         print(f"[OmniVoiceCpp Setup] Preparation failed: {exc}")
     finally:
         _omnivoice_cpp_voice_counts_cache["at"] = 0.0
+        if manager is not None:
+            try:
+                released = manager.end_voice_encoder_batch()
+                if encoder_batch_started and not released:
+                    print(
+                        "[OmniVoiceCpp Setup] Voice encoder release did not complete; "
+                        "the worker may have stopped"
+                    )
+            except Exception as exc:
+                print(f"[OmniVoiceCpp Setup] Voice encoder cleanup failed: {exc}")
         if manager is not None and not worker_was_loaded:
             try:
                 provider_is_active = (
